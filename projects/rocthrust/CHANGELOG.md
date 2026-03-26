@@ -9,6 +9,10 @@ Documentation for rocThrust available at
 
 * gfx1250 support
 
+### Changed
+
+* rocThrust now searches for an existing SQLite3 system library first by default.  SQLITE_USE_SYSTEM_PACKAGE can be set to OFF to force a local download of SQLite3.  The minimum required version of SQLite3 is 3.51.3.
+
 ## Since last release ROCm 7.12
 
 ### Resolved issues
@@ -21,7 +25,6 @@ Documentation for rocThrust available at
 ### Added
 
 * If you are using rocThrust on the host-side only, you can now build using g++ or non-HIP-aware clang++. To configure rocThrust in this-way, set the new CMake option `ROCTHRUST_DEVICE_SYSTEM` to `CPP` (other options include `HIP`, `CUDA`, `OpenMP`, and `TBB`), and set `CXX` to g++ or clang++. Then install rocThrust via `make install`. When you compile your application, don't forget to include the rocThrust include directory (`-I /opt/rocm/include`), since this won't happen automatically like it does when building with hipcc. Note that currently, rocThrust tests and benchmarks cannot be built when configuring rocThrust for host-side-only use.
-
 * Added `generate_resource_spec.cpp` to the test directory and built as a new target by CMake. It generates the resource spec file required by CTest when running tests in parallel.
 
 ### Changed
