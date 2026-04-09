@@ -59,6 +59,7 @@ add_executable(
     descriptors/TestBatchnormInferenceVarianceExtOperationFromNode.cpp
     descriptors/TestGraphDescriptorBatchnormInferenceVarianceExt.cpp
     descriptors/TestGraphDescriptorLayernorm.cpp
+    descriptors/TestGraphDescriptorLayernormBackward.cpp
     descriptors/TestGraphDescriptorOps.cpp
     descriptors/TestGraphDescriptorLifting.cpp
     descriptors/TestGraphDescriptorPointwise.cpp
@@ -67,6 +68,8 @@ add_executable(
     descriptors/TestConvolutionBwdOperationFromNode.cpp
     descriptors/TestLayernormOperationDescriptor.cpp
     descriptors/TestLayernormOperationFromNode.cpp
+    descriptors/TestLayernormBackwardOperationDescriptor.cpp
+    descriptors/TestLayernormBackwardOperationFromNode.cpp
     descriptors/TestPointwiseOperationDescriptor.cpp
     descriptors/TestPointwiseOperationFromNode.cpp
     descriptors/TestReductionOperationDescriptor.cpp

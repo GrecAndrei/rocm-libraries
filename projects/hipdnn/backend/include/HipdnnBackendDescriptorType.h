@@ -304,4 +304,11 @@ typedef enum
      */
     HIPDNN_BACKEND_OPERATION_RMSNORM_BACKWARD_DESCRIPTOR_EXT = 33,
 
+    /**
+     * @brief Layernorm backward operation descriptor
+     *
+     * Represents a backward layer normalization operation with output gradient (DY), input (X), scale, mean, inverse variance, input gradient (DX), scale gradient and mean gradient tensors, a backward layernorm operator, and a compute data type
+     */
+    HIPDNN_BACKEND_OPERATION_LAYERNORM_BACKWARD_DESCRIPTOR = 34,
+
 } hipdnnBackendDescriptorType_t;

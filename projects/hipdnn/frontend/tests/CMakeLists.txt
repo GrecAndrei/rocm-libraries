@@ -52,6 +52,9 @@ add_executable(
     TestKnobUnpacker.cpp
     TestLayernormAttributes.cpp
     TestLayerNormNode.cpp
+    TestLayernormBackwardAttributes.cpp
+    TestLayernormBackwardNode.cpp
+    TestGraphLayernormBackward.cpp
     TestMatmulAttributes.cpp
     TestMatmulNode.cpp
     TestNode.cpp
