@@ -30,6 +30,7 @@
 #include <iostream>
 #include <random>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "ProgramOptions.hpp"
@@ -118,6 +119,14 @@ namespace
     };
 #endif
 
+#ifndef _WIN32
+    template <>
+    struct TypeTraits<TensileLite::Float4x2>
+    {
+        static constexpr rocisa::DataType value = rocisa::DataType::Float4;
+    };
+#endif
+
     // A slow, easy to understand, golden reference implementation of GEMM.
     // Used strictly for validating the correctness of the optimized path.
     // Calculates, for each element (i, j):
@@ -129,7 +138,12 @@ namespace
     //                  * scaleAlphaVec[factorDim == 0 ? i : j]  (if scaleAlphaVec != nullptr)
     //
     // scaleA is always indexed by row (M), scaleB always by col (N).
-    // factorDim only affects scaleAlphaVec: 0 = row-dim (length M), 1 = col-dim (length N).   
+    // factorDim only affects scaleAlphaVec: 0 = row-dim (length M), 1 = col-dim (length N).
+    //
+    // When mxBlock > 0 and mxScaleA/mxScaleB are non-null, the K-reduction is
+    // block-structured: accumulate mxBlock products, then scale by the MX
+    // scale factors before adding to the running sum.
+
     // Quantize a value through `Narrow`, then return as float. This mirrors
     // what the GPU MFMA path does when storage is wider than the MAC input
     // type (e.g. Half stored, F8 used in MFMA).
@@ -170,14 +184,22 @@ namespace
                          bool           transB,
                          float          alpha,
                          float          beta,
-                         const float*   biasVec        = nullptr,
-                         const float*   scaleAlphaVec  = nullptr,
-                         ActivationType activation     = ActivationType::None,
-                         const float*   scaleAVec      = nullptr,
-                         const float*   scaleBVec      = nullptr,
-                         int            factorDim      = 0,
-                         QuantizeFn     quantizeA      = nullptr,
-                         QuantizeFn     quantizeB      = nullptr)
+                         const float*   biasVec       = nullptr,
+                         const float*   scaleAlphaVec = nullptr,
+                         ActivationType activation    = ActivationType::None,
+                         const float*   scaleAVec     = nullptr,
+                         const float*   scaleBVec     = nullptr,
+                         int            factorDim     = 0,
+                         QuantizeFn     quantizeA     = nullptr,
+                         QuantizeFn     quantizeB     = nullptr,
+#ifndef _WIN32
+                         const MXScale* mxScaleA      = nullptr,
+                         const MXScale* mxScaleB      = nullptr,
+#else
+                         const void*    mxScaleA      = nullptr,
+                         const void*    mxScaleB      = nullptr,
+#endif
+                         int            mxBlock       = 0)
     {
 
         switch(activation)
@@ -195,19 +217,59 @@ namespace
         size_t strideBK = transB ? n : 1;
         size_t strideBN = transB ? 1 : k;
 
+        // MX scale tensor layout (column-major, tight strides):
+        //   !transA: mxsa = {m, k/mxBlock}, idx = row + block * m
+        //    transA: mxsa = {k/mxBlock, m}, idx = block + row * (k/mxBlock)
+        //   !transB: mxsb = {k/mxBlock, n}, idx = block + col * (k/mxBlock)
+        //    transB: mxsb = {n, k/mxBlock}, idx = col + block * n
+        size_t kBlocks = (mxBlock > 0) ? k / static_cast<size_t>(mxBlock) : 0;
+
         for(size_t i = 0; i < m; i++)
         {
             for(size_t j = 0; j < n; j++)
             {
                 float sum = 0.0f;
-                for(size_t l = 0; l < k; l++)
+
+#ifndef _WIN32
+                if(mxBlock > 0 && mxScaleA && mxScaleB)
                 {
-                    float aVal = a[i * strideAM + l * strideAK];
-                    float bVal = b[l * strideBK + j * strideBN];
-                    if(quantizeA) aVal = quantizeA(aVal);
-                    if(quantizeB) bVal = quantizeB(bVal);
-                    sum += aVal * bVal;
+                    for(size_t blk = 0; blk < kBlocks; blk++)
+                    {
+                        float blockSum = 0.0f;
+                        size_t lBase   = blk * static_cast<size_t>(mxBlock);
+                        for(size_t t = 0; t < static_cast<size_t>(mxBlock); t++)
+                        {
+                            size_t l    = lBase + t;
+                            float  aVal = a[i * strideAM + l * strideAK];
+                            float  bVal = b[l * strideBK + j * strideBN];
+                            if(quantizeA) aVal = quantizeA(aVal);
+                            if(quantizeB) bVal = quantizeB(bVal);
+                            blockSum += aVal * bVal;
+                        }
+
+                        size_t mxsaIdx = transA ? (blk + i * kBlocks)
+                                                : (i + blk * m);
+                        size_t mxsbIdx = transB ? (j + blk * n)
+                                                : (blk + j * kBlocks);
+
+                        float mxScale = static_cast<float>(mxScaleA[mxsaIdx])
+                                      * static_cast<float>(mxScaleB[mxsbIdx]);
+                        sum += blockSum * mxScale;
+                    }
                 }
+                else
+#endif
+                {
+                    for(size_t l = 0; l < k; l++)
+                    {
+                        float aVal = a[i * strideAM + l * strideAK];
+                        float bVal = b[l * strideBK + j * strideBN];
+                        if(quantizeA) aVal = quantizeA(aVal);
+                        if(quantizeB) bVal = quantizeB(bVal);
+                        sum += aVal * bVal;
+                    }
+                }
+
                 float effectiveAlpha = alpha;
                 if(scaleAVec)
                     effectiveAlpha *= scaleAVec[i];
@@ -253,7 +315,8 @@ int runGemm(size_t         m,
             const std::string& useScaleAB,
             int                factorDim,
             rocisa::DataType   computeInputA = rocisa::DataType::None,
-            rocisa::DataType   computeInputB = rocisa::DataType::None)
+            rocisa::DataType   computeInputB = rocisa::DataType::None,
+            int                mxBlock       = 0)
 {
     constexpr rocisa::DataType dtypeEnumA = TypeTraits<InputAT>::value;
     constexpr rocisa::DataType dtypeEnumB = TypeTraits<InputBT>::value;
@@ -261,6 +324,35 @@ int runGemm(size_t         m,
     if(computeInputB == rocisa::DataType::None) computeInputB = dtypeEnumB;
     static_assert(std::is_same<AccumulateT, float>::value,
                   "Currently only float accumulation is supported");
+
+#ifndef _WIN32
+    constexpr bool isFP4 = std::is_same_v<InputAT, Float4x2> && std::is_same_v<InputBT, Float4x2>;
+#else
+    constexpr bool isFP4 = false;
+#endif
+
+    if constexpr(!isFP4)
+        mxBlock = 0;
+
+    if constexpr(isFP4)
+    {
+        if(mxBlock > 0)
+        {
+            if(k < static_cast<size_t>(mxBlock))
+            {
+                std::cerr << "Error: K (" << k << ") must be >= mxBlock (" << mxBlock << ")"
+                          << std::endl;
+                return 1;
+            }
+            if(k % static_cast<size_t>(mxBlock) != 0)
+            {
+                std::cerr << "Error: K (" << k << ") must be a multiple of mxBlock (" << mxBlock
+                          << ")" << std::endl;
+                return 1;
+            }
+        }
+        tryFastPath = false;
+    }
 
     // Calculate strides assuming standard column-major packed storage
     size_t lda        = transA ? k : m;
@@ -275,7 +367,7 @@ int runGemm(size_t         m,
                                                dtypeEnumA,
                                                dtypeEnumB,
                                                rocisa::DataType::Float,
-                                               rocisa::DataType::Float, // A, B, C, D types
+                                               rocisa::DataType::Float,
                                                m,
                                                n,
                                                k,
@@ -296,8 +388,25 @@ int runGemm(size_t         m,
     contraction.setBetaType(rocisa::DataType::Float);
 
     // Allocate host memory for inputs and outputs
-    std::vector<InputAT> a(m * k);
-    std::vector<InputBT> b(k * n);
+    size_t numA = m * k;
+    size_t numB = k * n;
+
+    size_t storageA, storageB;
+#ifndef _WIN32
+    if constexpr(isFP4)
+    {
+        storageA = (numA + 1) / 2;
+        storageB = (numB + 1) / 2;
+    }
+    else
+#endif
+    {
+        storageA = numA;
+        storageB = numB;
+    }
+
+    std::vector<InputAT> a(storageA);
+    std::vector<InputBT> b(storageB);
     std::vector<float>   c(m * n);
     std::vector<float>   d(m * n);
 
@@ -311,6 +420,9 @@ int runGemm(size_t         m,
     // are NOT on the F8 grid - otherwise the quantization step has nothing to
     // do and the bug being tested for can't be reproduced. We give an operand
     // such values when its storage type is wider than its computeInput type.
+    //
+    // For FP4 with mxBlock>0 (mxfp4), inputs are drawn from the discrete
+    // E2M1-representable value set so the MX-scale logic is exercised.
     size_t                                seed = 42;
     std::mt19937                          gen(seed);
     std::uniform_int_distribution<>       binary_distribution(0, 1);
@@ -318,27 +430,52 @@ int runGemm(size_t         m,
 
     auto randomGen = [&]() { return binary_distribution(gen) ? 1.0f : -1.0f; };
 
-    auto initOperand = [&](auto& vec, bool quantizes) {
-        using T = typename std::decay_t<decltype(vec)>::value_type;
-        if(quantizes)
-        {
-            // Values representable in storage but not on the compute-input grid -
-            // for storage=Half/compute=F8N, values like 0.7 that Half holds
-            // exactly but F8N rounds to 0.625 or 0.75.
-            std::generate(vec.begin(), vec.end(),
-                          [&]() { return static_cast<T>(realDist(gen)); });
-        }
-        else
-        {
-            std::generate(vec.begin(), vec.end(),
-                          [&]() { return static_cast<T>(randomGen()); });
-        }
-    };
+#ifndef _WIN32
+    if constexpr(isFP4)
+    {
+        // E2M1-representable values for diverse test coverage
+        constexpr float fp4Values[] = {-2.0f, -1.0f, -0.5f, 0.0f, 0.5f, 1.0f, 2.0f};
+        std::uniform_int_distribution<> fp4Dist(0, 6);
+        auto randomFp4 = [&]() { return fp4Values[fp4Dist(gen)]; };
 
-    bool quantizesA = (sizeof(InputAT) > 1) && (computeInputA != dtypeEnumA);
-    bool quantizesB = (sizeof(InputBT) > 1) && (computeInputB != dtypeEnumB);
-    initOperand(a, quantizesA);
-    initOperand(b, quantizesB);
+        for(size_t i = 0; i < storageA; i++)
+        {
+            float v0 = randomFp4();
+            float v1 = (i == storageA - 1 && numA % 2 != 0) ? 0.0f : randomFp4();
+            a[i]     = Float4x2(v0, v1);
+        }
+        for(size_t i = 0; i < storageB; i++)
+        {
+            float v0 = randomFp4();
+            float v1 = (i == storageB - 1 && numB % 2 != 0) ? 0.0f : randomFp4();
+            b[i]     = Float4x2(v0, v1);
+        }
+    }
+    else
+#endif
+    {
+        auto initOperand = [&](auto& vec, bool quantizes) {
+            using T = typename std::decay_t<decltype(vec)>::value_type;
+            if(quantizes)
+            {
+                // Values representable in storage but not on the compute-input grid -
+                // for storage=Half/compute=F8N, values like 0.7 that Half holds
+                // exactly but F8N rounds to 0.625 or 0.75.
+                std::generate(vec.begin(), vec.end(),
+                              [&]() { return static_cast<T>(realDist(gen)); });
+            }
+            else
+            {
+                std::generate(vec.begin(), vec.end(),
+                              [&]() { return static_cast<T>(randomGen()); });
+            }
+        };
+
+        bool quantizesA = (sizeof(InputAT) > 1) && (computeInputA != dtypeEnumA);
+        bool quantizesB = (sizeof(InputBT) > 1) && (computeInputB != dtypeEnumB);
+        initOperand(a, quantizesA);
+        initOperand(b, quantizesB);
+    }
     std::generate(c.begin(), c.end(), [&]() { return static_cast<float>(randomGen()); });
 
     // Optional feature buffers
@@ -403,11 +540,53 @@ int runGemm(size_t         m,
         contraction.setParams().setActivationEnum(activation);
     }
 
+#ifndef _WIN32
+    // MX scale setup (FP4 with mxBlock > 0 only)
+    [[maybe_unused]] std::vector<MXScale> mxsa, mxsb;
+
+    if constexpr(isFP4)
+    {
+        if(mxBlock > 0)
+        {
+            contraction.setMXScaleA(mxBlock);
+            contraction.setMXScaleB(mxBlock);
+
+            size_t nmxsa = contraction.mxsa().totalLogicalElements();
+            size_t nmxsb = contraction.mxsb().totalLogicalElements();
+
+            if(nmxsa == 0 || nmxsb == 0)
+            {
+                std::cerr << "Error: MX scale tensor has zero elements (nmxsa=" << nmxsa
+                          << ", nmxsb=" << nmxsb << ")" << std::endl;
+                return 1;
+            }
+
+            mxsa.resize(nmxsa);
+            mxsb.resize(nmxsb);
+
+            // Distinct exponents in [0..7] so wrong indexing breaks validation
+            std::uniform_int_distribution<> expDist(0, 7);
+            for(size_t i = 0; i < nmxsa; i++)
+                mxsa[i] = MXScale(std::ldexp(1.0f, expDist(gen)));
+            for(size_t i = 0; i < nmxsb; i++)
+                mxsb[i] = MXScale(std::ldexp(1.0f, expDist(gen)));
+        }
+    }
+#endif
+
     ContractionInputs inputs(a.data(), b.data(), c.data(), d.data(), alpha, beta);
     inputs.bias          = useBias ? biasVec.data() : nullptr;
     inputs.scaleAlphaVec = useScaleAlphaVec ? scaleAlphaVecBuf.data() : nullptr;
     inputs.scaleA        = (useScaleAB != "none") ? scaleABuf.data() : nullptr;
     inputs.scaleB        = (useScaleAB != "none") ? scaleBBuf.data() : nullptr;
+
+#ifndef _WIN32
+    if constexpr(isFP4)
+    {
+        inputs.mxsa = (mxBlock > 0) ? mxsa.data() : nullptr;
+        inputs.mxsb = (mxBlock > 0) ? mxsb.data() : nullptr;
+    }
+#endif
 
     auto start = std::chrono::high_resolution_clock::now();
 
@@ -433,8 +612,29 @@ int runGemm(size_t         m,
         std::cout << "Validating..." << std::endl;
 
         // Convert inputs to f32 for the golden reference comparison
-        std::vector<float> aF32(a.begin(), a.end());
-        std::vector<float> bF32(b.begin(), b.end());
+        std::vector<float> aF32, bF32;
+
+#ifndef _WIN32
+        if constexpr(isFP4)
+        {
+            aF32.resize(numA);
+            for(size_t i = 0; i < numA; i++)
+                aF32[i] = a[i / 2].getElement(i % 2);
+            bF32.resize(numB);
+            for(size_t i = 0; i < numB; i++)
+                bF32[i] = b[i / 2].getElement(i % 2);
+        }
+        else
+#endif
+        {
+            aF32.resize(numA);
+            for(size_t i = 0; i < numA; i++)
+                aF32[i] = static_cast<float>(a[i]);
+            bF32.resize(numB);
+            for(size_t i = 0; i < numB; i++)
+                bF32[i] = static_cast<float>(b[i]);
+        }
+
         std::vector<float> cF32(c.begin(), c.end());
         std::vector<float> dRef(d.size());
 
@@ -463,9 +663,19 @@ int runGemm(size_t         m,
                         (useScaleAB == "Vector") ? scaleBBuf.data() : nullptr,
                         factorDim,
                         quantA,
-                        quantB);
+                        quantB,
+#ifndef _WIN32
+                        (isFP4 && mxBlock > 0) ? mxsa.data() : nullptr,
+                        (isFP4 && mxBlock > 0) ? mxsb.data() : nullptr,
+#else
+                        nullptr,
+                        nullptr,
+#endif
+                        mxBlock);
 
-        // Compare results
+        // Compare results — FP4 with MX scales needs wider tolerance
+        float tolerance = isFP4 ? 0.5f : 0.05f;
+
         bool  allClose = true;
         float maxDiff  = 0.0f;
 
@@ -475,7 +685,7 @@ int runGemm(size_t         m,
             float valRef = dRef[i];
             float diff   = std::abs(valDut - valRef);
 
-            if(diff > 0.05f)
+            if(diff > tolerance)
             {
                 allClose = false;
                 maxDiff  = std::max(maxDiff, diff);
@@ -513,7 +723,7 @@ int main(int argc, char* argv[])
         "transB", po::value<bool>()->default_value(false), "Transpose B")(
         "alpha", po::value<float>()->default_value(1.0f), "Alpha scalar")(
         "beta", po::value<float>()->default_value(0.0f), "Beta scalar")(
-        "type", po::value<std::string>()->default_value("f32"), "Data type for A and B (f32, f16, bf16, f8, bf8, f8fnuz, bf8fnuz)")(
+        "type", po::value<std::string>()->default_value("f32"), "Data type for A and B (f32, f16, bf16, f8, bf8, f8fnuz, bf8fnuz, f4)")(
         "typeA", po::value<std::string>()->default_value(""), "Override A storage type (defaults to --type)")(
         "typeB", po::value<std::string>()->default_value(""), "Override B storage type (defaults to --type)")(
         "computeInputA", po::value<std::string>()->default_value(""), "Override A compute-input type for MAC (defaults to --typeA). Set smaller than storage to mimic kernels that quantize A.")(
@@ -524,7 +734,8 @@ int main(int argc, char* argv[])
         "activation", po::value<std::string>()->default_value("none"), "Activation (none, relu)")(
         "scaleAlphaVec", po::value<bool>()->default_value(false), "Enable per-row alpha scaling")(
         "factorDim", po::value<int>()->default_value(0), "ScaleAlphaVec dimension: 0=row(M), 1=col(N)")(
-        "useScaleAB", po::value<std::string>()->default_value("none"), "ScaleAB mode (none, Scalar, Vector)");
+        "useScaleAB", po::value<std::string>()->default_value("none"), "ScaleAB mode (none, Scalar, Vector)")(
+        "mxBlock", po::value<int>()->default_value(0), "MX block size for FP4 (0=no MX, must be power of 2)");
 
     po::variables_map vm;
     try
@@ -590,6 +801,7 @@ int main(int argc, char* argv[])
     bool        useScaleAlphaVec = vm["scaleAlphaVec"].as<bool>();
     int         factorDim        = vm["factorDim"].as<int>();
     std::string useScaleAB       = vm["useScaleAB"].as<std::string>();
+    int         mxBlock          = vm["mxBlock"].as<int>();
 
     if(useScaleAB != "none" && useScaleAB != "Scalar" && useScaleAB != "Vector")
     {
@@ -627,7 +839,7 @@ int main(int argc, char* argv[])
             return runGemm<AT, BT>(
                 m, n, k, transA, transB, alpha, beta, validate, tryFastPath,
                 useBias, activation, useScaleAlphaVec, useScaleAB, factorDim,
-                computeInputA, computeInputB);
+                computeInputA, computeInputB, mxBlock);
         };
         if(typeBStr == "f32")        return callB(float{});
         if(typeBStr == "f16")        return callB(Half{});
@@ -637,6 +849,9 @@ int main(int argc, char* argv[])
         if(typeBStr == "bf8")        return callB(BFloat8{});
         if(typeBStr == "f8fnuz")     return callB(Float8_fnuz{});
         if(typeBStr == "bf8fnuz")    return callB(BFloat8_fnuz{});
+#endif
+#ifndef _WIN32
+        if(typeBStr == "f4")         return callB(Float4x2{});
 #endif
         std::cerr << "Unknown typeB: " << typeBStr << std::endl;
         return 1;
@@ -652,6 +867,9 @@ int main(int argc, char* argv[])
         if(typeAStr == "bf8")        return dispatchB(BFloat8{});
         if(typeAStr == "f8fnuz")     return dispatchB(Float8_fnuz{});
         if(typeAStr == "bf8fnuz")    return dispatchB(BFloat8_fnuz{});
+#endif
+#ifndef _WIN32
+        if(typeAStr == "f4")         return dispatchB(Float4x2{});
 #endif
         std::cerr << "Unknown typeA: " << typeAStr << std::endl;
         return 1;
