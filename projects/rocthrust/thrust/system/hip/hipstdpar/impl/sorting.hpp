@@ -42,6 +42,7 @@
 
 #  include <rocprim/rocprim.hpp>
 
+#  include <thrust/detail/config/namespace.h>
 #  include <thrust/execution_policy.h>
 #  include <thrust/sort.h>
 
@@ -179,7 +180,7 @@ namespace std
 template <typename I, enable_if_t<::hipstd::is_offloadable_iterator<I>()>* = nullptr>
 inline void sort(execution::parallel_unsequenced_policy, I f, I l)
 {
-  return ::thrust::sort(::thrust::device, f, l);
+  return THRUST_NS_QUALIFIER::sort(THRUST_NS_QUALIFIER::device, f, l);
 }
 
 template <typename I, enable_if_t<!::hipstd::is_offloadable_iterator<I>()>* = nullptr>
@@ -195,7 +196,7 @@ template <typename I,
           enable_if_t<::hipstd::is_offloadable_iterator<I>() && ::hipstd::is_offloadable_callable<R>()>* = nullptr>
 inline void sort(execution::parallel_unsequenced_policy, I f, I l, R r)
 {
-  return ::thrust::sort(::thrust::device, f, l, ::std::move(r));
+  return THRUST_NS_QUALIFIER::sort(THRUST_NS_QUALIFIER::device, f, l, ::std::move(r));
 }
 
 template <typename I,
@@ -220,7 +221,7 @@ inline void sort(execution::parallel_unsequenced_policy, I f, I l, R r)
 template <typename I, enable_if_t<::hipstd::is_offloadable_iterator<I>()>* = nullptr>
 inline void stable_sort(execution::parallel_unsequenced_policy, I f, I l)
 {
-  return ::thrust::stable_sort(::thrust::device, f, l);
+  return THRUST_NS_QUALIFIER::stable_sort(THRUST_NS_QUALIFIER::device, f, l);
 }
 
 template <typename I, enable_if_t<!::hipstd::is_offloadable_iterator<I>()>* = nullptr>
@@ -236,7 +237,7 @@ template <typename I,
           enable_if_t<::hipstd::is_offloadable_iterator<I>() && ::hipstd::is_offloadable_callable<R>()>* = nullptr>
 inline void stable_sort(execution::parallel_unsequenced_policy, I f, I l, R r)
 {
-  return ::thrust::stable_sort(::thrust::device, f, l, ::std::move(r));
+  return THRUST_NS_QUALIFIER::stable_sort(THRUST_NS_QUALIFIER::device, f, l, ::std::move(r));
 }
 
 template <typename I,
@@ -284,7 +285,7 @@ template <
 inline void
 partial_sort(execution::parallel_unsequenced_policy, KeysIt first, KeysIt middle, KeysIt last, CompareOp compare_op)
 {
-  ::thrust::__partial_sort(::thrust::device, first, middle, last, compare_op);
+  THRUST_NS_QUALIFIER::__partial_sort(THRUST_NS_QUALIFIER::device, first, middle, last, compare_op);
 }
 
 template <typename KeysIt, typename CompareOp, enable_if_t<!hipstd::is_offloadable_iterator<KeysIt>()>* = nullptr>
@@ -346,7 +347,7 @@ inline void partial_sort_copy(
   RandomIt d_last,
   CompareOp compare_op)
 {
-  ::thrust::__partial_sort_copy(::thrust::device, first, last, d_first, d_last, compare_op);
+  THRUST_NS_QUALIFIER::__partial_sort_copy(THRUST_NS_QUALIFIER::device, first, last, d_first, d_last, compare_op);
 }
 
 template <typename ForwardIt,
@@ -379,7 +380,7 @@ inline void partial_sort_copy(
 template <typename I, enable_if_t<::hipstd::is_offloadable_iterator<I>()>* = nullptr>
 inline bool is_sorted(execution::parallel_unsequenced_policy, I f, I l)
 {
-  return ::thrust::is_sorted(::thrust::device, f, l);
+  return THRUST_NS_QUALIFIER::is_sorted(THRUST_NS_QUALIFIER::device, f, l);
 }
 
 template <typename I, enable_if_t<!::hipstd::is_offloadable_iterator<I>()>* = nullptr>
@@ -395,7 +396,7 @@ template <typename I,
           enable_if_t<::hipstd::is_offloadable_iterator<I>() && ::hipstd::is_offloadable_callable<R>()>* = nullptr>
 inline bool is_sorted(execution::parallel_unsequenced_policy, I f, I l, R r)
 {
-  return ::thrust::is_sorted(::thrust::device, f, l, ::std::move(r));
+  return THRUST_NS_QUALIFIER::is_sorted(THRUST_NS_QUALIFIER::device, f, l, ::std::move(r));
 }
 
 template <typename I,
@@ -420,7 +421,7 @@ inline bool is_sorted(execution::parallel_unsequenced_policy, I f, I l, R r)
 template <typename I, enable_if_t<::hipstd::is_offloadable_iterator<I>()>* = nullptr>
 inline I is_sorted_until(execution::parallel_unsequenced_policy, I f, I l)
 {
-  return ::thrust::is_sorted_until(::thrust::device, f, l);
+  return THRUST_NS_QUALIFIER::is_sorted_until(THRUST_NS_QUALIFIER::device, f, l);
 }
 
 template <typename I, enable_if_t<!::hipstd::is_offloadable_iterator<I>()>* = nullptr>
@@ -436,7 +437,7 @@ template <typename I,
           enable_if_t<::hipstd::is_offloadable_iterator<I>() && ::hipstd::is_offloadable_callable<R>()>* = nullptr>
 inline I is_sorted_until(execution::parallel_unsequenced_policy, I f, I l, R r)
 {
-  return ::thrust::is_sorted_until(::thrust::device, f, l, ::std::move(r));
+  return THRUST_NS_QUALIFIER::is_sorted_until(THRUST_NS_QUALIFIER::device, f, l, ::std::move(r));
 }
 
 template <typename I,
@@ -484,7 +485,7 @@ template <
 inline void
 nth_element(execution::parallel_unsequenced_policy, KeysIt first, KeysIt nth, KeysIt last, CompareOp compare_op)
 {
-  ::thrust::__nth_element(::thrust::device, first, nth, last, compare_op);
+  THRUST_NS_QUALIFIER::__nth_element(THRUST_NS_QUALIFIER::device, first, nth, last, compare_op);
 }
 
 template <typename KeysIt, enable_if_t<!hipstd::is_offloadable_iterator<KeysIt>()>* = nullptr>
