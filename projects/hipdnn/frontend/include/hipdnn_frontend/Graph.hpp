@@ -2430,7 +2430,7 @@ public:
             scale->set_name(attributes.get_name() + "::SCALE");
         }
 
-        auto mean = attributes.get_epsilon();
+        auto mean = attributes.get_mean();
         if(mean && mean->get_name().empty())
         {
             mean->set_name(attributes.get_name() + "::MEAN");
