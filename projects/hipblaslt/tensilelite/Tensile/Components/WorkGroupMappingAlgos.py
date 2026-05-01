@@ -366,7 +366,7 @@ def chiplet_transform_chunked(writer, kernel, sgprNumXCC, sgprIndex, sgprNumWG, 
 # Remap 1D workgroup ID
 def chiplet_transform(writer, kernel, sgprIndex, sgprNumTilesM, sgprNumTilesN):
 
-    numXCC = 8
+    numXCC = kernel["NumXCDs"]
     module = Module()
 
     sgprXCC = writer.sgprPool.checkOut(1)

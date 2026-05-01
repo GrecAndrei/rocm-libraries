@@ -245,7 +245,6 @@ globalParameters["DumpTensors"] = (
 
 # device selection
 globalParameters["Platform"] = 0  # select opencl platform
-
 # shouldn't need to change
 globalParameters["ClientExecutionLockPath"] = (
     None  # Path for a file lock to ensure only one client is executed at once.  filelock module is required if this is enabled.
@@ -609,10 +608,13 @@ def printCapabilitiesTable(isaInfoMap: Dict[str, IsaInfo]):
             print(" ".join(cell.ljust(width) for cell, width in zip(row, colWidths)))
 
     def capRow(isaInfoMap, cap, capType):
-        return [cap] + [
-            "1" if cap in getattr(info, capType) and getattr(info, capType)[cap] else "-"
-            for info in isaInfoMap.values()
-        ]
+        def fmtVal(info):
+            caps = getattr(info, capType)
+            if cap not in caps or not caps[cap]:
+                return "-"
+            v = caps[cap]
+            return str(v) if isinstance(v, int) and v > 1 else "1"
+        return [cap] + [fmtVal(info) for info in isaInfoMap.values()]
 
     gfxs = list(map(isaToGfx, isaInfoMap.keys()))
     headerRow = ["Capability"] + gfxs
