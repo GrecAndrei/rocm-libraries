@@ -8548,6 +8548,8 @@ class KernelWriter(metaclass=abc.ABCMeta):
         "StreamKLocalStart",
         "StreamKLocalEnd",
       ]
+      if kernel["StreamKDynamicQueueWorkStealing"]:
+        requiredUnalignedSgprVar.append("StreamKStealState")
       if kernel["StreamKAtomic"] == 0:
         requiredAligned4SgprVar.append("SrdWS")
     elif kernel["StreamK"]:

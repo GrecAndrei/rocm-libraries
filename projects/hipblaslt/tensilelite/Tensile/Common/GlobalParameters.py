@@ -494,6 +494,7 @@ defaultBenchmarkCommonParameters = [
     {"MIArchVgpr": [False]},
     {"StreamK": [0]},
     {"StreamKAtomic": [0]},
+    {"StreamKDynamicQueueWorkStealing": [0]},
     {"StreamKXCCMapping": [0]},
     {"StreamKFixupTreeReduction": [0]},
     {"DebugStreamK": [0]},

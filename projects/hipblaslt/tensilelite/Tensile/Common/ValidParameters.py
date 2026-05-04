@@ -777,6 +777,11 @@ validParameters = { # we need to make sure this matches develop
     # 0: uses workspace to store partial tiles, accumulate in deterministic fix-up step
     # 1: uses atomics to accumulate partial tiles
     "StreamKAtomic": [0, 1],
+    # Enables sticky one-hop stealing for StreamK dynamic queues.
+    # 0: each WG only fetches from its home XCD queue
+    # 1: after home queue is empty, a WG fetches one item at a time from the next queue
+    # 2: after home queue is empty, a WG fetches one item at a time from the previous queue
+    "StreamKDynamicQueueWorkStealing": [0, 1, 2],
     # Enables XCC-based remapping of workgroups, set the value to the number of XCCs
     # for the device/configuration being used
     #  0: uses default workgroup assignment

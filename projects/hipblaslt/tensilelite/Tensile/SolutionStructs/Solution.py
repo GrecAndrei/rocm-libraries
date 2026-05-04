@@ -1529,12 +1529,16 @@ class Solution(collections.abc.Mapping):
         reject(state, printRejectionReason,
                "DebugPersistentKernelLoopForever requires StreamK in {1,2,3} (got %d)"
                % state["StreamK"])
+      if state["StreamKDynamicQueueWorkStealing"] and state["StreamK"] != 4:
+        reject(state, printRejectionReason,
+               "StreamKDynamicQueueWorkStealing requires StreamK=4")
       if not state["Valid"]:
         print2("in assignDerivedParameters, state['Valid'] = False")
         return
     else:
       # If not using StreamK, clear other stream-k settings to avoid duplicate kernels
       state["StreamKAtomic"] = 0
+      state["StreamKDynamicQueueWorkStealing"] = 0
       state["StreamKXCCMapping"] = 0
       state["StreamKFixupTreeReduction"] = 0
       state["DebugStreamK"] = 0
@@ -2374,6 +2378,7 @@ class Solution(collections.abc.Mapping):
         "GroupLoadStore": not state["GroupLoadStore"],
         "StreamK": not state["StreamK"],
         "StreamKAtomic": not state["StreamKAtomic"],
+        "StreamKDynamicQueueWorkStealing": not state["StreamKDynamicQueueWorkStealing"],
         "StreamKXCCMapping": not state["StreamKXCCMapping"],
         "StreamKFixupTreeReduction": not state["StreamKFixupTreeReduction"],
         "DebugStreamK": not state["DebugStreamK"],
