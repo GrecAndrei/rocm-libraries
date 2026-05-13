@@ -3011,6 +3011,8 @@ class StreamKDynamic(StreamK):
         # Per-mode dispatch:
         #   wsMode == 0: per-XCD home queue only (auto-reset bound).
         #   wsMode == 1: home queue + multi-hop next-neighbor stealing.
+        #   wsMode == 2: hierarchical L1->L2 (per-XCD chunked L1 pool +
+        #               shared global L2 pool with fixed 7/8 split).
         #   wsMode == 3: global atomic + chiplet swizzle (per-XCD counters
         #               unused; one shared counter for the whole device).
         # All other valid values are rejected by Solution.py.
@@ -3020,8 +3022,106 @@ class StreamKDynamic(StreamK):
         sAddress = writer.sgprPool.checkOutAligned(2, 2, "Address")
         sWorkItemIdx = writer.sgprPool.checkOut(1, "nextWorkItemIdx")
 
+        if wsMode == 2:
+            # Hierarchical L1->L2 mode (mirrors tritonBLAS HIERARCHICAL).
+            #
+            # Tile partition (computed at runtime, no host info needed):
+            #   total_global       = TotalItems >> 3              (~12.5%)
+            #   total_local_raw    = TotalItems - total_global    (~87.5%)
+            #   tiles_per_xcd_local= total_local_raw >> log2NumXCDs
+            #   total_local        = tiles_per_xcd_local << log2NumXCDs
+            #   total_global       = TotalItems - total_local     (absorbs remainder)
+            #
+            # Tile-id mapping:
+            #   L1 path: tile_id = xcd_id * tiles_per_xcd_local + raw_idx_local
+            #            (CHUNKED layout: each XCD owns a contiguous range of
+            #             tile_ids; required for L2 locality).
+            #   L2 path: tile_id = total_local + raw_idx_global
+            #
+            # Per-WG flow:
+            #   1. Compute home queue (queueIdx = StreamKIdx & xcdMask) and
+            #      partition fields.
+            #   2. L1 atomic on home queue (bound = tiles_per_xcd_local +
+            #      workgroupsInQueue - 1, auto-reset, like WS=0).
+            #   3. If raw_idx_local < tiles_per_xcd_local: real L1 hit ->
+            #      tile_id = xcd_id * tiles_per_xcd_local + raw_idx_local.
+            #   4. Else: L2 atomic on shared global counter at
+            #      (numXCDs+1)*256 with bound 0xFFFFFFFF. tile_id =
+            #      total_local + raw_idx_global. If raw_idx_global >=
+            #      total_global, tile_id >= TotalItems and the existing
+            #      "work item index is valid" check below makes this WG a
+            #      no-op (same handling as structural-extra WGs).
 
-        if wsMode == 3:
+            skL2Fallback = Label("SK_L2Fallback", "")
+            skFetchDone = Label("SK_FetchDone", "")
+
+            # queueIdx = StreamKIdx & xcdMask
+            module.add(SAndB32(dst=sgpr(sQueueIdx), src0=sgpr("StreamKIdx"), src1=xcdMask, comment="L1 home queue index"))
+            self.dynamicQueueBaseAddressFromIdx(writer, module, sAddress, sQueueIdx, "L1 home queue")
+
+            # Partition: tiles_per_xcd_local = (TotalItems - (TotalItems>>3)) >> log2NumXCDs
+            sTotalGlobal = writer.sgprPool.checkOut(1, "totalGlobal")
+            sTotalLocal = writer.sgprPool.checkOut(1, "totalLocal")
+            sTilesPerXcdLocal = writer.sgprPool.checkOut(1, "tilesPerXcdLocal")
+            module.add(SLShiftRightB32(dst=sgpr(sTotalGlobal), src=sgpr("TotalItems"), shiftHex=hex(3), comment="L2 size (raw) = TotalItems >> 3"))
+            module.add(SSubU32(dst=sgpr(sTotalLocal), src0=sgpr("TotalItems"), src1=sgpr(sTotalGlobal), comment="L1 size (raw) = TotalItems - L2_raw"))
+            module.add(SLShiftRightB32(dst=sgpr(sTilesPerXcdLocal), src=sgpr(sTotalLocal), shiftHex=log2NumXCDs, comment="tiles_per_xcd_local = L1_raw >> log2NumXCDs"))
+            module.add(SLShiftLeftB32(dst=sgpr(sTotalLocal), src=sgpr(sTilesPerXcdLocal), shiftHex=log2NumXCDs, comment="total_local = tiles_per_xcd_local << log2NumXCDs"))
+            module.add(SSubU32(dst=sgpr(sTotalGlobal), src0=sgpr("TotalItems"), src1=sgpr(sTotalLocal), comment="total_global = TotalItems - total_local"))
+
+            # workgroupsInQueue = (skGrid >> log2NumXCDs) + (queueIdx < (skGrid & xcdMask) ? 1 : 0)
+            sWorkgroupsInQueue = writer.sgprPool.checkOut(1, "workgroupsInQueue")
+            module.add(SLShiftRightB32(dst=sgpr(sWorkgroupsInQueue), src=sgpr("skGrid"), shiftHex=log2NumXCDs, comment="base WGs per queue"))
+            sRemainder = writer.sgprPool.checkOut(1, "remainderWGs")
+            module.add(SAndB32(dst=sgpr(sRemainder), src0=sgpr("skGrid"), src1=xcdMask, comment="remainder WGs"))
+            module.add(SCmpLtU32(src0=sgpr(sQueueIdx), src1=sgpr(sRemainder), comment="queue gets extra WG?"))
+            module.add(SCSelectB32(dst=sgpr(sRemainder), src0=1, src1=0))
+            module.add(SAddU32(dst=sgpr(sWorkgroupsInQueue), src0=sgpr(sWorkgroupsInQueue), src1=sgpr(sRemainder)))
+            writer.sgprPool.checkIn(sRemainder)
+
+            # bound = tiles_per_xcd_local + workgroupsInQueue - 1 (auto-reset)
+            sBound = writer.sgprPool.checkOut(1, "L1Bound")
+            module.add(SAddU32(dst=sgpr(sBound), src0=sgpr(sTilesPerXcdLocal), src1=sgpr(sWorkgroupsInQueue), comment="L1 auto-reset bound"))
+            module.add(SSubU32(dst=sgpr(sBound), src0=sgpr(sBound), src1=1))
+            writer.sgprPool.checkIn(sWorkgroupsInQueue)
+
+            # L1 atomic: dst = sWorkItemIdx, holds raw_idx_local on return
+            module.add(SMovB32(dst=sgpr(sWorkItemIdx), src=sgpr(sBound), comment="L1 atomic: pass auto-reset bound"))
+            writer.sgprPool.checkIn(sBound)
+            module.add(SAtomicInc(dst=sgpr(sWorkItemIdx), base=sgpr(sAddress, 2), soffset=0, smem=SMEMModifiers(glc=True), comment="L1 fetch raw_idx_local"))
+            module.add(SWaitCnt(kmcnt=0, comment="Wait for scalar memory op"))
+
+            # If raw_idx_local >= tiles_per_xcd_local, fall through to L2.
+            module.add(SCmpGeU32(src0=sgpr(sWorkItemIdx), src1=sgpr(sTilesPerXcdLocal), comment="L1 OOB?"))
+            module.add(SCBranchSCC1(labelName=skL2Fallback.getLabelName(), comment="L1 empty for this WG; try L2"))
+
+            # L1 hit: tile_id = xcd_id * tiles_per_xcd_local + raw_idx_local
+            sL1Offset = writer.sgprPool.checkOut(1, "L1XcdOffset")
+            module.add(SMulI32(dst=sgpr(sL1Offset), src0=sgpr(sQueueIdx), src1=sgpr(sTilesPerXcdLocal), comment="xcd_id * tiles_per_xcd_local"))
+            module.add(SAddU32(dst=sgpr(sWorkItemIdx), src0=sgpr(sWorkItemIdx), src1=sgpr(sL1Offset), comment="L1 tile_id"))
+            writer.sgprPool.checkIn(sL1Offset)
+            module.add(SBranch(labelName=skFetchDone.getLabelName(), comment="L1 hit; tile_id ready"))
+
+            # L2 fallback: shared global counter at (numXCDs+1)*256, no auto-reset.
+            module.add(skL2Fallback)
+            globalCtrOffset = self.globalCounterOffset(kernel)
+            module.add(SMovB32(dst=sgpr(sAddress + 0), src=sgpr("AddressFlags+0"), comment="L2 base lo"))
+            module.add(SMovB32(dst=sgpr(sAddress + 1), src=sgpr("AddressFlags+1"), comment="L2 base hi"))
+            module.add(SAddU32(dst=sgpr(sAddress + 0), src0=sgpr(sAddress + 0), src1=hex(globalCtrOffset), comment="L2 counter offset"))
+            module.add(SAddCU32(dst=sgpr(sAddress + 1), src0=sgpr(sAddress + 1), src1=0, comment="Carry"))
+            module.add(SMovB32(dst=sgpr(sWorkItemIdx), src=hex(0xFFFFFFFF), comment="L2 atomic: disable auto-reset"))
+            module.add(SAtomicInc(dst=sgpr(sWorkItemIdx), base=sgpr(sAddress, 2), soffset=0, smem=SMEMModifiers(glc=True), comment="L2 fetch raw_idx_global"))
+            module.add(SWaitCnt(kmcnt=0, comment="Wait for scalar memory op"))
+            # tile_id = total_local + raw_idx_global. If raw_idx_global >=
+            # total_global, tile_id >= TotalItems and the existing
+            # "work item index is valid" check downstream makes this WG a no-op.
+            module.add(SAddU32(dst=sgpr(sWorkItemIdx), src0=sgpr(sWorkItemIdx), src1=sgpr(sTotalLocal), comment="L2 tile_id = total_local + raw_idx_global"))
+
+            module.add(skFetchDone)
+            writer.sgprPool.checkIn(sTotalGlobal)
+            writer.sgprPool.checkIn(sTotalLocal)
+            writer.sgprPool.checkIn(sTilesPerXcdLocal)
+        elif wsMode == 3:
             # Global-atomic mode: address points at the shared global counter
             # at offset (numXCDs+1)*256. Per-XCD counters are unused.
             globalCtrOffset = self.globalCounterOffset(kernel)
@@ -3464,7 +3564,7 @@ class StreamKDynamic(StreamK):
             for queueIdx in range(numXCDs):
                 module.add(SStoreB32(src=sgpr(sCompletedWGs), base=sgpr("AddressFlags", 2), soffset=queueIdx * 256, smem=SMEMModifiers(glc=True), comment="Reset queue counter"))
             module.add(SStoreB32(src=sgpr(sCompletedWGs), base=sgpr("AddressFlags", 2), soffset=completionCounterOffset, smem=SMEMModifiers(glc=True), comment="Reset completion counter"))
-            if wsMode == 3:
+            if wsMode == 3 or wsMode == 2:
                 module.add(SStoreB32(src=sgpr(sCompletedWGs), base=sgpr("AddressFlags", 2), soffset=globalCtrOffset, smem=SMEMModifiers(glc=True), comment="Reset shared global counter"))
             module.add(SWaitCnt(dscnt=0, comment="Wait for synchronizer reset"))
             module.add(skExitLabel)

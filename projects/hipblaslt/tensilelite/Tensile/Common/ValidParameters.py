@@ -783,13 +783,20 @@ validParameters = { # we need to make sure this matches develop
     # 1: multi-hop next-neighbor stealing. After home queue is empty, the WG
     #    walks queues (queueIdx+1) & xcdMask deterministically, attempting one
     #    atomic per eligible neighbor up to numXCDs-1 real attempts.
+    # 2: hierarchical L1->L2 (mirrors tritonBLAS HIERARCHICAL). ~7/8 of tiles
+    #    form a per-XCD chunked L1 pool (one counter per XCD); the remaining
+    #    ~1/8 form a single shared L2 pool (one counter at the global offset).
+    #    A WG first tries its home L1 counter; on OOB it falls back to the
+    #    shared L2 counter. The fixed 7/8 split is computed at runtime in
+    #    scalar registers (TotalTiles >> 3 = L2 size), so no host-side
+    #    information is needed.
     # 3: global atomic + chiplet swizzle (mirrors tritonBLAS GLOBAL_ATOMIC
     #    mode). Per-XCD home counters are not used; every WG races for tiles
     #    on a single shared global counter at offset (numXCDs+1)*256 in the
     #    flag region. The returned raw_idx is remapped via chiplet_transform
     #    so each XCD's claimed tiles stay contiguous in the global tile
     #    space, preserving L2 locality.
-    "StreamKDynamicQueueWorkStealing": [0, 1, 3],
+    "StreamKDynamicQueueWorkStealing": [0, 1, 2, 3],
     # Enables XCC-based remapping of workgroups, set the value to the number of XCCs
     # for the device/configuration being used
     #  0: uses default workgroup assignment
