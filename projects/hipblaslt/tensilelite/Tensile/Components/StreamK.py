@@ -3015,6 +3015,12 @@ class StreamKDynamic(StreamK):
         #               shared global L2 pool with fixed 7/8 split).
         #   wsMode == 3: global atomic + chiplet swizzle (per-XCD counters
         #               unused; one shared counter for the whole device).
+        #   wsMode == 4: home queue + single-hop next-neighbor steal (one
+        #               atomic at (queueIdx+1) & xcdMask). Same gating as
+        #               WS=1, no loop.
+        #   wsMode == 5: home queue + single-hop previous-neighbor steal
+        #               (one atomic at (queueIdx-1) & xcdMask). Mirrors WS=4
+        #               in the opposite direction.
         # All other valid values are rejected by Solution.py.
 
         # ----- Address / queue setup -----
@@ -3152,7 +3158,8 @@ class StreamKDynamic(StreamK):
 
             skUseWorkStealing = None
             skFetchHomeQueue = None
-            if wsMode == 1:
+            stealingMode = wsMode in (1, 4, 5)
+            if stealingMode:
                 # When (TotalItems & xcdMask) != 0 the WG might steal, in which
                 # case the home counter must NOT auto-reset (kernelEnd handles it).
                 skUseWorkStealing = Label("SK_UseWorkStealing", "")
@@ -3187,7 +3194,7 @@ class StreamKDynamic(StreamK):
             writer.sgprPool.checkIn(sTilesInQueue)
             writer.sgprPool.checkIn(sWorkgroupsInQueue)
 
-            if wsMode == 1:
+            if stealingMode:
                 module.add(SBranch(labelName=skFetchHomeQueue.getLabelName(), comment="No tile remainder; use auto-reset home queue"))
                 module.add(skUseWorkStealing)
                 module.add(SMovB32(dst=sgpr(sWorkItemIdx), src=hex(0xFFFFFFFF), comment="Last WG resets queue counters"))
@@ -3199,6 +3206,65 @@ class StreamKDynamic(StreamK):
             # local_idx -> global tile: tile = (local << log2NumXCDs) + queueIdx
             module.add(SLShiftLeftB32(dst=sgpr(sWorkItemIdx), src=sgpr(sWorkItemIdx), shiftHex=log2NumXCDs))
             module.add(SAddU32(dst=sgpr(sWorkItemIdx), src0=sgpr(sWorkItemIdx), src1=sgpr(sQueueIdx)))
+
+            if wsMode in (4, 5):
+                # Single-hop neighbor steal. Same gating as WS=1 (no remainder
+                # or home already has structural extra -> bail), but exactly
+                # ONE atomic against the immediate next (WS=4) or previous
+                # (WS=5) queue. No loop, no StreamKStealState bookkeeping.
+                #
+                # Direction-specific structural-extra check:
+                #   WS=4 target = (queueIdx + 1) & xcdMask. Eligible iff
+                #                 target < remainder, i.e. queueIdx < remainder-1
+                #                 (the +1 walk pushed us *into* the structural
+                #                 group, but only when remainder >= 2; when
+                #                 remainder == 1 only queue 0 has an extra and
+                #                 stealing it from queue numXCDs-1 wraps).
+                #   WS=5 target = (queueIdx - 1) & xcdMask. Eligible iff
+                #                 target < remainder. The unsigned underflow
+                #                 from queueIdx==0 yields 0xFFFFFFFF & xcdMask
+                #                 = numXCDs-1 which is >= remainder (since
+                #                 remainder <= numXCDs-1 in the gated path),
+                #                 so that case naturally fails the eligibility
+                #                 check below.
+                #
+                # We use the post-walk target for the eligibility test rather
+                # than precomputing the queueIdx<remainder-1 form, because the
+                # "target < remainder" check is identical to the multi-hop
+                # variant and easier to audit.
+                skFetchDone = Label("SK_FetchDone", "")
+                module.add(SCmpLtU32(src0=sgpr(sWorkItemIdx), src1=sgpr("TotalItems"), comment="Check active queue work item"))
+                module.add(SCBranchSCC1(labelName=skFetchDone.getLabelName(), comment="Fetched valid work"))
+                sRemainder = writer.sgprPool.checkOut(1, "remainder tiles")
+                module.add(SAndB32(dst=sgpr(sRemainder), src0=sgpr("TotalItems"), src1=xcdMask, comment="Remainder tiles"))
+                module.add(SCmpEQU32(src0=sgpr(sRemainder), src1=0, comment="Check if stealing can help"))
+                module.add(SCBranchSCC1(labelName=skFetchDone.getLabelName(), comment="No tile remainder; no stealing"))
+                module.add(SCmpLtU32(src0=sgpr(sQueueIdx), src1=sgpr(sRemainder), comment="Original home has structural extra?"))
+                module.add(SCBranchSCC1(labelName=skFetchDone.getLabelName(), comment="No fair stealing if home already has extra"))
+
+                # Walk to neighbor.
+                if wsMode == 4:
+                    module.add(SAddU32(dst=sgpr(sQueueIdx), src0=sgpr(sQueueIdx), src1=1, comment="Next queue"))
+                else:
+                    module.add(SSubU32(dst=sgpr(sQueueIdx), src0=sgpr(sQueueIdx), src1=1, comment="Previous queue"))
+                module.add(SAndB32(dst=sgpr(sQueueIdx), src0=sgpr(sQueueIdx), src1=xcdMask, comment="Wrap queue index"))
+
+                # Eligibility: target queue must own a structural extra tile.
+                module.add(SCmpGeU32(src0=sgpr(sQueueIdx), src1=sgpr(sRemainder), comment="Neighbor has no structural extra?"))
+                module.add(SCBranchSCC1(labelName=skFetchDone.getLabelName(), comment="Skip; neighbor has no extra"))
+
+                # Single atomic on the neighbor.
+                self.dynamicQueueBaseAddressFromIdx(writer, module, sAddress, sQueueIdx, "stolen queue")
+                module.add(SMovB32(dst=sgpr(sWorkItemIdx), src=hex(0xFFFFFFFF), comment="Disable atomic auto-reset"))
+                module.add(SAtomicInc(dst=sgpr(sWorkItemIdx), base=sgpr(sAddress, 2), soffset=0, smem=SMEMModifiers(glc=True), comment="Fetch stolen work item index"))
+                module.add(SWaitCnt(kmcnt=0, comment="Wait for scalar memory op"))
+                module.add(SLShiftLeftB32(dst=sgpr(sWorkItemIdx), src=sgpr(sWorkItemIdx), shiftHex=log2NumXCDs))
+                module.add(SAddU32(dst=sgpr(sWorkItemIdx), src0=sgpr(sWorkItemIdx), src1=sgpr(sQueueIdx)))
+                # If the steal failed (race), tile_id will be >= TotalItems
+                # and the existing valid-work-item check downstream will turn
+                # this WG into a no-op (same handling as WS=1 wrap-back).
+                module.add(skFetchDone)
+                writer.sgprPool.checkIn(sRemainder)
 
             if wsMode == 1:
                 # Multi-hop sticky steal loop.

@@ -796,7 +796,14 @@ validParameters = { # we need to make sure this matches develop
     #    flag region. The returned raw_idx is remapped via chiplet_transform
     #    so each XCD's claimed tiles stay contiguous in the global tile
     #    space, preserving L2 locality.
-    "StreamKDynamicQueueWorkStealing": [0, 1, 2, 3],
+    # 4: single-hop next-neighbor stealing. After home queue is empty, the WG
+    #    attempts ONE atomic on (queueIdx+1) & xcdMask if that queue has a
+    #    structural extra tile (target_idx < remainder). Same gating as WS=1
+    #    but no loop — used to isolate the cost/benefit of multi-hop search.
+    # 5: single-hop previous-neighbor stealing. Identical to WS=4 except the
+    #    target queue is (queueIdx-1) & xcdMask. Used as a directional
+    #    counterpart to WS=4 to study whether walk direction matters.
+    "StreamKDynamicQueueWorkStealing": [0, 1, 2, 3, 4, 5],
     # Enables XCC-based remapping of workgroups, set the value to the number of XCCs
     # for the device/configuration being used
     #  0: uses default workgroup assignment
