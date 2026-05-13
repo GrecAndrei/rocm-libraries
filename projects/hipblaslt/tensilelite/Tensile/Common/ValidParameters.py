@@ -777,11 +777,19 @@ validParameters = { # we need to make sure this matches develop
     # 0: uses workspace to store partial tiles, accumulate in deterministic fix-up step
     # 1: uses atomics to accumulate partial tiles
     "StreamKAtomic": [0, 1],
-    # Enables sticky one-hop stealing for StreamK dynamic queues.
-    # 0: each WG only fetches from its home XCD queue
-    # 1: after home queue is empty, a WG fetches one item at a time from the next queue
-    # 2: after home queue is empty, a WG fetches one item at a time from the previous queue
-    "StreamKDynamicQueueWorkStealing": [0, 1, 2],
+    # Enables work-stealing modes for StreamK dynamic queues. Mode encoding
+    # follows tritonBLAS naming where applicable.
+    # 0: per-XCD home queues only; no stealing.
+    # 1: multi-hop next-neighbor stealing. After home queue is empty, the WG
+    #    walks queues (queueIdx+1) & xcdMask deterministically, attempting one
+    #    atomic per eligible neighbor up to numXCDs-1 real attempts.
+    # 3: global atomic + chiplet swizzle (mirrors tritonBLAS GLOBAL_ATOMIC
+    #    mode). Per-XCD home counters are not used; every WG races for tiles
+    #    on a single shared global counter at offset (numXCDs+1)*256 in the
+    #    flag region. The returned raw_idx is remapped via chiplet_transform
+    #    so each XCD's claimed tiles stay contiguous in the global tile
+    #    space, preserving L2 locality.
+    "StreamKDynamicQueueWorkStealing": [0, 1, 3],
     # Enables XCC-based remapping of workgroups, set the value to the number of XCCs
     # for the device/configuration being used
     #  0: uses default workgroup assignment
