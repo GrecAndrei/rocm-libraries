@@ -43,6 +43,28 @@ from ..AsmAddressCalculation import AddrCalculation
 import abc
 
 from copy import deepcopy
+from math import gcd
+
+
+def _smallest_nontrivial_coprime(n: int) -> int:
+    """Smallest integer > 1 that is coprime to n.
+
+    For numXCDs in {2, 4, 8, 16} this returns 3 (since 3 is the smallest
+    odd prime and these are all powers of two). For arbitrary numXCDs it
+    returns the smallest integer > 1 not sharing a factor with n, which
+    is always a prime not dividing n.
+
+    Used to pick the WS=7 strided-jump steal stride at codegen time. A
+    stride coprime to numXCDs guarantees that the multiplicative sequence
+    {stride, 2*stride, ..., numXCDs*stride} mod numXCDs covers every
+    residue 0..numXCDs-1 exactly once, which keeps target coverage
+    identical to walking neighbors but with a non-sequential fan-out.
+    """
+    s = 2
+    while gcd(s, n) != 1:
+        s += 1
+    return s
+
 
 class XCCMapping(Component):
     """
@@ -3027,6 +3049,20 @@ class StreamKDynamic(StreamK):
         #               queues, so when one XCD finishes early its overflow
         #               WGs cover every other queue without any single WG
         #               having to walk neighbors.
+        #   wsMode == 7: home queue + WG-id strided-jump steal with a
+        #               coprime-stride multiplier (one atomic at
+        #               target = (currentXCD + ((hop_idx + 1) * stride) % numXCDs)
+        #                         & xcdMask
+        #               where hop_idx = (StreamKIdx >> log2NumXCDs) & xcdMask
+        #               and stride = _smallest_nontrivial_coprime(numXCDs),
+        #               inlined as a Python int at codegen time (3 for
+        #               numXCDs in {2,4,8,16}). Same fan-out coverage as
+        #               WS=6 but with consecutive overflow WGs picking
+        #               non-adjacent queues, so neighboring stealers are
+        #               less likely to contend on the same memory channel
+        #               or atomic bank. See the WS=7 block below for the
+        #               full rationale and the deviation from the literal
+        #               user formula (% numXCDs vs % numXCDs-1).
         # All other valid values are rejected by Solution.py.
 
         # ----- Address / queue setup -----
@@ -3164,7 +3200,7 @@ class StreamKDynamic(StreamK):
 
             skUseWorkStealing = None
             skFetchHomeQueue = None
-            stealingMode = wsMode in (1, 4, 5, 6)
+            stealingMode = wsMode in (1, 4, 5, 6, 7)
             if stealingMode:
                 # When (TotalItems & xcdMask) != 0 the WG might steal, in which
                 # case the home counter must NOT auto-reset (kernelEnd handles it).
@@ -3322,6 +3358,126 @@ class StreamKDynamic(StreamK):
                 module.add(SMovB32(dst=sgpr(sQueueIdx), src=sgpr(sTarget), comment="Adopt target as the working queue"))
                 writer.sgprPool.checkIn(sTarget)
                 self.dynamicQueueBaseAddressFromIdx(writer, module, sAddress, sQueueIdx, "stolen queue (WG-strided)")
+                module.add(SMovB32(dst=sgpr(sWorkItemIdx), src=hex(0xFFFFFFFF), comment="Disable atomic auto-reset"))
+                module.add(SAtomicInc(dst=sgpr(sWorkItemIdx), base=sgpr(sAddress, 2), soffset=0, smem=SMEMModifiers(glc=True), comment="Fetch stolen work item index"))
+                module.add(SWaitCnt(dscnt=0, comment="Wait for scalar memory op"))
+                module.add(SLShiftLeftB32(dst=sgpr(sWorkItemIdx), src=sgpr(sWorkItemIdx), shiftHex=log2NumXCDs))
+                module.add(SAddU32(dst=sgpr(sWorkItemIdx), src0=sgpr(sWorkItemIdx), src1=sgpr(sQueueIdx)))
+                # Race / OOB tiles get caught by the downstream valid check.
+                module.add(skFetchDone)
+                writer.sgprPool.checkIn(sRemainder)
+
+            if wsMode == 7:
+                # WG-id strided-jump steal with a coprime-stride multiplier.
+                #
+                # Formula (matches the per-mode dispatch comment above and
+                # the comment block in ValidParameters.py):
+                #   hop_idx = (StreamKIdx >> log2NumXCDs) & xcdMask
+                #   offset  = (hop_idx * stride + stride) & xcdMask
+                #   target  = (currentXCD + offset) & xcdMask
+                # where stride is computed at codegen time as
+                # _smallest_nontrivial_coprime(numXCDs). For numXCDs in
+                # {2, 4, 8, 16} this is 3; for arbitrary numXCDs it is the
+                # smallest prime not dividing numXCDs. We inline it as a
+                # Python int into the SMulI32/SAddU32 immediates so it
+                # appears as a literal in the generated assembly with NO
+                # runtime division anywhere.
+                #
+                # Coverage: stride is coprime to numXCDs, so the sequence
+                # {stride, 2*stride, ..., numXCDs*stride} mod numXCDs
+                # permutes 0..numXCDs-1 exactly. Adding stride to hop_idx
+                # before reducing mod numXCDs (the `+ stride` term)
+                # corresponds to the user's `(hop_idx + 1) * stride`
+                # written out as `hop_idx * stride + stride`. Same set,
+                # one fewer multiply.
+                #
+                # Difference vs WS=6 fan-out: WS=6 picks targets in
+                # straight WG-id order (consecutive overflow WGs from one
+                # XCD pick targets 0,1,2,...,numXCDs-1). WS=7 multiplies
+                # the hop index by stride so consecutive overflow WGs pick
+                # targets that jump around the queue ring (for numXCDs=8
+                # stride=3 the target sequence relative to home is
+                # {3, 6, 1, 4, 7, 2, 5, 0}). Because stride is coprime
+                # the same numXCDs targets are still covered, just in a
+                # permuted order — the intent is to reduce contention on
+                # adjacent memory channels / atomic banks between
+                # consecutive stealers.
+                #
+                # ----- Deviation from the literal user formula -----
+                # The user's intent is `(WG / numXCDs) % (numXCDs - 1)` as
+                # the hop index, then `+ 1` to ensure the offset is in
+                # 1..numXCDs-1 (so target is never the home queue). For
+                # numXCDs=8 the divisor is 7 — NOT a power of two — so
+                # `% 7` would require real scalar division (~5 instructions
+                # via mul_hi + fixup using the libdivide magic-number
+                # trick). We use `% numXCDs` instead (free with AND, since
+                # numXCDs is a power of two). The offsets then cycle
+                # through {stride, 2*stride, ..., numXCDs*stride} mod
+                # numXCDs, which for numXCDs=8 stride=3 is
+                # {3, 6, 1, 4, 7, 2, 5, 0}: exactly the same 7 non-zero
+                # offsets the literal formula would produce, plus one
+                # zero-offset case (every numXCDs-th WG that enters the
+                # steal block). The zero case lands on offset 0, sets
+                # target == home, and bails through the existing
+                # `target == home` check. The bail is one compare + branch
+                # (~2 cycles) and only fires after the home atomic already
+                # exhausted the queue, so trading 1 in numXCDs steal-block
+                # bails for ~5 saved instructions per steal is a clear
+                # win. Coverage of the non-home queues is identical to the
+                # literal formula.
+                #
+                # Other gating mirrors WS=6:
+                #   - Skip if home atomic returned a valid tile.
+                #   - Skip if (TotalTiles & xcdMask) == 0 (no remainder).
+                #   - target == home -> bail (covers the zero-offset wrap
+                #     case described above).
+                #   - target >= remainder -> bail (target queue owns no
+                #     structural extra; no point burning an atomic).
+                stride = _smallest_nontrivial_coprime(numXCDs)
+
+                skFetchDone = Label("SK_FetchDone", "")
+                module.add(SCmpLtU32(src0=sgpr(sWorkItemIdx), src1=sgpr("TotalTiles"), comment="Check active queue work item"))
+                module.add(SCBranchSCC1(labelName=skFetchDone.getLabelName(), comment="Fetched valid work"))
+                sRemainder = writer.sgprPool.checkOut(1, "remainder tiles")
+                module.add(SAndB32(dst=sgpr(sRemainder), src0=sgpr("TotalTiles"), src1=xcdMask, comment="Remainder tiles"))
+                module.add(SCmpEQU32(src0=sgpr(sRemainder), src1=0, comment="Check if stealing can help"))
+                module.add(SCBranchSCC1(labelName=skFetchDone.getLabelName(), comment="No tile remainder; no stealing"))
+
+                # hop_idx = (StreamKIdx >> log2NumXCDs) & xcdMask
+                sHopIdx = writer.sgprPool.checkOut(1, "hopIdx")
+                module.add(SLShiftRightB32(dst=sgpr(sHopIdx), src=sgpr("StreamKIdx"), shiftHex=log2NumXCDs, comment="StreamKIdx / numXCDs"))
+                module.add(SAndB32(dst=sgpr(sHopIdx), src0=sgpr(sHopIdx), src1=xcdMask, comment="(StreamKIdx / numXCDs) & xcdMask (note: % numXCDs not % numXCDs-1, see block comment)"))
+
+                # offset = (hop_idx * stride + stride) & xcdMask
+                # stride is a codegen-time Python int from
+                # _smallest_nontrivial_coprime(numXCDs); inlined as a
+                # literal immediate so there is no runtime division.
+                sOffset = writer.sgprPool.checkOut(1, "stealOffset")
+                module.add(SMulI32(dst=sgpr(sOffset), src0=sgpr(sHopIdx), src1=hex(stride), comment="hop_idx * stride (stride=%d, coprime to numXCDs=%d)" % (stride, numXCDs)))
+                writer.sgprPool.checkIn(sHopIdx)
+                module.add(SAddU32(dst=sgpr(sOffset), src0=sgpr(sOffset), src1=hex(stride), comment="+ stride (= (hop_idx + 1) * stride; offset is 0 only when this product wraps to numXCDs)"))
+                module.add(SAndB32(dst=sgpr(sOffset), src0=sgpr(sOffset), src1=xcdMask, comment="& xcdMask -> mod numXCDs"))
+
+                # target = (home + offset) & xcdMask
+                sTarget = writer.sgprPool.checkOut(1, "stealTarget")
+                module.add(SAddU32(dst=sgpr(sTarget), src0=sgpr(sQueueIdx), src1=sgpr(sOffset), comment="home + offset"))
+                writer.sgprPool.checkIn(sOffset)
+                module.add(SAndB32(dst=sgpr(sTarget), src0=sgpr(sTarget), src1=xcdMask, comment="(home + offset) & xcdMask"))
+
+                # If target == home (offset wrapped to 0), bail. This is
+                # the 1-in-numXCDs case described in the deviation note
+                # above.
+                module.add(SCmpEQU32(src0=sgpr(sTarget), src1=sgpr(sQueueIdx), comment="Target == home? (offset wrapped to 0; deviation case)"))
+                module.add(SCBranchSCC1(labelName=skFetchDone.getLabelName(), comment="Skip self-target"))
+
+                # Eligibility: target queue must own a structural extra.
+                module.add(SCmpGeU32(src0=sgpr(sTarget), src1=sgpr(sRemainder), comment="Target has no structural extra?"))
+                module.add(SCBranchSCC1(labelName=skFetchDone.getLabelName(), comment="Skip; target has no extra"))
+
+                # Single atomic on the target.
+                module.add(SMovB32(dst=sgpr(sQueueIdx), src=sgpr(sTarget), comment="Adopt target as the working queue"))
+                writer.sgprPool.checkIn(sTarget)
+                self.dynamicQueueBaseAddressFromIdx(writer, module, sAddress, sQueueIdx, "stolen queue (WG-strided x stride)")
                 module.add(SMovB32(dst=sgpr(sWorkItemIdx), src=hex(0xFFFFFFFF), comment="Disable atomic auto-reset"))
                 module.add(SAtomicInc(dst=sgpr(sWorkItemIdx), base=sgpr(sAddress, 2), soffset=0, smem=SMEMModifiers(glc=True), comment="Fetch stolen work item index"))
                 module.add(SWaitCnt(dscnt=0, comment="Wait for scalar memory op"))

@@ -812,7 +812,33 @@ validParameters = { # we need to make sure this matches develop
     #    any single WG walking neighbors. Unlike WS=1/4/5 the home-already-
     #    has-extra check is dropped (the fan-out is the whole point); only
     #    the target == home and target >= remainder bails are kept.
-    "StreamKDynamicQueueWorkStealing": [0, 1, 2, 3, 4, 5, 6],
+    # 7: WG-id strided-jump stealing with a stride-multiplied non-sequential
+    #    fan-out. After home queue is empty, the WG attempts ONE atomic on
+    #      target = (currentXCD + ((hop_idx + 1) * stride) % numXCDs) % numXCDs
+    #    where hop_idx = (StreamKIdx / numXCDs) % numXCDs and stride is the
+    #    smallest nontrivial coprime of numXCDs (computed at codegen time;
+    #    always 3 for valid numXCDs in {2,4,8,16}, and a small prime for
+    #    larger powers of two or any other numXCDs we might run).
+    #    Difference vs WS=6: WS=6 walks queues in sequential WG-id order
+    #    (consecutive overflow WGs from one XCD pick targets 0,1,2,...);
+    #    WS=7 multiplies the hop index by a coprime stride so consecutive
+    #    overflow WGs pick targets that jump around the queue ring. Because
+    #    stride is coprime to numXCDs, the multiplicative sequence still
+    #    covers all numXCDs queues exactly once, just in a permuted order.
+    #    The intent is to break sequential adjacency between consecutive
+    #    stealers so they hit different memory channels / atomic banks.
+    #    Deviation from the literal user formula: the user's formula uses
+    #    `(WG / numXCDs) % (numXCDs - 1)` which would require an actual
+    #    scalar modulo by a non-power-of-two (e.g. % 7 for numXCDs=8 costs
+    #    ~5 instructions via mul_hi + fixup). We use `% numXCDs` (a power
+    #    of two, free with AND) instead. Coverage is identical (still 7
+    #    distinct non-home offsets for numXCDs=8), but every numXCDs-th WG
+    #    that enters the steal block lands on offset 0 and bails through
+    #    the existing target == home check. The bail is essentially free
+    #    (one compare + branch) and only fires after the home atomic
+    #    already exhausted the queue, so trading 1 in numXCDs steal-block
+    #    bails for ~5 saved instructions per steal is a clear win.
+    "StreamKDynamicQueueWorkStealing": [0, 1, 2, 3, 4, 5, 6, 7],
     # Enables XCC-based remapping of workgroups, set the value to the number of XCCs
     # for the device/configuration being used
     #  0: uses default workgroup assignment
