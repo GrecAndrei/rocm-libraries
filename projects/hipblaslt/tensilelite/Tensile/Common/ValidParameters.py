@@ -803,7 +803,16 @@ validParameters = { # we need to make sure this matches develop
     # 5: single-hop previous-neighbor stealing. Identical to WS=4 except the
     #    target queue is (queueIdx-1) & xcdMask. Used as a directional
     #    counterpart to WS=4 to study whether walk direction matters.
-    "StreamKDynamicQueueWorkStealing": [0, 1, 2, 3, 4, 5],
+    # 6: WG-id strided-jump stealing. After home queue is empty, the WG
+    #    attempts ONE atomic on target = (StreamKIdx >> log2NumXCDs) & xcdMask.
+    #    The consecutive WGs that originally landed on home queue Q
+    #    (StreamKIdx values Q, Q+numXCDs, Q+2*numXCDs, ...) get targets
+    #    0, 1, 2, ..., numXCDs-1 in turn, so when one XCD finishes early
+    #    its overflow WGs deterministically cover every other queue without
+    #    any single WG walking neighbors. Unlike WS=1/4/5 the home-already-
+    #    has-extra check is dropped (the fan-out is the whole point); only
+    #    the target == home and target >= remainder bails are kept.
+    "StreamKDynamicQueueWorkStealing": [0, 1, 2, 3, 4, 5, 6],
     # Enables XCC-based remapping of workgroups, set the value to the number of XCCs
     # for the device/configuration being used
     #  0: uses default workgroup assignment

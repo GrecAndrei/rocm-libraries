@@ -3021,6 +3021,12 @@ class StreamKDynamic(StreamK):
         #   wsMode == 5: home queue + single-hop previous-neighbor steal
         #               (one atomic at (queueIdx-1) & xcdMask). Mirrors WS=4
         #               in the opposite direction.
+        #   wsMode == 6: home queue + WG-id strided-jump steal (one atomic at
+        #               target = (StreamKIdx >> log2NumXCDs) & xcdMask). All
+        #               WGs whose home is the same XCD fan out across all
+        #               queues, so when one XCD finishes early its overflow
+        #               WGs cover every other queue without any single WG
+        #               having to walk neighbors.
         # All other valid values are rejected by Solution.py.
 
         # ----- Address / queue setup -----
@@ -3158,7 +3164,7 @@ class StreamKDynamic(StreamK):
 
             skUseWorkStealing = None
             skFetchHomeQueue = None
-            stealingMode = wsMode in (1, 4, 5)
+            stealingMode = wsMode in (1, 4, 5, 6)
             if stealingMode:
                 # When (TotalItems & xcdMask) != 0 the WG might steal, in which
                 # case the home counter must NOT auto-reset (kernelEnd handles it).
@@ -3263,6 +3269,65 @@ class StreamKDynamic(StreamK):
                 # If the steal failed (race), tile_id will be >= TotalItems
                 # and the existing valid-work-item check downstream will turn
                 # this WG into a no-op (same handling as WS=1 wrap-back).
+                module.add(skFetchDone)
+                writer.sgprPool.checkIn(sRemainder)
+
+            if wsMode == 6:
+                # WG-id strided-jump steal.
+                #
+                # Target queue = (StreamKIdx >> log2NumXCDs) & xcdMask. With
+                # numXCDs a power of two this is two cheap scalar ops (shift
+                # then AND), and it gives a deterministic per-WG fan-out:
+                # the consecutive WGs that originally landed on home queue Q
+                # (StreamKIdx values Q, Q+numXCDs, Q+2*numXCDs, ...) get
+                # targets 0, 1, 2, ..., numXCDs-1, 0, 1, ... respectively.
+                # So when one XCD finishes early, its overflow WGs cover
+                # every other queue without ANY WG walking neighbors.
+                #
+                # Differences from WS=1/4/5 gating:
+                #   - We DO NOT bail when the home queue already has a
+                #     structural extra. The point of WS=6 is to fan out
+                #     based on WG-id, regardless of whether home had its own
+                #     extra. The home atomic already returned OOB to reach
+                #     this block, so home is exhausted from this WG's PoV
+                #     and stealing is the only way forward.
+                #   - We still require (TotalTiles & xcdMask) != 0 so that
+                #     SOMETHING extra exists to steal.
+                #   - target == home_queueIdx -> bail (would re-hit the
+                #     queue we just exhausted).
+                #   - target >= remainder -> bail (target queue owns no
+                #     structural extra; no point burning an atomic on it).
+                skFetchDone = Label("SK_FetchDone", "")
+                module.add(SCmpLtU32(src0=sgpr(sWorkItemIdx), src1=sgpr("TotalTiles"), comment="Check active queue work item"))
+                module.add(SCBranchSCC1(labelName=skFetchDone.getLabelName(), comment="Fetched valid work"))
+                sRemainder = writer.sgprPool.checkOut(1, "remainder tiles")
+                module.add(SAndB32(dst=sgpr(sRemainder), src0=sgpr("TotalTiles"), src1=xcdMask, comment="Remainder tiles"))
+                module.add(SCmpEQU32(src0=sgpr(sRemainder), src1=0, comment="Check if stealing can help"))
+                module.add(SCBranchSCC1(labelName=skFetchDone.getLabelName(), comment="No tile remainder; no stealing"))
+
+                # target = (StreamKIdx >> log2NumXCDs) & xcdMask
+                sTarget = writer.sgprPool.checkOut(1, "stealTarget")
+                module.add(SLShiftRightB32(dst=sgpr(sTarget), src=sgpr("StreamKIdx"), shiftHex=log2NumXCDs, comment="StreamKIdx / numXCDs"))
+                module.add(SAndB32(dst=sgpr(sTarget), src0=sgpr(sTarget), src1=xcdMask, comment="(StreamKIdx / numXCDs) & xcdMask"))
+
+                # If target == home, the WG would re-hit its (exhausted) home queue.
+                module.add(SCmpEQU32(src0=sgpr(sTarget), src1=sgpr(sQueueIdx), comment="Target == home?"))
+                module.add(SCBranchSCC1(labelName=skFetchDone.getLabelName(), comment="Skip self-target"))
+
+                # Eligibility: target queue must own a structural extra.
+                module.add(SCmpGeU32(src0=sgpr(sTarget), src1=sgpr(sRemainder), comment="Target has no structural extra?"))
+                module.add(SCBranchSCC1(labelName=skFetchDone.getLabelName(), comment="Skip; target has no extra"))
+
+                # Single atomic on the target.
+                module.add(SMovB32(dst=sgpr(sQueueIdx), src=sgpr(sTarget), comment="Adopt target as the working queue"))
+                writer.sgprPool.checkIn(sTarget)
+                self.dynamicQueueBaseAddressFromIdx(writer, module, sAddress, sQueueIdx, "stolen queue (WG-strided)")
+                module.add(SMovB32(dst=sgpr(sWorkItemIdx), src=hex(0xFFFFFFFF), comment="Disable atomic auto-reset"))
+                module.add(SAtomicInc(dst=sgpr(sWorkItemIdx), base=sgpr(sAddress, 2), soffset=0, smem=SMEMModifiers(glc=True), comment="Fetch stolen work item index"))
+                module.add(SWaitCnt(dscnt=0, comment="Wait for scalar memory op"))
+                module.add(SLShiftLeftB32(dst=sgpr(sWorkItemIdx), src=sgpr(sWorkItemIdx), shiftHex=log2NumXCDs))
+                module.add(SAddU32(dst=sgpr(sWorkItemIdx), src0=sgpr(sWorkItemIdx), src1=sgpr(sQueueIdx)))
+                # Race / OOB tiles get caught by the downstream valid check.
                 module.add(skFetchDone)
                 writer.sgprPool.checkIn(sRemainder)
 
