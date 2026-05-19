@@ -2,3 +2,4 @@
 # SPDX-License-Identifier: MIT
 
 add_subdirectory(gemm_bquant)
+add_subdirectory(gemm_abquant)

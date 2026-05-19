@@ -10,6 +10,8 @@ GEMM_PRESHUFFLE_PIPELINES = ["preshufflev2"]
 
 GEMM_BQUANT_PIPELINES = ["compv3"]
 
+GEMM_ABQUANT_PIPELINES = ["compv3"]
+
 LAYOUT_MAP = {
     "r": "ck_tile::tensor_layout::gemm::RowMajor",
     "c": "ck_tile::tensor_layout::gemm::ColumnMajor",
@@ -27,6 +29,7 @@ ELEMENT_SIZE_MAP = {
     "fp64": 8,
 }
 
+
 def get_warp_size_for_gpu(gpu_target: str) -> int:
     """Get the warp size for a given GPU target.
 
@@ -36,6 +39,7 @@ def get_warp_size_for_gpu(gpu_target: str) -> int:
     if gpu_target.startswith("gfx9"):
         return 64  # CDNA - WAVE64
     return 32  # RDNA and others - WAVE32
+
 
 WARP_SUPPORTED_COMBINATIONS = {
     "gfx90a": [
@@ -229,6 +233,11 @@ BQUANT_TRAIT_UNSUPPORTED_COMBINATIONS = {
     ("compv3", "cshuffle", "interwave"),
 }
 
+ABQUANT_TRAIT_UNSUPPORTED_COMBINATIONS = {
+    ("compv3", "default", "interwave"),
+    ("compv3", "cshuffle", "interwave"),
+}
+
 
 def element_size(data_type: str) -> float:
     """Calculate the size (in bytes) of a single element for given data type."""
@@ -262,6 +271,13 @@ def is_trait_combination_valid(
             return False
         # BPreshuffleQuant requires ColumnMajor BLayout (i.e., second char of layout is 'c')
         if persistent_or_preshuffle_quant and len(layout) >= 2 and layout[1] != "c":
+            return False
+        return True
+    elif kernel_name_prefix == "gemm_abquant":
+        if (pipeline, epilogue, scheduler) in ABQUANT_TRAIT_UNSUPPORTED_COMBINATIONS:
+            return False
+        # abquant only supports compv3 + intrawave
+        if pipeline != "compv3" or scheduler != "intrawave":
             return False
         return True
     else:
@@ -628,6 +644,28 @@ def is_tile_config_valid(
             logging.debug(f"GEMM BQuant validation failed: {bquant_valid_error}")
             return False
 
+    elif kernel_name_prefix == "gemm_abquant":
+        abquant_valid, abquant_valid_error = validate_gemm_abquant(
+            tile_m,
+            tile_n,
+            tile_k,
+            warp_m,
+            warp_n,
+            warp_k,
+            warp_tile_m,
+            warp_tile_n,
+            warp_tile_k,
+            a_datatype,
+            b_datatype,
+            c_datatype,
+            pipeline,
+            layout,
+            gpu_target,
+        )
+        if not abquant_valid:
+            logging.debug(f"GEMM ABQuant validation failed: {abquant_valid_error}")
+            return False
+
     return True
 
 
@@ -839,7 +877,10 @@ def validate_cshuffle_epilogue_distribution(
     YPerTile = tile_m // warp_m
 
     if XPerTile <= 0 or YPerTile <= 0:
-        return False, f"Invalid tile dimensions: XPerTile={XPerTile}, YPerTile={YPerTile}"
+        return (
+            False,
+            f"Invalid tile dimensions: XPerTile={XPerTile}, YPerTile={YPerTile}",
+        )
 
     num_warps = BlockSize // warp_size
     if num_warps * warp_size == 0:
@@ -861,7 +902,7 @@ def validate_cshuffle_epilogue_distribution(
         return (
             False,
             f"CShuffleEpilogue distribution invalid: X0({X0}) * Y1({Y1}) = {X0 * Y1} != warp_size({warp_size}). "
-            f"XPerTile={XPerTile}, YPerTile={YPerTile}, VecSize={VecSize}, BlockSize={BlockSize}"
+            f"XPerTile={XPerTile}, YPerTile={YPerTile}, VecSize={VecSize}, BlockSize={BlockSize}",
         )
 
     return True, ""
@@ -1245,6 +1286,72 @@ def validate_gemm_bquant(
         return False, (
             f"warp_tile_m({warp_tile_m}) must equal warp_tile_n({warp_tile_n}) "
             f"(MFMA requirement for BQuant)"
+        )
+
+    if a_datatype in ["fp8", "bf8"]:
+        if gpu_target == "gfx950":
+            expected_k = 64 if warp_tile_m == 32 else 128
+        else:
+            expected_k = 32 if warp_tile_m == 32 else 64
+        if warp_tile_k != expected_k:
+            return False, (
+                f"For {a_datatype} on {gpu_target}, warp_tile_m={warp_tile_m} "
+                f"requires warp_tile_k={expected_k}, got warp_tile_k={warp_tile_k}"
+            )
+
+    return True, ""
+
+
+def validate_gemm_abquant(
+    tile_m: int,
+    tile_n: int,
+    tile_k: int,
+    warp_m: int,
+    warp_n: int,
+    warp_k: int,
+    warp_tile_m: int,
+    warp_tile_n: int,
+    warp_tile_k: int,
+    a_datatype: str,
+    b_datatype: str,
+    c_datatype: str,
+    pipeline: str,
+    layout: str,
+    gpu_target: str,
+    group_size_k: int = 128,
+) -> Tuple[bool, str]:
+    """Validate ABQuant GEMM-specific constraints."""
+    whole_workgroup_cover_valid, whole_workgroup_cover_error = (
+        validate_whole_wg_cover_configuration(
+            tile_m,
+            tile_n,
+            tile_k,
+            warp_m,
+            warp_n,
+            warp_k,
+            layout,
+            a_datatype,
+            b_datatype,
+        )
+    )
+    if not whole_workgroup_cover_valid:
+        return False, whole_workgroup_cover_error
+
+    if tile_k % group_size_k != 0 or tile_k < group_size_k:
+        return False, (
+            f"tile_k({tile_k}) must be a multiple of group_size_k({group_size_k}) "
+            f"and tile_k >= group_size_k"
+        )
+
+    if group_size_k % warp_tile_k != 0:
+        return False, (
+            f"group_size_k({group_size_k}) must be divisible by warp_tile_k({warp_tile_k})"
+        )
+
+    if warp_tile_m != warp_tile_n:
+        return False, (
+            f"warp_tile_m({warp_tile_m}) must equal warp_tile_n({warp_tile_n}) "
+            f"(MFMA requirement for ABQuant)"
         )
 
     if a_datatype in ["fp8", "bf8"]:
