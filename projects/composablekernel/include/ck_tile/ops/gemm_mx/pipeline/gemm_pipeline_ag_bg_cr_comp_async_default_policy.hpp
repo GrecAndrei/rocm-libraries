@@ -23,7 +23,7 @@ struct MXGemmPipelineAgBgCrCompAsyncDefaultPolicy
     static constexpr auto BTileAccessPattern = tile_distribution_pattern::warp_raked;
 
     // MX scaling configuration: each e8m0 scale covers 32 elements in K
-    static constexpr int BlockScaleSize = 32;
+    static constexpr int ScaleGranularityK = 32;
 
     template <typename Problem,
               typename OverrideADataType = remove_cvref_t<typename Problem::ADataType>>
@@ -158,7 +158,7 @@ struct MXGemmPipelineAgBgCrCompAsyncDefaultPolicy
         constexpr index_t MIterPerWarp = MPerBlock / (MWarp * MPerXdl);
         constexpr index_t KPerXdl      = WarpTile::at(number<2>{});
         constexpr index_t KIterPerWarp = KPerBlock / KPerXdl;
-        constexpr index_t KPerLane     = KPerXdl / BlockScaleSize / K_Lane;
+        constexpr index_t KPerLane     = KPerXdl / ScaleGranularityK / K_Lane;
 
         // Effective pack sizes: fall back to 1 when iteration count < pack size
         constexpr index_t MXdlPackEff =
@@ -196,7 +196,7 @@ struct MXGemmPipelineAgBgCrCompAsyncDefaultPolicy
 
         constexpr index_t KPerXdl      = WarpTile::at(number<2>{});
         constexpr index_t KIterPerWarp = KPerBlock / KPerXdl;
-        constexpr index_t KPerLane     = KPerXdl / BlockScaleSize / K_Lane;
+        constexpr index_t KPerLane     = KPerXdl / ScaleGranularityK / K_Lane;
 
         // Effective pack sizes: fall back to 1 when iteration count < pack size
         constexpr index_t NXdlPackEff =
