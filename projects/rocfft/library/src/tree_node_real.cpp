@@ -20,9 +20,11 @@
 
 #include "tree_node_real.h"
 #include "../../shared/arithmetic.h"
+#include "../../shared/precision_type.h"
 #include "function_pool.h"
 #include "node_factory.h"
 #include "real2complex.h"
+#include <algorithm>
 
 // work out the real and complex lengths on a real-complex plan, and
 // return pointers to those lengths
@@ -109,6 +111,34 @@ static bool SBCR_dim_available(const function_pool&       pool,
                                rocfft_precision           precision)
 {
     return pool.has_SBCR_kernel(length[sbcr_dim], precision);
+}
+
+// AIFFT-457: Returns true if a fused real-Stockham kernel
+// (ebtype = Real2C_POST or C2Real_PRE) of the given complex-FFT length
+// and precision would fit in this device's per-workgroup LDS budget,
+// targeting occupancy-2.
+//
+// LDS formula mirrors the runtime calculation in
+// Stockham1DNode::SetupGridParam_internal (tree_node_1D.cpp:918-920):
+//   lds_bytes = (cfftLength + 1) * transforms_per_block * bytes_per_complex
+// The +1 is the per-batch padding fused mode requires; the lack of /2 is
+// because fused mode disables the half-LDS optimization.
+//
+// Returns false if no plain Stockham kernel is registered for this length
+// (caller falls back to the two-leaf non-fused tree).
+static bool fused_real_stockham_fits_lds(const function_pool&   pool,
+                                         size_t                 cfftLength,
+                                         rocfft_precision       precision,
+                                         const hipDeviceProp_t& deviceProp)
+{
+    FMKey key(cfftLength, precision, CS_KERNEL_STOCKHAM);
+    if(!pool.has_function(key))
+        return false;
+    const size_t bwd
+        = std::max<size_t>(pool.get_kernel(key).transforms_per_block, 1);
+    const size_t fused_lds_bytes
+        = (cfftLength + 1) * bwd * complex_type_size(precision);
+    return fused_lds_bytes <= deviceProp.sharedMemPerBlock / 2;
 }
 
 /*****************************************************
@@ -269,10 +299,16 @@ void RealTransEvenNode::BuildTree_internal(SchemeTreeVec& child_scheme_trees)
             try_fuse_pre_post_processing = cfftPlan->isLeafNode();
 
         // Enable fusion for small simple 1D cases only.
-        // TODO: remove it after full solution done.
+        // AIFFT-457: On chips with > 64 KiB LDS (MI355/MI450), use an
+        // LDS-fit calculation; on smaller-LDS chips keep the historical
+        // < 512 literal to preserve plan shapes and tuned-solution caches.
+        const bool fused_fits
+            = (deviceProp.sharedMemPerBlock > 65536)
+                  ? fused_real_stockham_fits_lds(pool, length[0] / 2, precision, deviceProp)
+                  : (length[0] < 512);
         if((cfftPlan->scheme == CS_KERNEL_STOCKHAM) && // simple decomposition
            (length.size() == 1) && // 1D
-           (length[0] < 512) && // < small case < 512
+           fused_fits &&
            (inArrayType != rocfft_array_type_hermitian_planar) && // no planar
            (outArrayType != rocfft_array_type_hermitian_planar))
         {
@@ -557,9 +593,12 @@ void Real2DEvenNode::BuildTree_internal_SBCC(SchemeTreeVec& child_scheme_trees)
 
         // first row fft + postproc is mandatory for fastest dimension
         auto rcplan = NodeFactory::CreateNodeFromScheme(CS_REAL_TRANSFORM_EVEN, this);
-        // for length > 2048, don't try pre/post because LDS usage is too high
+        // AIFFT-457: LDS-aware on > 64 KiB LDS chips; legacy <= 2048 elsewhere.
+        // `length` is the real-side count on R2C (forward); cfft length is half.
         static_cast<RealTransEvenNode*>(rcplan.get())->try_fuse_pre_post_processing
-            = length[0] <= 2048;
+            = (deviceProp.sharedMemPerBlock > 65536)
+                  ? fused_real_stockham_fits_lds(pool, length[0] / 2, precision, deviceProp)
+                  : (length[0] <= 2048);
 
         rcplan->length    = length;
         rcplan->dimension = 1;
@@ -595,9 +634,16 @@ void Real2DEvenNode::BuildTree_internal_SBCC(SchemeTreeVec& child_scheme_trees)
 
         // c2r
         auto crplan = NodeFactory::CreateNodeFromScheme(CS_REAL_TRANSFORM_EVEN, this);
-        // for length > 2048, don't try pre/post because LDS usage is too high
+        // AIFFT-457: LDS-aware on > 64 KiB LDS chips; legacy literal elsewhere.
+        // C2R: parent `length` is Hermitian, `outputLength` is the real side.
+        // The new helper uses the real-side count (correct axis); the legacy
+        // fallback keeps the original `length[0] <= 2048` literal verbatim to
+        // preserve old-chip plan shapes and tuned-solution caches.
         static_cast<RealTransEvenNode*>(crplan.get())->try_fuse_pre_post_processing
-            = length[0] <= 2048;
+            = (deviceProp.sharedMemPerBlock > 65536)
+                  ? fused_real_stockham_fits_lds(
+                        pool, outputLength[0] / 2, precision, deviceProp)
+                  : (length[0] <= 2048);
 
         crplan->length    = outputLength;
         crplan->dimension = 1;
@@ -1218,9 +1264,12 @@ void Real3DEvenNode::BuildTree_internal_SBCC(SchemeTreeVec& child_scheme_trees)
 
         // first row fft + postproc is mandatory for fastest dimension
         auto rcplan = NodeFactory::CreateNodeFromScheme(CS_REAL_TRANSFORM_EVEN, this);
-        // for length > 2048, don't try pre/post because LDS usage is too high
+        // AIFFT-457: LDS-aware on > 64 KiB LDS chips; legacy <= 2048 elsewhere.
+        // R2C: `length` is the real-side count; cfft length is half.
         static_cast<RealTransEvenNode*>(rcplan.get())->try_fuse_pre_post_processing
-            = length[0] <= 2048;
+            = (deviceProp.sharedMemPerBlock > 65536)
+                  ? fused_real_stockham_fits_lds(pool, length[0] / 2, precision, deviceProp)
+                  : (length[0] <= 2048);
 
         rcplan->length    = length;
         rcplan->dimension = 1;
@@ -1249,9 +1298,16 @@ void Real3DEvenNode::BuildTree_internal_SBCC(SchemeTreeVec& child_scheme_trees)
 
         // c2r
         auto crplan = NodeFactory::CreateNodeFromScheme(CS_REAL_TRANSFORM_EVEN, this);
-        // for length > 2048, don't try pre/post because LDS usage is too high
+        // AIFFT-457: LDS-aware on > 64 KiB LDS chips; legacy literal elsewhere.
+        // C2R: parent `length` is Hermitian, `outputLength` is the real side.
+        // The new helper uses the real-side count (correct axis); the legacy
+        // fallback keeps the original `length[0] <= 2048` literal verbatim to
+        // preserve old-chip plan shapes and tuned-solution caches.
         static_cast<RealTransEvenNode*>(crplan.get())->try_fuse_pre_post_processing
-            = length[0] <= 2048;
+            = (deviceProp.sharedMemPerBlock > 65536)
+                  ? fused_real_stockham_fits_lds(
+                        pool, outputLength[0] / 2, precision, deviceProp)
+                  : (length[0] <= 2048);
 
         crplan->length    = outputLength;
         crplan->dimension = 1;
