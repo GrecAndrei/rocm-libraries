@@ -4,6 +4,7 @@
 #pragma once
 
 #include "ck_tile/core/config.hpp"
+#include "ck_tile/core/numeric/integer.hpp"
 
 #include <stdio.h>
 #if CK_TILE_CONCEPTS && CK_TILE_CONCEPTS_HEADER
@@ -18,7 +19,7 @@ namespace ck_tile::core::arch::mma {
  * containing 8-bits (for 16-bit source data) or 16-bits (for 8-bit source data)
  * of index information for a lane. \see DefaultSparseMfmaCtrlFlags
  */
-enum struct SparseCompressionIndex : int
+enum struct SparseCompressionIndex : int32_t
 {
     FIRST  = 0, // Uses bits  [7:0] or [15..0], for 16 and 8 bit data respectively
     SECOND = 1, // Uses bits [15:8] or [31:16], for 16 and 8 bit data respectively
@@ -56,8 +57,8 @@ namespace sparse::detail {
  */
 struct BuiltinParams
 {
-    int UseFirstIndex;       // CBSZ
-    int ByteIndexToOverride; // ABID
+    int32_t UseFirstIndex;       // CBSZ
+    int32_t ByteIndexToOverride; // ABID
 };
 
 template <SparseCompressionIndex Idx>
@@ -70,7 +71,7 @@ static constexpr BuiltinParams getBuiltinParams()
     }
     else
     {
-        return BuiltinParams{0, static_cast<int>(Idx)};
+        return BuiltinParams{0, static_cast<int32_t>(Idx)};
     }
 }
 

@@ -6,10 +6,11 @@
 #include "ck_tile/core/arch/arch.hpp"
 #include "ck_tile/core/config.hpp"
 #include "ck_tile/core/numeric/float8.hpp"
-#include "ck_tile/core/numeric/pk_fp4.hpp"
+#include "ck_tile/core/numeric/integer.hpp"
 #include "ck_tile/core/numeric/pk_f6.hpp"
+#include "ck_tile/core/numeric/pk_fp4.hpp"
 
-#include <cstdint>
+#include <cinttypes>
 #include <stdio.h>
 #if CK_TILE_CONCEPTS && CK_TILE_CONCEPTS_HEADER
 #include <concepts>
@@ -79,7 +80,7 @@ struct DefaultScaleMfmaCtrlFlags
 
 CK_TILE_HOST_DEVICE void print_flags(DefaultScaleMfmaCtrlFlags const& ctrlFlags)
 {
-    printf("CtrlFlags      OPSEL_A / OPSEL_B        : %d / %d\n",
+    printf("CtrlFlags      OPSEL_A / OPSEL_B        : %" PRId32 "/ %" PRId32 "\n",
            ctrlFlags.OPSEL_A,
            ctrlFlags.OPSEL_B);
 }
