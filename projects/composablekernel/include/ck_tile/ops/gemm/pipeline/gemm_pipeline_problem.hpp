@@ -95,6 +95,8 @@ struct GemmPipelineProblemBase
     // In the base situation, the Preshuffle setting should be false.
     static constexpr bool Preshuffle = false;
 
+    static constexpr bool Async = false;
+
     [[nodiscard]] CK_TILE_HOST static const std::string GetName()
     {
         // clang-format off
