@@ -16,10 +16,6 @@
 #include <concepts>
 #endif
 
-#if __clang_major__ >= 23
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wlifetime-safety-intra-tu-suggestions"
-#endif
 namespace ck_tile::core::arch::mma {
 
 /*! @enum MmaPipelineOptionFlag
@@ -53,6 +49,7 @@ struct MmaPipelineOptionFlags
     }
 
     constexpr MmaPipelineOptionFlags& operator|=(MmaPipelineOptionFlag addValue)
+        [[clang::lifetimebound]]
     {
         mFlags |= toType(addValue);
         return *this;
@@ -64,6 +61,7 @@ struct MmaPipelineOptionFlags
         return result;
     }
     constexpr MmaPipelineOptionFlags& operator&=(MmaPipelineOptionFlag maskValue)
+        [[clang::lifetimebound]]
     {
         mFlags &= toType(maskValue);
         return *this;
@@ -159,21 +157,30 @@ struct MmaPipelineBase
      * @param  inputBuffer The buffer to format.
      * @return A reference (or value) of type @p DstT corresponding to @p inputBuffer.
      */
-    template <typename DstT, typename SrcT>
+    template <typename DstT,
+              typename SrcT,
+              std::enable_if_t<is_std_tuple_v<ck_tile::remove_cvref_t<SrcT>>, int> = 0>
     CK_TILE_DEVICE static decltype(auto) formatBuffer(SrcT&& inputBuffer)
     {
         using DecayedSrcT = ck_tile::remove_cvref_t<SrcT>;
 
-        // If SrcT is a tuple, extract the first element (the vector) and format it
+        // Extract the first element (the vector) and format it
         // while preserving all remaining elements (metadata)
-        if constexpr(is_std_tuple_v<DecayedSrcT>)
-        {
-            // Create index sequence for all remaining elements (skip first)
-            constexpr std::size_t tuple_size = std::tuple_size_v<DecayedSrcT>;
-            return formatBufferTupleImpl<DstT>(std::forward<SrcT>(inputBuffer),
-                                               std::make_index_sequence<tuple_size - 1>{});
-        }
-        else if constexpr(std::is_array_v<DecayedSrcT> || std::is_pointer_v<DecayedSrcT>)
+
+        // Create index sequence for all remaining elements (skip first)
+        constexpr std::size_t tuple_size = std::tuple_size_v<DecayedSrcT>;
+        return formatBufferTupleImpl<DstT>(std::forward<SrcT>(inputBuffer),
+                                           std::make_index_sequence<tuple_size - 1>{});
+    }
+
+    template <typename DstT,
+              typename SrcT,
+              std::enable_if_t<!is_std_tuple_v<ck_tile::remove_cvref_t<SrcT>>, int> = 0>
+    CK_TILE_DEVICE static decltype(auto) formatBuffer([[clang::lifetimebound]] SrcT&& inputBuffer)
+    {
+        using DecayedSrcT = ck_tile::remove_cvref_t<SrcT>;
+
+        if constexpr(std::is_array_v<DecayedSrcT> || std::is_pointer_v<DecayedSrcT>)
         {
             return std::forward<SrcT>(inputBuffer);
         }
@@ -359,7 +366,3 @@ concept MmaPipelineInterface = std::derived_from<Derived, MmaPipelineBase<Flags,
 #endif // CK_TILE_CONCEPTS && CK_TILE_CONCEPTS_HEADER
 
 } // namespace ck_tile::core::arch::mma
-
-#if __clang_major__ >= 23
-#pragma clang diagnostic pop
-#endif
