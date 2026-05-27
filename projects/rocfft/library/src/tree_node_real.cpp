@@ -114,9 +114,10 @@ static bool SBCR_dim_available(const function_pool&       pool,
 }
 
 // True if a fused real-Stockham kernel of the given cfft length / precision
-// fits in this device's per-workgroup LDS at occupancy-2.  Fused mode disables
-// half-LDS and adds 1 padding element per batch, so
+// fits in this device's per-workgroup LDS.  Fused mode disables half-LDS and
+// adds 1 padding element per batch, so
 //   lds_bytes = (cfftLength + 1) * transforms_per_block * bytes_per_complex
+// Budget matches the runtime check in LeafNode::SetupGridParam (tree_node.cpp).
 // Returns false if no Stockham kernel is registered for this length.
 static bool fused_real_stockham_fits_lds(const function_pool&   pool,
                                          size_t                 cfftLength,
@@ -126,11 +127,9 @@ static bool fused_real_stockham_fits_lds(const function_pool&   pool,
     FMKey key(cfftLength, precision, CS_KERNEL_STOCKHAM);
     if(!pool.has_function(key))
         return false;
-    const size_t bwd
-        = std::max<size_t>(pool.get_kernel(key).transforms_per_block, 1);
-    const size_t fused_lds_bytes
-        = (cfftLength + 1) * bwd * complex_type_size(precision);
-    return fused_lds_bytes <= deviceProp.sharedMemPerBlock / 2;
+    const size_t bwd             = std::max<size_t>(pool.get_kernel(key).transforms_per_block, 1);
+    const size_t fused_lds_bytes = (cfftLength + 1) * bwd * complex_type_size(precision);
+    return fused_lds_bytes <= deviceProp.sharedMemPerBlock;
 }
 
 /*****************************************************
@@ -140,7 +139,7 @@ void RealTransCmplxNode::BuildTree_internal(SchemeTreeVec& child_scheme_trees)
 {
     bool noSolution = child_scheme_trees.empty();
 
-    // Embed the data into a full-length complex array, perform a
+    // Embed the data into a full-length complex array, perform
     // complex transform, and then extract the relevant output.
     bool          r2c            = inArrayType == rocfft_array_type_real;
     ComputeScheme copyHeadScheme = r2c ? CS_KERNEL_COPY_R_TO_CMPLX : CS_KERNEL_COPY_HERM_TO_CMPLX;
