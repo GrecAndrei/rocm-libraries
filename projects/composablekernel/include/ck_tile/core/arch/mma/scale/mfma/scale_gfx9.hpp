@@ -19,17 +19,23 @@
 namespace ck_tile::core::arch::mma {
 
 /**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for Scale MFMA on GFX950 targets
+ * @defgroup scale_mfma_gfx9 Scale MFMA for GFX9
+ * @brief Scale specializations of @ref amdgcn_mma for GFX9 family.
  *
- * This specialization implements the Scale MFMA instruction for fp8_t A and B
- * matrices with fp32_t accumulator, with 16x16x128 block sizes.
+ * Template parameters A/B/C denote input/output types,
+ * M/N/K are the fragment (MmaTile) sizes,
+ * and `enable_if_target_*` restricts the specialization to specific GPU targets.
  *
- * @tparam CtrlFlags      Control flags for the Scale MFMA operation
- * @tparam CompilerTarget Current compiler target
+ * @tparam CtrlFlags      Control flags for the scale MFMA operation.
+ * @tparam CompilerTarget Current compiler target.
+ *
+ * @sa amdgcn_mma_base for base template parameter documentation.
+ * @{
  */
-// TODO: c++20 template <CtrlFlagsScaleMfmaI CtrlFlags, amdgcn_target CompilerTarget>
+
+// TODO: c++20 template <ScaleMfmaCtrlFlags CtrlFlags, amdgcn_target CompilerTarget>
 // TODO: c++20 requires
+
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes     |MNK            |
@@ -60,18 +66,6 @@ struct amdgcn_mma<fp8_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for Scale MFMA on GFX950 targets
- *
- * This specialization implements the Scale MFMA instruction for bf8_t A and B
- * matrices with fp32_t accumulator, with 16x16x128 block sizes.
- *
- * @tparam CtrlFlags      Control flags for the Scale MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsScaleMfmaI CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes     |MNK            |
@@ -102,18 +96,6 @@ struct amdgcn_mma<bf8_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for Scale MFMA on GFX950 targets
- *
- * This specialization implements the Scale MFMA instruction for pk_fp4_t A and B
- * matrices with fp32_t accumulator, with 16x16x128 block sizes.
- *
- * @tparam CtrlFlags      Control flags for the Scale MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsScaleMfmaI CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes           |MNK            |
@@ -147,18 +129,6 @@ struct amdgcn_mma<pk_fp4_t, pk_fp4_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for Scale MFMA on GFX950 targets
- *
- * This specialization implements the Scale MFMA instruction for pk_fp6x16_t A and B
- * matrices with fp32_t accumulator, with 16x16x128 block sizes.
- *
- * @tparam CtrlFlags      Control flags for the Scale MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsScaleMfmaI CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes                 |MNK            |
@@ -189,18 +159,6 @@ struct amdgcn_mma<pk_fp6x16_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
 };
 // clang-format on
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for Scale MFMA on GFX950 targets
- *
- * This specialization implements the Scale MFMA instruction for pk_bf6x16_t A and B
- * matrices with fp32_t accumulator, with 16x16x128 block sizes.
- *
- * @tparam CtrlFlags      Control flags for the Scale MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsScaleMfmaI CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes                 |MNK            |
@@ -231,18 +189,6 @@ struct amdgcn_mma<pk_bf6x16_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
 };
 // clang-format on
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for Scale MFMA on GFX950 targets
- *
- * This specialization implements the Scale MFMA instruction for fp8_t A and B
- * matrices with fp32_t accumulator, with 32x32x64 block sizes.
- *
- * @tparam CtrlFlags      Control flags for the Scale MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsScaleMfmaI CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes     |MNK           |
@@ -273,18 +219,6 @@ struct amdgcn_mma<fp8_t, fp8_t, fp32_t, 32u, 32u, 64u, CtrlFlags, CompilerTarget
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for Scale MFMA on GFX950 targets
- *
- * This specialization implements the Scale MFMA instruction for bf8_t A and B
- * matrices with fp32_t accumulator, with 32x32x64 block sizes.
- *
- * @tparam CtrlFlags      Control flags for the Scale MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsScaleMfmaI CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes     |MNK           |
@@ -315,18 +249,6 @@ struct amdgcn_mma<bf8_t, bf8_t, fp32_t, 32u, 32u, 64u, CtrlFlags, CompilerTarget
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for Scale MFMA on GFX950 targets
- *
- * This specialization implements the Scale MFMA instruction for pk_fp4_t A and B
- * matrices with fp32_t accumulator, with 32x32x64 block sizes.
- *
- * @tparam CtrlFlags      Control flags for the Scale MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsScaleMfmaI CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes           |MNK           |
@@ -360,18 +282,6 @@ struct amdgcn_mma<pk_fp4_t, pk_fp4_t, fp32_t, 32u, 32u, 64u, CtrlFlags, Compiler
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for Scale MFMA on GFX950 targets
- *
- * This specialization implements the Scale MFMA instruction for pk_fp6x16_t A and B
- * matrices with fp32_t accumulator, with 32x32x64 block sizes.
- *
- * @tparam CtrlFlags      Control flags for the Scale MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsScaleMfmaI CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes                 |MNK           |
@@ -402,18 +312,6 @@ struct amdgcn_mma<pk_fp6x16_t, pk_fp6x16_t, fp32_t, 32u, 32u, 64u, CtrlFlags, Co
 };
 // clang-format on
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for Scale MFMA on GFX950 targets
- *
- * This specialization implements the Scale MFMA instruction for pk_bf6x16_t A and B
- * matrices with fp32_t accumulator, with 32x32x64 block sizes.
- *
- * @tparam CtrlFlags      Control flags for the Scale MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsScaleMfmaI CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes                 |MNK           |
@@ -443,5 +341,7 @@ struct amdgcn_mma<pk_bf6x16_t, pk_bf6x16_t, fp32_t, 32u, 32u, 64u, CtrlFlags, Co
     }
 };
 // clang-format on
+
+/** @} */ // scale_mfma_gfx9
 
 } // namespace ck_tile::core::arch::mma

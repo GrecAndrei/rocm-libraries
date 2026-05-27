@@ -19,17 +19,23 @@
 namespace ck_tile::core::arch::mma {
 
 /**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for Sparse MFMA (SMFMA) on GFX942, GFX950 targets
+ * @defgroup sparse_mfma_gfx9 Sparse MFMA for GFX9
+ * @brief Sparse specializations of @ref amdgcn_mma for GFX9 family.
  *
- * This specialization implements the SMFMA instruction for fp16_t A and B
- * matrices with structured sparsity, fp32_t accumulator, with 16x16x32 fragment sizes.
+ * Template parameters A/B/C denote input/output types,
+ * M/N/K are the fragment (MmaTile) sizes,
+ * and `enable_if_target_*` restricts the specialization to specific GPU targets.
  *
- * @tparam CtrlFlags Control flags for the Sparse MFMA operation
- * @tparam CompilerTarget Current compiler target
+ * @tparam CtrlFlags      Control flags for the sparse MFMA operation.
+ * @tparam CompilerTarget Current compiler target.
+ *
+ * @sa amdgcn_mma_base for base template parameter documentation.
+ * @{
  */
-// TODO: c++20 template <CtrlFlagsSparseMfmaI CtrlFlags, amdgcn_target CompilerTarget>
+
+// TODO: c++20 template <SparseMfmaCtrlFlags CtrlFlags, amdgcn_target CompilerTarget>
 // TODO: c++20 requires
+
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes       |MNK           |
@@ -49,15 +55,6 @@ struct amdgcn_mma<fp16_t, fp16_t, fp32_t, 16u, 16u, 32u, CtrlFlags, CompilerTarg
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for fp16_t, fp16_t, fp32_t MMA operation on GFX942 and GFX950
- * architecture.
- * @tparam CtrlFlags Control flags for the MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsCdna3I CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes       |MNK           |
@@ -77,15 +74,6 @@ struct amdgcn_mma<fp16_t, fp16_t, fp32_t, 32u, 32u, 16u, CtrlFlags, CompilerTarg
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for bf16_t, bf16_t, fp32_t MMA operation on GFX942 and GFX950
- * architecture.
- * @tparam CtrlFlags Control flags for the MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsCdna3I CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes       |MNK           |
@@ -105,15 +93,6 @@ struct amdgcn_mma<bf16_t, bf16_t, fp32_t, 16u, 16u, 32u, CtrlFlags, CompilerTarg
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for bf16_t, bf16_t, fp32_t MMA operation on GFX942 and GFX950
- * architecture.
- * @tparam CtrlFlags Control flags for the MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsCdna3I CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes       |MNK           |
@@ -133,15 +112,6 @@ struct amdgcn_mma<bf16_t, bf16_t, fp32_t, 32u, 32u, 16u, CtrlFlags, CompilerTarg
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for int8_t, int8_t, int32_t MMA operation on GFX942 and
- * GFX950 architecture.
- * @tparam CtrlFlags Control flags for the MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsCdna3I CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes        |MNK           |
@@ -161,15 +131,6 @@ struct amdgcn_mma<int8_t, int8_t, int32_t, 16u, 16u, 64u, CtrlFlags, CompilerTar
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for int8_t, int8_t, int32_t MMA operation on GFX942 and
- * GFX950 architecture.
- * @tparam CtrlFlags Control flags for the MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsCdna3I CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes        |MNK           |
@@ -189,15 +150,6 @@ struct amdgcn_mma<int8_t, int8_t, int32_t, 32u, 32u, 32u, CtrlFlags, CompilerTar
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for bf8_t, bf8_t, fp32_t MMA operation on GFX942 and GFX950
- * architecture.
- * @tparam CtrlFlags Control flags for the MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsCdna3I CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes     |MNK           |
@@ -217,15 +169,6 @@ struct amdgcn_mma<bf8_t, bf8_t, fp32_t, 16u, 16u, 64u, CtrlFlags, CompilerTarget
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for bf8_t, fp8_t, fp32_t MMA operation on GFX942 and GFX950
- * architecture.
- * @tparam CtrlFlags Control flags for the MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsCdna3I CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes     |MNK           |
@@ -245,15 +188,6 @@ struct amdgcn_mma<bf8_t, fp8_t, fp32_t, 16u, 16u, 64u, CtrlFlags, CompilerTarget
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for fp8_t, bf8_t, fp32_t MMA operation on GFX942 and GFX950
- * architecture.
- * @tparam CtrlFlags Control flags for the MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsCdna3I CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes     |MNK           |
@@ -273,15 +207,6 @@ struct amdgcn_mma<fp8_t, bf8_t, fp32_t, 16u, 16u, 64u, CtrlFlags, CompilerTarget
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for fp8_t, fp8_t, fp32_t MMA operation on GFX942 and GFX950
- * architecture.
- * @tparam CtrlFlags Control flags for the MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsCdna3I CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes     |MNK           |
@@ -301,15 +226,6 @@ struct amdgcn_mma<fp8_t, fp8_t, fp32_t, 16u, 16u, 64u, CtrlFlags, CompilerTarget
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for bf8_t, bf8_t, fp32_t MMA operation on GFX942 and GFX950
- * architecture.
- * @tparam CtrlFlags Control flags for the MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsCdna3I CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes     |MNK           |
@@ -329,15 +245,6 @@ struct amdgcn_mma<bf8_t, bf8_t, fp32_t, 32u, 32u, 32u, CtrlFlags, CompilerTarget
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for bf8_t, fp8_t, fp32_t MMA operation on GFX942 and GFX950
- * architecture.
- * @tparam CtrlFlags Control flags for the MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsCdna3I CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes     |MNK           |
@@ -357,15 +264,6 @@ struct amdgcn_mma<bf8_t, fp8_t, fp32_t, 32u, 32u, 32u, CtrlFlags, CompilerTarget
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for fp8_t, bf8_t, fp32_t MMA operation on GFX942 and GFX950
- * architecture.
- * @tparam CtrlFlags Control flags for the MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsCdna3I CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes     |MNK           |
@@ -385,15 +283,6 @@ struct amdgcn_mma<fp8_t, bf8_t, fp32_t, 32u, 32u, 32u, CtrlFlags, CompilerTarget
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for fp8_t, fp8_t, fp32_t MMA operation on GFX942 and GFX950
- * architecture.
- * @tparam CtrlFlags Control flags for the MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsCdna3I CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes     |MNK           |
@@ -413,15 +302,6 @@ struct amdgcn_mma<fp8_t, fp8_t, fp32_t, 32u, 32u, 32u, CtrlFlags, CompilerTarget
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for fp16_t, fp16_t, fp32_t MMA operation on GFX950
- * architecture.
- * @tparam CtrlFlags Control flags for the MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsGfx950I CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes       |MNK           |
@@ -441,15 +321,6 @@ struct amdgcn_mma<fp16_t, fp16_t, fp32_t, 16u, 16u, 64u, CtrlFlags, CompilerTarg
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for fp16_t, fp16_t, fp32_t MMA operation on GFX950
- * architecture.
- * @tparam CtrlFlags Control flags for the MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsGfx950I CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes       |MNK           |
@@ -469,15 +340,6 @@ struct amdgcn_mma<fp16_t, fp16_t, fp32_t, 32u, 32u, 32u, CtrlFlags, CompilerTarg
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for bf16_t, bf16_t, fp32_t MMA operation on GFX950
- * architecture.
- * @tparam CtrlFlags Control flags for the MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsGfx950I CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes       |MNK           |
@@ -497,15 +359,6 @@ struct amdgcn_mma<bf16_t, bf16_t, fp32_t, 16u, 16u, 64u, CtrlFlags, CompilerTarg
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for bf16_t, bf16_t, fp32_t MMA operation on GFX950
- * architecture.
- * @tparam CtrlFlags Control flags for the MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsGfx950I CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes       |MNK           |
@@ -525,15 +378,6 @@ struct amdgcn_mma<bf16_t, bf16_t, fp32_t, 32u, 32u, 32u, CtrlFlags, CompilerTarg
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for int8_t, int8_t, int32_t MMA operation on GFX950
- * architecture.
- * @tparam CtrlFlags Control flags for the MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsGfx950I CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes        |MNK            |
@@ -553,15 +397,6 @@ struct amdgcn_mma<int8_t, int8_t, int32_t, 16u, 16u, 128u, CtrlFlags, CompilerTa
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for int8_t, int8_t, int32_t MMA operation on GFX950
- * architecture.
- * @tparam CtrlFlags Control flags for the MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsGfx950I CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes        |MNK           |
@@ -581,15 +416,6 @@ struct amdgcn_mma<int8_t, int8_t, int32_t, 32u, 32u, 64u, CtrlFlags, CompilerTar
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for bf8_t, bf8_t, fp32_t MMA operation on GFX950
- * architecture.
- * @tparam CtrlFlags Control flags for the MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsGfx950I CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes     |MNK            |
@@ -609,15 +435,6 @@ struct amdgcn_mma<bf8_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for bf8_t, fp8_t, fp32_t MMA operation on GFX950
- * architecture.
- * @tparam CtrlFlags Control flags for the MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsGfx950I CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes     |MNK            |
@@ -637,15 +454,6 @@ struct amdgcn_mma<bf8_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for fp8_t, bf8_t, fp32_t MMA operation on GFX950
- * architecture.
- * @tparam CtrlFlags Control flags for the MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsGfx950I CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes     |MNK            |
@@ -665,15 +473,6 @@ struct amdgcn_mma<fp8_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for fp8_t, fp8_t, fp32_t MMA operation on GFX950
- * architecture.
- * @tparam CtrlFlags Control flags for the MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsGfx950I CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes     |MNK            |
@@ -693,15 +492,6 @@ struct amdgcn_mma<fp8_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for bf8_t, bf8_t, fp32_t MMA operation on GFX950
- * architecture.
- * @tparam CtrlFlags Control flags for the MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsGfx950I CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes     |MNK           |
@@ -721,15 +511,6 @@ struct amdgcn_mma<bf8_t, bf8_t, fp32_t, 32u, 32u, 64u, CtrlFlags, CompilerTarget
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for bf8_t, fp8_t, fp32_t MMA operation on GFX950
- * architecture.
- * @tparam CtrlFlags Control flags for the MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsGfx950I CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes     |MNK           |
@@ -749,15 +530,6 @@ struct amdgcn_mma<bf8_t, fp8_t, fp32_t, 32u, 32u, 64u, CtrlFlags, CompilerTarget
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for fp8_t, bf8_t, fp32_t MMA operation on GFX950
- * architecture.
- * @tparam CtrlFlags Control flags for the MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsGfx950I CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes     |MNK           |
@@ -777,15 +549,6 @@ struct amdgcn_mma<fp8_t, bf8_t, fp32_t, 32u, 32u, 64u, CtrlFlags, CompilerTarget
     }
 };
 
-/**
- * @struct amdgcn_mma
- * @brief Specialization of amdgcn_mma for fp8_t, fp8_t, fp32_t MMA operation on GFX950
- * architecture.
- * @tparam CtrlFlags Control flags for the MFMA operation
- * @tparam CompilerTarget Current compiler target
- */
-// TODO: c++20 template <CtrlFlagsGfx950I CtrlFlags, amdgcn_target CompilerTarget>
-// TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               |A B C DataTypes     |MNK           |
@@ -804,4 +567,7 @@ struct amdgcn_mma<fp8_t, fp8_t, fp32_t, 32u, 32u, 64u, CtrlFlags, CompilerTarget
             aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
+
+/** @} */ // sparse_mfma_gfx9
+
 } // namespace ck_tile::core::arch::mma
