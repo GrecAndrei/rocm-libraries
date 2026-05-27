@@ -43,10 +43,9 @@ struct amdgcn_mma<fp16_t, fp16_t, fp32_t, 16u, 16u, 32u, CtrlFlags, CompilerTarg
     CK_TILE_DEVICE static auto
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx) -> CVecType
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_f32_16x16x32_f16(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 
@@ -72,10 +71,9 @@ struct amdgcn_mma<fp16_t, fp16_t, fp32_t, 32u, 32u, 16u, CtrlFlags, CompilerTarg
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_f32_32x32x16_f16(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 
@@ -101,10 +99,9 @@ struct amdgcn_mma<bf16_t, bf16_t, fp32_t, 16u, 16u, 32u, CtrlFlags, CompilerTarg
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_f32_16x16x32_bf16(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 
@@ -130,10 +127,9 @@ struct amdgcn_mma<bf16_t, bf16_t, fp32_t, 32u, 32u, 16u, CtrlFlags, CompilerTarg
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_f32_32x32x16_bf16(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 
@@ -159,10 +155,9 @@ struct amdgcn_mma<int8_t, int8_t, int32_t, 16u, 16u, 64u, CtrlFlags, CompilerTar
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_i32_16x16x64_i8(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 
@@ -188,10 +183,9 @@ struct amdgcn_mma<int8_t, int8_t, int32_t, 32u, 32u, 32u, CtrlFlags, CompilerTar
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_i32_32x32x32_i8(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 
@@ -217,10 +211,9 @@ struct amdgcn_mma<bf8_t, bf8_t, fp32_t, 16u, 16u, 64u, CtrlFlags, CompilerTarget
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_f32_16x16x64_bf8_bf8(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 
@@ -246,10 +239,9 @@ struct amdgcn_mma<bf8_t, fp8_t, fp32_t, 16u, 16u, 64u, CtrlFlags, CompilerTarget
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_f32_16x16x64_bf8_fp8(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 
@@ -275,10 +267,9 @@ struct amdgcn_mma<fp8_t, bf8_t, fp32_t, 16u, 16u, 64u, CtrlFlags, CompilerTarget
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_f32_16x16x64_fp8_bf8(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 
@@ -304,10 +295,9 @@ struct amdgcn_mma<fp8_t, fp8_t, fp32_t, 16u, 16u, 64u, CtrlFlags, CompilerTarget
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_f32_16x16x64_fp8_fp8(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 
@@ -333,10 +323,9 @@ struct amdgcn_mma<bf8_t, bf8_t, fp32_t, 32u, 32u, 32u, CtrlFlags, CompilerTarget
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_f32_32x32x32_bf8_bf8(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 
@@ -362,10 +351,9 @@ struct amdgcn_mma<bf8_t, fp8_t, fp32_t, 32u, 32u, 32u, CtrlFlags, CompilerTarget
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_f32_32x32x32_bf8_fp8(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 
@@ -391,10 +379,9 @@ struct amdgcn_mma<fp8_t, bf8_t, fp32_t, 32u, 32u, 32u, CtrlFlags, CompilerTarget
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_f32_32x32x32_fp8_bf8(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 
@@ -420,10 +407,9 @@ struct amdgcn_mma<fp8_t, fp8_t, fp32_t, 32u, 32u, 32u, CtrlFlags, CompilerTarget
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_f32_32x32x32_fp8_fp8(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 
@@ -449,10 +435,9 @@ struct amdgcn_mma<fp16_t, fp16_t, fp32_t, 16u, 16u, 64u, CtrlFlags, CompilerTarg
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_f32_16x16x64_f16(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 
@@ -478,10 +463,9 @@ struct amdgcn_mma<fp16_t, fp16_t, fp32_t, 32u, 32u, 32u, CtrlFlags, CompilerTarg
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_f32_32x32x32_f16(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 
@@ -507,10 +491,9 @@ struct amdgcn_mma<bf16_t, bf16_t, fp32_t, 16u, 16u, 64u, CtrlFlags, CompilerTarg
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_f32_16x16x64_bf16(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 
@@ -536,10 +519,9 @@ struct amdgcn_mma<bf16_t, bf16_t, fp32_t, 32u, 32u, 32u, CtrlFlags, CompilerTarg
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_f32_32x32x32_bf16(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 
@@ -565,10 +547,9 @@ struct amdgcn_mma<int8_t, int8_t, int32_t, 16u, 16u, 128u, CtrlFlags, CompilerTa
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_i32_16x16x128_i8(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 
@@ -594,10 +575,9 @@ struct amdgcn_mma<int8_t, int8_t, int32_t, 32u, 32u, 64u, CtrlFlags, CompilerTar
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_i32_32x32x64_i8(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 
@@ -623,10 +603,9 @@ struct amdgcn_mma<bf8_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_f32_16x16x128_bf8_bf8(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 
@@ -652,10 +631,9 @@ struct amdgcn_mma<bf8_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_f32_16x16x128_bf8_fp8(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 
@@ -681,10 +659,9 @@ struct amdgcn_mma<fp8_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_f32_16x16x128_fp8_bf8(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 
@@ -710,10 +687,9 @@ struct amdgcn_mma<fp8_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_f32_16x16x128_fp8_fp8(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 
@@ -739,10 +715,9 @@ struct amdgcn_mma<bf8_t, bf8_t, fp32_t, 32u, 32u, 64u, CtrlFlags, CompilerTarget
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_f32_32x32x64_bf8_bf8(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 
@@ -768,10 +743,9 @@ struct amdgcn_mma<bf8_t, fp8_t, fp32_t, 32u, 32u, 64u, CtrlFlags, CompilerTarget
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_f32_32x32x64_bf8_fp8(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 
@@ -797,10 +771,9 @@ struct amdgcn_mma<fp8_t, bf8_t, fp32_t, 32u, 32u, 64u, CtrlFlags, CompilerTarget
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_f32_32x32x64_fp8_bf8(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 
@@ -826,10 +799,9 @@ struct amdgcn_mma<fp8_t, fp8_t, fp32_t, 32u, 32u, 64u, CtrlFlags, CompilerTarget
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
-        using namespace sparse::detail;
-        static constexpr BuiltinParams PARAMS = getBuiltinParams<CtrlFlags::CompressionIndex>();
+        using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_f32_32x32x64_fp8_fp8(
-            aVec, bVec, cVec, idx, PARAMS.UseFirstIndex, PARAMS.ByteIndexToOverride)};
+            aVec, bVec, cVec, idx, PARAMS::UseFirstIndex, PARAMS::ByteIndexToOverride)};
     }
 };
 } // namespace ck_tile::core::arch::mma

@@ -6,6 +6,7 @@
 #include "ck_tile/core/config.hpp"
 #include "ck_tile/core/numeric/integer.hpp"
 
+#include <cinttypes>
 #include <stdio.h>
 #if CK_TILE_CONCEPTS && CK_TILE_CONCEPTS_HEADER
 #include <concepts>
@@ -43,7 +44,7 @@ CK_TILE_HOST_DEVICE constexpr const char* to_string(SparseCompressionIndex compr
 namespace sparse::detail {
 
 /**
- * @struct BuiltinParams
+ * @class BuiltinParams
  * @brief Translates the SparseCompressionIndex to the correct CBSZ and ABID pairs for sparse
  * builtins. The actual behavior of the builtin depends on the input data type: 16-bit source data:
  * If CBSZ=0, ABID selects one of four 8-bit sets of sparse-indices within a VGPR starting at srcC
@@ -55,25 +56,12 @@ namespace sparse::detail {
  * containing 16-bits of index information for a lane. If CBSZ!=0; the very first is selected
  * (VGPR[srcC][15..0]).
  */
+template <SparseCompressionIndex Idx>
 struct BuiltinParams
 {
-    int32_t UseFirstIndex;       // CBSZ
-    int32_t ByteIndexToOverride; // ABID
+    static constexpr int32_t UseFirstIndex       = (Idx == SparseCompressionIndex::FIRST); // CBSZ
+    static constexpr int32_t ByteIndexToOverride = static_cast<int32_t>(Idx);              // ABID
 };
-
-template <SparseCompressionIndex Idx>
-static constexpr BuiltinParams getBuiltinParams()
-{
-    // TODO c++20: designated initializers
-    if constexpr(Idx == SparseCompressionIndex::FIRST)
-    {
-        return BuiltinParams{1, 0};
-    }
-    else
-    {
-        return BuiltinParams{0, static_cast<int32_t>(Idx)};
-    }
-}
 
 } // namespace sparse::detail
 
@@ -89,7 +77,11 @@ struct DefaultSparseMfmaCtrlFlags
 
 CK_TILE_HOST_DEVICE void print_flags(DefaultSparseMfmaCtrlFlags const& ctrlFlags)
 {
+    using PARAMS = sparse::detail::BuiltinParams<DefaultSparseMfmaCtrlFlags::CompressionIndex>;
+
     printf("CtrlFlags      CompressionIndex         : %s\n", to_string(ctrlFlags.CompressionIndex));
+    printf("               UseFirstIndex            : %" PRId32 "\n", PARAMS::UseFirstIndex);
+    printf("               ByteIndexToOverride      : %" PRId32 "\n", PARAMS::ByteIndexToOverride);
 }
 
 #if CK_TILE_CONCEPTS && CK_TILE_CONCEPTS_HEADER
