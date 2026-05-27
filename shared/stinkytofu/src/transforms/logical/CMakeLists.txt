@@ -6,4 +6,5 @@ target_sources(stinkytofu PRIVATE
     ToStinkyAsmPass.cpp
     CompositeInstructionLoweringPass.cpp
     LogicalPeepholePass.cpp
+    LowerLogicalModulePipeline.cpp
 )
