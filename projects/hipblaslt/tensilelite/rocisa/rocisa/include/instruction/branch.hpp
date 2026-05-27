@@ -239,6 +239,23 @@ namespace rocisa
 
     struct SSwapPCB64 : public BranchInstruction
     {
+        // Optional candidate-callee hint for the StinkyTofu converter.
+        //
+        // Names of candidate callee Functions
+        // that this swappc may transfer control to at runtime:
+        //   - empty            : fully opaque indirect call
+        //   - one element      : static call to that one callee
+        //   - multiple elements: runtime-dispatched call; exactly one of the
+        //                        listed callees is taken at runtime (canonical
+        //                        activation case where the dispatcher writes one
+        //                        of N candidate addresses into the SGPR pair
+        //                        before the swappc fires).
+        //
+        // Metadata only: does NOT change toString() nor the emitted assembly.
+        // Set by tensilelite at the call site; consumed by the rocisa ->
+        // stinkytofu converter to stamp a CallSiteData modifier.
+        std::vector<std::string> calleeFuncs;
+
         SSwapPCB64(const std::shared_ptr<Container>& dst,
                    const std::shared_ptr<Container>& src,
                    const std::string&                comment = "")
@@ -251,6 +268,7 @@ namespace rocisa
 
         SSwapPCB64(const SSwapPCB64& other)
             : BranchInstruction(other)
+            , calleeFuncs(other.calleeFuncs)
             , dst(other.dst ? other.dst->clone() : nullptr)
             , srcs(other.srcs ? other.srcs->clone() : nullptr)
         {

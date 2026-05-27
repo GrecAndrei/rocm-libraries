@@ -168,6 +168,19 @@ namespace rocisa
         std::shared_ptr<Container>         tempVgpr = nullptr;
         bool                               _isNoOpt;
 
+        // Optional callable-region hint for the StinkyTofu converter.
+        //
+        // When isCallable == true, the converter splits this sub-Module out
+        // into its own stinkytofu::Function (rather than inlining its contents
+        // into the surrounding entry Function). callableName, when non-empty,
+        // overrides the StinkyTofu Function name; otherwise Item::name is used.
+        //
+        // These fields are pure metadata: they do NOT change toString() nor
+        // the emitted assembly. Default false / empty preserves
+        // single-Function lowering behaviour.
+        bool        isCallable   = false;
+        std::string callableName = "";
+
         Module(const std::string& name = "")
             : Item(name)
             , _isNoOpt(false)
@@ -178,6 +191,8 @@ namespace rocisa
             : Item(other)
             , tempVgpr(other.tempVgpr ? other.tempVgpr->clone() : nullptr)
             , _isNoOpt(other._isNoOpt)
+            , isCallable(other.isCallable)
+            , callableName(other.callableName)
         {
             itemList = cloneItemList(other.itemList);
             for(auto& item : itemList)

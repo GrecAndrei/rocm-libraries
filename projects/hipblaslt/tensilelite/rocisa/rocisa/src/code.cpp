@@ -159,6 +159,11 @@ void init_code(nb::module_ m)
         .def("setParent", &rocisa::Module::setParent)
         .def("setNoOpt", &rocisa::Module::setNoOpt)
         .def("isNoOpt", &rocisa::Module::isNoOpt)
+        // Callable-region hint for the StinkyTofu converter -- see
+        // Module::isCallable / Module::callableName in code.hpp. Metadata
+        // only; does not affect the emitted assembly.
+        .def_rw("isCallable", &rocisa::Module::isCallable)
+        .def_rw("callableName", &rocisa::Module::callableName)
         .def("findNamedItem", &rocisa::Module::findNamedItem)
         .def("setInlineAsmPrintMode", &rocisa::Module::setInlineAsmPrintMode)
         .def("addSpaceLine", &rocisa::Module::addSpaceLine)

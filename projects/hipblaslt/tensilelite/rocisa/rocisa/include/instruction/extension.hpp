@@ -52,6 +52,25 @@ namespace rocisa
         module->add(inst);
     }
 
+    // Add an s_swappc_b64 to module with calleeFuncs recorded as the
+    // candidate-callee hint (SSwapPCB64::calleeFuncs). Used at call sites whose
+    // callee Function name(s) the front-end already knows so the StinkyTofu
+    // converter can stamp a CallSiteData modifier without re-pattern-matching
+    // the surrounding dispatcher.
+    //
+    // The hint has no effect on the emitted assembly; it only travels along
+    // with the IR through the rocisa -> stinkytofu lowering boundary.
+    inline void addSSwapPCB64WithCalleeFuncs(const std::shared_ptr<Module>&    module,
+                                             const std::shared_ptr<Container>& dst,
+                                             const std::shared_ptr<Container>& src,
+                                             const std::vector<std::string>&   calleeFuncs,
+                                             const std::string&                comment)
+    {
+        auto inst         = std::make_shared<SSwapPCB64>(dst, src, comment);
+        inst->calleeFuncs = calleeFuncs;
+        module->add(inst);
+    }
+
     //////////////////////////////////////////////////////////////////////////////
     // longBranch - 32 bit offset
     // s_branch class instructions take a label operand which is truncated to 16 bit
