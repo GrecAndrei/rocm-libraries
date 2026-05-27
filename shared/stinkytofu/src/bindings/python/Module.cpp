@@ -22,6 +22,8 @@
  * ************************************************************************ */
 #include "stinkytofu/bindings/python/Module.hpp"
 
+#include <algorithm>
+#include <cassert>
 #include <sstream>
 #include <unordered_map>
 
@@ -63,19 +65,26 @@ struct StinkyAsmModule::Impl {
     // This map maintains the defined group names and the range of instructions for each group.
     std::unordered_map<std::string, InstructionGroupRange> instructionGroups;
 
-    Function function;
+    // Multi-Function ownership. functions[0] is always the entry Function and is
+    // returned by the no-arg getFunction(). Callees (created via createFunction)
+    // are appended after it in insertion order. Function objects are stored via
+    // unique_ptr to keep their address stable across vector growth (Function
+    // members reference `this` for their BasicBlockList parent pointer).
+    std::vector<std::unique_ptr<Function>> functions;
 
     // Total instruction encoding size in bytes (for .amdhsa_inst_pref_size). -1 if not set.
     int64_t totalInstructionBytes = -1;
 
     Impl(const std::string& name, const std::array<int, 3>& arch) : name(name), arch(arch) {
-        // Create a single BasicBlock to hold all instructions
-        function.createBasicBlock("entry");
+        // Entry Function is created with empty name (matches today's shape).
+        // Callees added later via StinkyAsmModule::createFunction get a name.
+        functions.emplace_back(std::make_unique<Function>());
+        functions[0]->createBasicBlock("entry");
     }
 
     ~Impl() {
-        // Function destructor will clean up BasicBlocks and their IRLists
-        // The IRBases in the IRList will be deleted by the Function
+        // Function destructors clean up BasicBlocks and their IRLists, and the
+        // IRBases owned by those IRLists.
     }
 };
 
@@ -117,11 +126,53 @@ std::array<int, 3> StinkyAsmModule::getArch() const {
 }
 
 Function& StinkyAsmModule::getFunction() {
-    return pImpl->function;
+    return *pImpl->functions[0];
 }
 
 const Function& StinkyAsmModule::getFunction() const {
-    return pImpl->function;
+    return *pImpl->functions[0];
+}
+
+Function& StinkyAsmModule::createFunction(const std::string& name, bool isCallee) {
+    assert(!name.empty() && "createFunction requires a non-empty name");
+    assert(getFunction(name) == nullptr &&
+           "createFunction: Function name must be unique within this StinkyAsmModule");
+    auto& f = pImpl->functions.emplace_back(std::make_unique<Function>(name));
+    f->createBasicBlock("entry");
+    f->setIsCallee(isCallee);
+    return *f;
+}
+
+Function* StinkyAsmModule::getFunction(std::string_view name) {
+    auto it = std::find_if(
+        pImpl->functions.begin(), pImpl->functions.end(),
+        [name](const std::unique_ptr<Function>& f) { return f && f->getName() == name; });
+    return it == pImpl->functions.end() ? nullptr : it->get();
+}
+
+const Function* StinkyAsmModule::getFunction(std::string_view name) const {
+    auto it = std::find_if(
+        pImpl->functions.begin(), pImpl->functions.end(),
+        [name](const std::unique_ptr<Function>& f) { return f && f->getName() == name; });
+    return it == pImpl->functions.end() ? nullptr : it->get();
+}
+
+std::vector<Function*> StinkyAsmModule::getFunctions() {
+    std::vector<Function*> out;
+    out.reserve(pImpl->functions.size());
+    for (auto& f : pImpl->functions) out.push_back(f.get());
+    return out;
+}
+
+std::vector<const Function*> StinkyAsmModule::getFunctions() const {
+    std::vector<const Function*> out;
+    out.reserve(pImpl->functions.size());
+    for (const auto& f : pImpl->functions) out.push_back(f.get());
+    return out;
+}
+
+size_t StinkyAsmModule::numFunctions() const {
+    return pImpl->functions.size();
 }
 
 std::string StinkyAsmModule::emitAssembly() const {

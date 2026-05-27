@@ -44,6 +44,10 @@ class STINKYTOFU_EXPORT Function {
     BasicBlockList basicBlocks;  // List parent is this so BasicBlock::getParent() works
     GemmTileConfig gemmConfig;
     std::unordered_map<std::string, uint64_t> metadata_;
+    // In-memory only;
+    // Distinguishes a callee Function's terminating s_setpc_b64 (a return)
+    // from a setpc in the entry Function (long branch / indirect).
+    bool isCallee_ = false;
 
    public:
     explicit Function(const std::string& name = "") : name(name), basicBlocks(this) {}
@@ -59,6 +63,15 @@ class STINKYTOFU_EXPORT Function {
 
     void setName(const std::string& name) {
         this->name = name;
+    }
+
+    /// True if this Function is a callee (its terminating s_setpc_b64 is a return).
+    /// Defaults to false; entry Functions are not callees.
+    bool isCallee() const {
+        return isCallee_;
+    }
+    void setIsCallee(bool v) {
+        isCallee_ = v;
     }
 
     // BasicBlock management

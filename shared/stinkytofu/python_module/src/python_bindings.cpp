@@ -56,6 +56,21 @@ NB_MODULE(_stinkytofu, m) {
     m.doc() = "StinkyTofu: High-Level IR for AMDGPU Assembly Generation (internal C++ module)";
 
     // ========================================================================
+    // Bind Function (read-only surface for StinkyAsmModule introspection).
+    // ------------------------------------------------------------------------
+    // Function is non-copyable and owned by its StinkyAsmModule, so we surface
+    // it via pointer with reference_internal: the returned object stays valid
+    // for the lifetime of the owning StinkyAsmModule.
+    // ========================================================================
+    nb::class_<Function>(m, "Function")
+        .def("getName", &Function::getName, "Function name (empty for the entry Function)",
+             nb::rv_policy::copy)
+        .def("isCallee", &Function::isCallee,
+             "True if this Function is a callee (its terminating s_setpc_b64 is a return). "
+             "Set at createFunction time; defaults to false for the entry Function.")
+        .def("size", &Function::size, "Number of BasicBlocks in this Function");
+
+    // ========================================================================
     // Bind StinkyAsmModule Class
     // ========================================================================
     nb::class_<StinkyAsmModule>(m, "StinkyAsmModule")
@@ -75,7 +90,22 @@ NB_MODULE(_stinkytofu, m) {
         .def("getMetaDataU64", &StinkyAsmModule::getMetaDataU64, nb::arg("key"),
              "Get uint64 metadata from function by key")
         .def("runOptimizationPipeline", &StinkyAsmModule::runOptimizationPipeline,
-             "Run the optimization pipeline on this module");
+             "Run the optimization pipeline on this module")
+        // Multi-Function surface (entry Function plus zero or more callees).
+        .def(
+            "getFunctions",
+            [](StinkyAsmModule& self) -> std::vector<Function*> { return self.getFunctions(); },
+            nb::rv_policy::reference_internal,
+            "List every Function in this module (entry first, then callees in insertion order)")
+        .def(
+            "getFunctionByName",
+            [](StinkyAsmModule& self, const std::string& name) -> Function* {
+                return self.getFunction(name);
+            },
+            nb::arg("name"), nb::rv_policy::reference_internal,
+            "Look up a Function by name; returns None if no such Function exists")
+        .def("numFunctions", &StinkyAsmModule::numFunctions,
+             "Number of Functions (entry + callees) in this module");
 
     // ========================================================================
     // Register Types

@@ -26,6 +26,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "stinkytofu/Export.hpp"
@@ -83,6 +84,17 @@ namespace stinkytofu {
  * Note: This class is planned for deprecation in favor of using Function/BasicBlock
  * directly, but is currently needed for compatibility with existing Python bindings
  * and rocisa conversion utilities.
+ *
+ * Multi-Function shape:
+ *   A StinkyAsmModule owns one entry Function plus zero or more callee
+ *   Functions, all in the same module. The entry Function is always
+ *   index 0 and is returned by the no-arg getFunction(); callees are
+ *   created on demand via createFunction(name, isCallee=true) and looked
+ *   up by name via getFunction(name). Each Function carries its own CFG
+ *   (CFGBuilderPass runs per-Function). Inter-procedural binding lives in
+ *   CallSiteData modifiers on swappc instructions; module-scope
+ *   CallGraphAnalysis materialises caller -> callee edges from those
+ *   modifiers.
  *
  * Architecture:
  *   LogicalModule (high-level IR) -> Lowering Passes -> StinkyAsmModule (assembly IR)
@@ -191,16 +203,57 @@ class STINKYTOFU_EXPORT StinkyAsmModule {
     std::optional<uint64_t> getMetaDataU64(const std::string& key) const;
 
     /**
-     * @brief Get the underlying Function
+     * @brief Get the entry Function
      *
-     * This provides access to the internal Function representation.
-     * The Function is owned by the StinkyAsmModule.
+     * The entry Function is always present (functions_[0]) and is the kernel
+     * entry point. Callee Functions, if any, live alongside it in the same
+     * StinkyAsmModule but are reached via createFunction / getFunction(name).
      *
-     * @return Reference to the Function
+     * @return Reference to the entry Function (owned by the StinkyAsmModule)
      */
     Function& getFunction();
 
     const Function& getFunction() const;
+
+    /**
+     * @brief Create a new (callee) Function owned by this module.
+     *
+     * The new Function is appended after any existing Functions and is
+     * pre-populated with an empty "entry" BasicBlock (matching the entry
+     * Function's construction). Names must be unique across all Functions
+     * in this module; asserts if name collides with an existing Function.
+     *
+     * @param name Function name (must be non-empty and not collide with any
+     *             existing Function in this module)
+     * @param isCallee If true, marks the Function as a callee via
+     *                 Function::setIsCallee. Defaults to false.
+     * @return Reference to the newly created Function (owned by the module)
+     */
+    Function& createFunction(const std::string& name, bool isCallee = false);
+
+    /**
+     * @brief Look up a Function by name.
+     *
+     * Linear scan over all Functions in insertion order. Returns nullptr if
+     * no Function with the given name exists.
+     */
+    Function* getFunction(std::string_view name);
+    const Function* getFunction(std::string_view name) const;
+
+    /**
+     * @brief Get every Function owned by this module in insertion order.
+     *
+     * The entry Function is always first; any callees follow in createFunction
+     * order. The returned pointers are non-owning and remain valid for the
+     * lifetime of the StinkyAsmModule.
+     */
+    std::vector<Function*> getFunctions();
+    std::vector<const Function*> getFunctions() const;
+
+    /**
+     * @brief Number of Functions (entry + callees) in this module.
+     */
+    size_t numFunctions() const;
 
     /**
      * @brief Add a group name to the module
