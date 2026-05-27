@@ -25,7 +25,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include "stinkytofu/ir/asm/StinkyAsmIR.hpp"
+#include "stinkytofu/ir/asm/StinkyRegister.hpp"
 
 namespace stinkytofu {
 /// Per-DWORD register key used to track individual register components

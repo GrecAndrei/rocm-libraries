@@ -23,8 +23,10 @@
 
 #include "ModifierSerializer.hpp"
 
+#include <cctype>
 #include <climits>
 #include <cstdlib>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -61,6 +63,38 @@ std::string getStr(const std::unordered_map<std::string, std::string>& m, const 
     auto it = m.find(key);
     if (it == m.end()) return def;
     return it->second;
+}
+
+/// Parse serialized string vector form `["a","b"]` (mirrors `getIntVector`).
+/// Tolerates whitespace around tokens and after commas; an unterminated quote
+/// aborts and returns whatever was parsed so far.
+std::vector<std::string> getStringVector(const std::unordered_map<std::string, std::string>& m,
+                                         const std::string& key) {
+    auto it = m.find(key);
+    std::vector<std::string> result;
+    if (it == m.end()) return result;
+    const std::string& s = it->second;
+    if (s.size() < 2 || s.front() != '[' || s.back() != ']') return result;
+
+    const std::string inner = s.substr(1, s.size() - 2);
+    size_t pos = 0;
+    while (pos < inner.size()) {
+        // Skip whitespace / separators
+        while (pos < inner.size() && (inner[pos] == ' ' || inner[pos] == '\t' || inner[pos] == ','))
+            ++pos;
+        if (pos >= inner.size()) break;
+        if (inner[pos] != '"') break;  // malformed; stop
+        ++pos;                         // consume opening quote
+        std::string token;
+        while (pos < inner.size() && inner[pos] != '"') {
+            token.push_back(inner[pos]);
+            ++pos;
+        }
+        if (pos >= inner.size()) break;  // missing closing quote
+        ++pos;                           // consume closing quote
+        result.push_back(std::move(token));
+    }
+    return result;
 }
 
 /// Parse serialized int vector form `[0,1]` (matches IRParser / vectorToString).
@@ -113,6 +147,52 @@ std::string vectorToString(const std::vector<int>& vec) {
     }
     result += "]";
     return result;
+}
+
+/// Serialize a vector<string> as `["a","b"]` (string-vector form).
+/// Round-trips with `getStringVector`. Caller is responsible for keeping
+/// tokens quote-free; tokens with embedded `"` are not supported (the
+/// modifier types that use this -- CallSiteData::calleeFuncs and the
+/// stringified RegKey form below -- never contain quotes).
+std::string vectorToString(const std::vector<std::string>& vec) {
+    std::string result = "[";
+    for (size_t i = 0; i < vec.size(); ++i) {
+        result += "\"";
+        result += vec[i];
+        result += "\"";
+        if (i + 1 < vec.size()) result += ",";
+    }
+    result += "]";
+    return result;
+}
+
+/// Stringify a RegKey as `<typeStr><idx>`, e.g. {RegType::S, 8} -> "s8".
+/// Used by CallSiteData::clobbers to keep the textual IR readable; the
+/// inverse parser lives in `parseRegKey` below.
+std::string regKeyToString(const RegKey& k) {
+    return regTypeToString(k.type) + std::to_string(k.idx);
+}
+
+/// Parse a token `<typeStr><idx>` back into a RegKey. Returns std::nullopt
+/// when the prefix is not a known register type or the suffix is not a
+/// non-negative integer. Empty tokens are rejected.
+std::optional<RegKey> parseRegKey(const std::string& token) {
+    if (token.empty()) return std::nullopt;
+    size_t i = 0;
+    while (i < token.size() &&
+           (std::isalpha(static_cast<unsigned char>(token[i])) || token[i] == '_')) {
+        ++i;
+    }
+    if (i == 0 || i >= token.size()) return std::nullopt;
+    const std::string typeStr = token.substr(0, i);
+    const std::string idxStr = token.substr(i);
+    RegType type = stringToRegType(typeStr);
+    if (!isValidRegType(type)) return std::nullopt;
+    char* endPtr = nullptr;
+    long val = std::strtol(idxStr.c_str(), &endPtr, 10);
+    if (endPtr != idxStr.c_str() + idxStr.size()) return std::nullopt;
+    if (val < 0 || val > UINT_MAX) return std::nullopt;
+    return RegKey{type, static_cast<unsigned>(val)};
 }
 
 }  // anonymous namespace
@@ -408,6 +488,22 @@ bool serializeVisit(const LabelData& mod, std::ostream& os) {
     return true;
 }
 
+// CallSiteData
+//
+// Emits e.g. `, mod.call = { callees = ["actA","actB"], clobbers = ["s8","v123"] }`.
+// Round-trips with the `mod.call` arm in deserializeVisit below.
+//
+// `clobbers` is always emitted (empty list `[]` if v1 producer); see the
+// CallSiteData docstring for the conservative-barrier semantics of empty.
+bool serializeVisit(const CallSiteData& mod, std::ostream& os) {
+    std::vector<std::string> clobberToks;
+    clobberToks.reserve(mod.clobbers.size());
+    for (const RegKey& k : mod.clobbers) clobberToks.push_back(regKeyToString(k));
+    os << ", mod.call = { callees = " << vectorToString(mod.calleeFuncs)
+       << ", clobbers = " << vectorToString(clobberToks) << " }";
+    return true;
+}
+
 template <typename ModifierType, typename... Rest, unsigned Dummy = 0>
 bool serializeVisit(const Modifier& mod, std::ostream& os) {
     if (auto* modifier = dyn_cast<ModifierType>(&mod)) {
@@ -422,7 +518,8 @@ bool ModifierSerializer::serialize(const Modifier& mod, std::ostream& os) {
                           CacheScopeModifiers, SMEMModifiers, SDWAModifiers, DPPModifiers,
                           VOP3Modifiers, VOP3PModifiers, True16Modifiers, EXEC, VCC, SWaitCntData,
                           SWaitTensorCntData, SWaitStoreCntData, SDelayAluData, SWaitAluData,
-                          MFMAModifiers, MatrixFmtModifiers, MemTokenData, LabelData>(mod, os);
+                          MFMAModifiers, MatrixFmtModifiers, MemTokenData, LabelData, CallSiteData>(
+        mod, os);
 }
 
 /*
@@ -557,6 +654,27 @@ void deserializeVisit(StinkyInstruction* inst, const std::string& attrKey,
     } else if (attrKey == "mod.label") {
         inst->addModifier(LabelData(getStr(fields, "label", ""),
                                     static_cast<uint16_t>(getInt(fields, "alignment", 1))));
+    } else if (attrKey == "mod.call") {
+        // `callees` is required to attach the modifier at all (an opaque
+        // indirect swappc carries no CallSiteData). `clobbers` is optional;
+        // missing or empty == "conservative full caller-saved barrier".
+        std::vector<std::string> callees = getStringVector(fields, "callees");
+        if (callees.empty()) {
+            // No-op: producer must omit the modifier rather than emit
+            // `callees = []`. Keep the parser permissive (don't crash) but
+            // skip stamping.
+            return;
+        }
+        std::vector<RegKey> clobbers;
+        if (fields.contains("clobbers")) {
+            for (const std::string& tok : getStringVector(fields, "clobbers")) {
+                if (auto k = parseRegKey(tok)) clobbers.push_back(*k);
+                // Silently drop malformed tokens; the v1 producer ships
+                // empty clobbers and there is no consumer that would
+                // benefit from a hard error here.
+            }
+        }
+        inst->addModifier(CallSiteData(std::move(callees), std::move(clobbers)));
     }
     // mod.sdwa, mod.vop3p, mod.true16: no deserialize support yet
 }

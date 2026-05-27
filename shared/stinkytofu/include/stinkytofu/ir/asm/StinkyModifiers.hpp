@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "stinkytofu/Export.hpp"
+#include "stinkytofu/ir/asm/RegisterKey.hpp"
 
 namespace stinkytofu {
 // Enum for selecting high or low 16 bits in True16 instructions
@@ -293,6 +294,7 @@ struct Modifier {
         COMMENT,
         MATRIX_FMT,
         MEM_TOKEN,
+        CALL_SITE,
     };
 
     Modifier(Type type) : type(type) {}
@@ -762,6 +764,38 @@ struct LabelData : public TypedModifier<LabelData> {
         : TypedModifier<LabelData>(), label(label), alignment(alignment) {}
     std::string label;
     uint16_t alignment;
+};
+
+/// Call-site metadata attached to an call mnemonic (s_swappc_b64).
+///
+/// Semantics of \p calleeFuncs (names of Functions in the same StinkyAsmModule):
+///   - size 0: never stored - if the producer has nothing to say, do not attach
+///             the modifier at all (the swappc stays opaque indirect).
+///   - size 1: static call - control transfers to that one Function.
+///   - size N: runtime-dispatched call - exactly one of the N named Functions
+///             is taken at runtime; the caller materialised the chosen callee
+///             address into the swappc source SGPR pair before this point.
+///             The canonical activation flow in tensilelite produces this shape
+///             (one swappc, N=number of enabled activation kinds).
+///
+/// \p clobbers is the call's register kill set: registers whose values the
+/// caller must treat as destroyed (overwritten by the callee) after the call
+/// returns. Concretely it is the union over all candidates of caller-saved
+/// registers the call may overwrite.
+/// Empty == "treat as conservative full caller-saved barrier".
+///
+/// CallGraphAnalysis materialises one caller->callee edge per name in
+/// \p calleeFuncs (so a runtime-dispatched site contributes N edges).
+struct CallSiteData : public TypedModifier<CallSiteData> {
+    static constexpr Modifier::Type Type = Modifier::Type::CALL_SITE;
+
+    CallSiteData(std::vector<std::string> calleeFuncs = {}, std::vector<RegKey> clobbers = {})
+        : TypedModifier<CallSiteData>(),
+          calleeFuncs(std::move(calleeFuncs)),
+          clobbers(std::move(clobbers)) {}
+
+    std::vector<std::string> calleeFuncs;
+    std::vector<RegKey> clobbers;
 };
 
 struct SWaitTensorCntData : public TypedModifier<SWaitTensorCntData> {
