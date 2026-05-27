@@ -518,6 +518,42 @@ inline bool isLabel(const StinkyInstruction& inst) {
     return inst.getUnifiedOpcode() == GFX::LABEL;
 }
 
+// ---------------------------------------------------------------------------
+// Call / return predicates
+// ---------------------------------------------------------------------------
+
+/// Structural call predicate.
+/// Only `s_swappc_b64` is a call mnemonic in the tree.
+inline bool isCall(const StinkyInstruction& inst) {
+    return inst.getUnifiedOpcode() == GFX::s_swappc_b64;
+}
+
+/// Contextual return predicate.
+///
+/// Only an `s_setpc_b64` that lives inside a callee Function (one whose
+/// Function::isCallee() is true) is a return. An `s_setpc_b64` inside the
+/// entry Function is either a long branch (with LabelData stamped by the
+/// rocisa converter or LongBranchLoweringPass) or an opaque indirect
+/// set-PC; neither is a return.
+///
+/// Falls back to false when the instruction is not yet wired into a
+/// BasicBlock/Function.
+inline bool isReturn(const StinkyInstruction& inst) {
+    if (inst.getUnifiedOpcode() != GFX::s_setpc_b64) return false;
+
+    const BasicBlock* bb = inst.getParent();
+    const Function* fn = bb ? bb->getParent() : nullptr;
+    return fn && fn->isCallee();
+}
+
+/// Candidate callee Function names for \p inst. Returns the modifier list
+/// directly (empty if no CallSiteData is attached, i.e. opaque indirect).
+inline const std::vector<std::string>& getCalleeFunctions(const StinkyInstruction& inst) {
+    static const std::vector<std::string> kEmpty;
+    if (const auto* c = inst.getModifier<CallSiteData>()) return c->calleeFuncs;
+    return kEmpty;
+}
+
 /// Determines if an instruction must be preserved and cannot be eliminated.
 ///
 /// This is a comprehensive check that covers all instructions with observable effects,

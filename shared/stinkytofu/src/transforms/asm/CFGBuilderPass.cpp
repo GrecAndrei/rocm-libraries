@@ -196,14 +196,18 @@ class CFGBuilderPassImpl : public Pass {
                     }
                 }
 
-                // Fall-through when prevBB has no terminator, or when its terminator
-                // is a conditional branch (may not be taken). Unconditional branches
-                // do not fall through, including register-target branches such as
-                // s_setpc_b64 (without LabelData) and s_swappc_b64.
+                // Fall-through when prevBB has no terminator, or when its
+                // terminator is a conditional branch (may not be taken), or
+                // when it is a call (control returns to the next instruction
+                // after the callee returns; semantically a fall-through edge
+                // within the caller Function). Other unconditional branches
+                // (s_branch, return setpc inside a callee, opaque setpc in
+                // the entry Function) do not fall through.
                 bool shouldFallThrough = true;
                 if (prevTerm) {
                     StinkyInstruction* prevTermInst = cast<StinkyInstruction>(prevTerm);
-                    if (isBranch(*prevTermInst) && !isConditionalBranch(*prevTermInst)) {
+                    if (isBranch(*prevTermInst) && !isConditionalBranch(*prevTermInst) &&
+                        !isCall(*prevTermInst)) {
                         shouldFallThrough = false;
                     }
                 }
