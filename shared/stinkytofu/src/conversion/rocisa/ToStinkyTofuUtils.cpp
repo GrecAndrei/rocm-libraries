@@ -283,6 +283,20 @@ Legalized legalizeInstruction(StinkyInstruction* inst, rocisa::Instruction* roci
             return {nullptr, nullptr};
         }
 
+        // SSwapPCB64 is a call site. The rocisa side carries the candidate
+        // callee Function names in `calleeFuncs` (one entry == static call,
+        // N entries == runtime-dispatched, empty == opaque indirect). Stamp
+        // CallSiteData only when the producer named at least one callee;
+        // leaving the modifier off when calleeFuncs is empty preserves the
+        // "opaque indirect call" semantics that the CFG pass and CallGraph
+        // analysis already handle.
+        if (auto* swappc = dynamic_cast<rocisa::SSwapPCB64*>(rocisaInst)) {
+            if (!swappc->calleeFuncs.empty()) {
+                inst->addModifier<CallSiteData>(CallSiteData{swappc->calleeFuncs, /*clobbers=*/{}});
+            }
+            return {nullptr, nullptr};
+        }
+
         inst->addModifier<LabelData>(LabelData{branchInst->labelName});
         return {nullptr, nullptr};
     }
@@ -878,19 +892,39 @@ std::shared_ptr<stinkytofu::SignatureBase> toStinkySignature(const rocisa::Signa
 using ItemVisitor =
     std::function<void(rocisa::Item*, const std::vector<const std::string*>& moduleNames)>;
 
+/// Hook fired just before recursing into a child rocisa::Module. Used by the
+/// converter (toStinkyTofuModule) to pivot the active stinkytofu BasicBlock /
+/// AsmIRBuilder when entering a sub-Module flagged `isCallable`.
+using ModuleEnter =
+    std::function<void(const rocisa::Module&, const std::vector<const std::string*>&)>;
+
+/// Hook fired immediately after the recursive call returns. Symmetric with
+/// ModuleEnter.
+using ModuleLeave =
+    std::function<void(const rocisa::Module&, const std::vector<const std::string*>&)>;
+
 /**
  * @brief traversal rocisa::Module with DFS path and process each item
  * @param module The rocisa::Module to traverse
  * @param parentModuleNames The hierarchical module names of the parent items
  * @param visitor The visitor to process each item
+ * @param onEnter Optional hook called before recursing into a child sub-Module
+ * @param onLeave Optional hook called after recursing into a child sub-Module
+ *
+ * The enter/leave hooks let callers attach per-subtree state (e.g. the active
+ * stinkytofu BasicBlock when descending into an isCallable rocisa::Module).
+ * Empty hooks are a no-op and preserve the pre-existing behaviour.
  */
 void traverseModule(const rocisa::Module& module,
-                    const std::vector<const std::string*>& parentModuleNames, ItemVisitor visitor) {
+                    const std::vector<const std::string*>& parentModuleNames, ItemVisitor visitor,
+                    const ModuleEnter& onEnter = {}, const ModuleLeave& onLeave = {}) {
     std::vector<const std::string*> moduleNames(parentModuleNames);
     moduleNames.push_back(&module.name);
     for (auto& item : module.itemList) {
         if (const auto subModule = dynamic_cast<const rocisa::Module*>(item.get())) {
-            traverseModule(*subModule, moduleNames, visitor);
+            if (onEnter) onEnter(*subModule, moduleNames);
+            traverseModule(*subModule, moduleNames, visitor, onEnter, onLeave);
+            if (onLeave) onLeave(*subModule, moduleNames);
         } else {
             visitor(item.get(), moduleNames);
         }
@@ -922,6 +956,41 @@ static std::shared_ptr<StinkyAsmModule> toStinkyTofuModule(
 
     // Create IRBuilder for lower-level instruction creation
     AsmIRBuilder irBuilder(*currentBB, archId);
+
+    // Stack of "active BasicBlock"s, indexed by rocisa-side recursion depth
+    // into isCallable sub-Modules. The top of the stack is what currentBB and
+    // irBuilder are currently bound to; on entering an isCallable sub-Module
+    // we push the new callee Function's entry block, on leaving we pop back.
+    // The base entry is the entry Function's entry block.
+    std::vector<BasicBlock*> bbStack;
+    bbStack.push_back(currentBB);
+
+    // Hooks driven by traverseModule. We split a rocisa sub-Module flagged
+    // `isCallable` into its own stinkytofu Function so that downstream
+    // analyses (CFG, CallGraph, scheduler) see a real caller/callee pair
+    // instead of one flat block straddling the call boundary.
+    ModuleEnter onModuleEnter = [&](const rocisa::Module& subMod,
+                                    const std::vector<const std::string*>& /*names*/) {
+        if (!subMod.isCallable) return;
+        const std::string fnName = subMod.callableName.empty() ? subMod.name : subMod.callableName;
+        // The vector inside StinkyAsmModule::Impl holds unique_ptr<Function>,
+        // so the returned reference is address-stable for the rest of
+        // conversion (intrusive BasicBlock list parents stay valid).
+        Function& callee = stinkyAsmModule.createFunction(fnName, /*isCallee=*/true);
+        BasicBlock* calleeEntry = callee.getEntryBlock();
+        assert(calleeEntry && "createFunction must provide an entry block");
+        bbStack.push_back(calleeEntry);
+        currentBB = calleeEntry;
+        irBuilder.setInsertionPoint(*currentBB);
+    };
+    ModuleLeave onModuleLeave = [&](const rocisa::Module& subMod,
+                                    const std::vector<const std::string*>& /*names*/) {
+        if (!subMod.isCallable) return;
+        assert(bbStack.size() > 1 && "onModuleLeave underflow (callee Function not pushed)");
+        bbStack.pop_back();
+        currentBB = bbStack.back();
+        irBuilder.setInsertionPoint(*currentBB);
+    };
 
     // Process each item
     std::map<std::string, int> asmCaps = rocisa::rocIsa::getInstance().getAsmCaps();
@@ -1118,11 +1187,21 @@ static std::shared_ptr<StinkyAsmModule> toStinkyTofuModule(
         base.push_back(&module.name);
 
         if (const auto* subMod = dynamic_cast<const rocisa::Module*>(item.get())) {
-            traverseModule(*subMod, base, processItem);
+            // Apply enter/leave at the top level too: the top-level loop
+            // dispatches into child sub-Modules directly (bypassing the
+            // outer kernel Module which is the entry Function itself), so
+            // isCallable children attached straight under the kernel
+            // Module also need the pivot.
+            onModuleEnter(*subMod, base);
+            traverseModule(*subMod, base, processItem, onModuleEnter, onModuleLeave);
+            onModuleLeave(*subMod, base);
         } else {
             processItem(item.get(), base);
         }
     }
+
+    assert(bbStack.size() == 1 &&
+           "isCallable enter/leave imbalance: every push must have a matching pop");
 
     return std::make_shared<StinkyAsmModule>(std::move(stinkyAsmModule));
 }
