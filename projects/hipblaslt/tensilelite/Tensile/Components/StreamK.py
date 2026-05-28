@@ -3382,10 +3382,10 @@ class StreamKDynamic(StreamK):
                 #   - target >= remainder -> bail (target queue owns no
                 #     structural extra; no point burning an atomic on it).
                 skFetchDone = Label("SK_FetchDone", "")
-                module.add(SCmpLtU32(src0=sgpr(sWorkItemIdx), src1=sgpr("TotalTiles"), comment="Check active queue work item"))
+                module.add(SCmpLtU32(src0=sgpr(sWorkItemIdx), src1=sgpr("TotalItems"), comment="Check active queue work item"))
                 module.add(SCBranchSCC1(labelName=skFetchDone.getLabelName(), comment="Fetched valid work"))
                 sRemainder = writer.sgprPool.checkOut(1, "remainder tiles")
-                module.add(SAndB32(dst=sgpr(sRemainder), src0=sgpr("TotalTiles"), src1=xcdMask, comment="Remainder tiles"))
+                module.add(SAndB32(dst=sgpr(sRemainder), src0=sgpr("TotalItems"), src1=xcdMask, comment="Remainder tiles"))
                 module.add(SCmpEQU32(src0=sgpr(sRemainder), src1=0, comment="Check if stealing can help"))
                 module.add(SCBranchSCC1(labelName=skFetchDone.getLabelName(), comment="No tile remainder; no stealing"))
 
@@ -3484,10 +3484,10 @@ class StreamKDynamic(StreamK):
                 stride = _smallest_nontrivial_coprime(numXCDs)
 
                 skFetchDone = Label("SK_FetchDone", "")
-                module.add(SCmpLtU32(src0=sgpr(sWorkItemIdx), src1=sgpr("TotalTiles"), comment="Check active queue work item"))
+                module.add(SCmpLtU32(src0=sgpr(sWorkItemIdx), src1=sgpr("TotalItems"), comment="Check active queue work item"))
                 module.add(SCBranchSCC1(labelName=skFetchDone.getLabelName(), comment="Fetched valid work"))
                 sRemainder = writer.sgprPool.checkOut(1, "remainder tiles")
-                module.add(SAndB32(dst=sgpr(sRemainder), src0=sgpr("TotalTiles"), src1=xcdMask, comment="Remainder tiles"))
+                module.add(SAndB32(dst=sgpr(sRemainder), src0=sgpr("TotalItems"), src1=xcdMask, comment="Remainder tiles"))
                 module.add(SCmpEQU32(src0=sgpr(sRemainder), src1=0, comment="Check if stealing can help"))
                 module.add(SCBranchSCC1(labelName=skFetchDone.getLabelName(), comment="No tile remainder; no stealing"))
 
