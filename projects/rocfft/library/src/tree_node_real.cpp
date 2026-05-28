@@ -289,10 +289,13 @@ void RealTransEvenNode::BuildTree_internal(SchemeTreeVec& child_scheme_trees)
         if(try_fuse_pre_post_processing)
             try_fuse_pre_post_processing = cfftPlan->isLeafNode();
 
-        // fuse 1D pre/post when the fused Stockham kernel fits in LDS
+        // fuse 1D pre/post when the fused Stockham kernel fits in LDS.
+        // Use cfftPlan->length[0] (always = realLength/2) rather than length[0]/2:
+        // for C2R, set_complex_length swaps node.length to the Hermitian side,
+        // making length[0]/2 wrong.
         if((cfftPlan->scheme == CS_KERNEL_STOCKHAM) && // simple decomposition
            (length.size() == 1) && // 1D
-           fused_real_stockham_fits_lds(pool, length[0] / 2, precision, deviceProp)
+           fused_real_stockham_fits_lds(pool, cfftPlan->length[0], precision, deviceProp)
            && (inArrayType != rocfft_array_type_hermitian_planar) && // no planar
            (outArrayType != rocfft_array_type_hermitian_planar))
         {
