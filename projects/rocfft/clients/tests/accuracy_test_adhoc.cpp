@@ -141,7 +141,8 @@ inline auto param_permissive_iodist()
                     const double run_prob
                         = test_prob * (param.is_planar() ? complex_planar_prob_factor : 1.0)
                           * (param.is_interleaved() ? complex_interleaved_prob_factor : 1.0)
-                          * (param.is_real() ? real_prob_factor : 1.0);
+                          * (param.is_real() ? real_prob_factor : 1.0)
+                          * (param.is_callback() ? callback_prob_factor : 1.0);
 
                     if(roll > run_prob)
                     {
@@ -246,7 +247,28 @@ inline auto param_adhoc_stride()
             param.otype          = std::get<3>(types);
             param.istride        = {90, 2};
             param.ostride        = {90, 2};
-            params.push_back(param);
+            param.validate();
+            const double roll = hash_prob(random_seed, param.token());
+            const double run_prob
+                = test_prob * (param.is_planar() ? complex_planar_prob_factor : 1.0)
+                  * (param.is_interleaved() ? complex_interleaved_prob_factor : 1.0)
+                  * (param.is_real() ? real_prob_factor : 1.0)
+                  * (param.is_callback() ? callback_prob_factor : 1.0);
+            if(roll > run_prob)
+            {
+                if(verbose > 4)
+                {
+                    std::cout << "Test skipped (probability " << run_prob << " > " << roll << ")\n";
+                }
+                continue;
+            }
+            else
+            {
+                if(param.valid(0))
+                {
+                    params.push_back(param);
+                }
+            }
         }
 
         // test C2R/R2C with non-contiguous higher strides and dist - we
@@ -275,7 +297,8 @@ inline auto param_adhoc_stride()
                 const double run_prob
                     = test_prob * (param.is_planar() ? complex_planar_prob_factor : 1.0)
                       * (param.is_interleaved() ? complex_interleaved_prob_factor : 1.0)
-                      * (param.is_real() ? real_prob_factor : 1.0);
+                      * (param.is_real() ? real_prob_factor : 1.0)
+                      * (param.is_callback() ? callback_prob_factor : 1.0);
 
                 if(roll > run_prob)
                 {
@@ -314,7 +337,8 @@ inline auto param_adhoc_stride()
                 const double run_prob
                     = test_prob * (param.is_planar() ? complex_planar_prob_factor : 1.0)
                       * (param.is_interleaved() ? complex_interleaved_prob_factor : 1.0)
-                      * (param.is_real() ? real_prob_factor : 1.0);
+                      * (param.is_real() ? real_prob_factor : 1.0)
+                      * (param.is_callback() ? callback_prob_factor : 1.0);
 
                 if(roll > run_prob)
                 {
@@ -622,7 +646,8 @@ inline auto param_even_real_odd_base_index()
                 const double run_prob
                     = test_prob * (param.is_planar() ? complex_planar_prob_factor : 1.0)
                       * (param.is_interleaved() ? complex_interleaved_prob_factor : 1.0)
-                      * (param.is_real() ? real_prob_factor : 1.0);
+                      * (param.is_real() ? real_prob_factor : 1.0)
+                      * (param.is_callback() ? callback_prob_factor : 1.0);
 
                 if(roll > run_prob)
                 {
