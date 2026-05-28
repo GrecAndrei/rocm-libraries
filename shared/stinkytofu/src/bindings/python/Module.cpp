@@ -185,7 +185,33 @@ std::string StinkyAsmModule::emitAssembly() const {
     options.useSymbolicNames = true;  // Enable symbolic register names
 
     stinkytofu::StinkyAsmEmitter emitter(options);
-    return emitter.emit(getFunction());
+
+    // Entry Function first. Its kernel-entry label is provided by the
+    // signature header emitted by the surrounding wrapper
+    // (StinkyAsmModuleWithSignature::emitAssembly in ToStinkyTofuUtils.cpp),
+    // not by this method.
+    std::string result = emitter.emit(getFunction());
+
+    // Then any callees in insertion order. Producer contract: each callee
+    // Function's body opens with a LABEL pseudo-instruction whose name
+    // matches the address that the caller materialised into the swappc
+    // source SGPR pair (rocisa stamps it via the original rocisa::Label
+    // child at the head of an isCallable sub-Module; the future
+    // CallSiteLoweringPass for raw-asm recovery preserves the same
+    // invariant). This is what makes the appended callee bodies
+    // textually reachable from the caller's swappc.
+    //
+    // Callees emit AFTER the entry's terminating `s_endpgm`; they are
+    // unreachable via fall-through and only reached via swappc, matching
+    // the standard AMDGPU device-function layout.
+    std::vector<const Function*> allFunctions = getFunctions();
+    for (size_t i = 1; i < allFunctions.size(); ++i) {
+        const Function* callee = allFunctions[i];
+        if (!callee) continue;
+        result += emitter.emit(*callee);
+    }
+
+    return result;
 }
 
 void StinkyAsmModule::runOptimizationPipeline() {
