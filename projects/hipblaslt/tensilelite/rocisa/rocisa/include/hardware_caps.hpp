@@ -540,7 +540,7 @@ inline std::map<std::string, int> initArchCaps(const IsaVersion& isaVersion)
     auto origamiArch = origami::hardware_t::arch_name_to_enum(getGfxNameTuple(isaVersion));
     int numXCDs = 1;
     if(origamiArch != origami::hardware_t::architecture_t::Count)
-        numXCDs = origami::hardware_t::get_arch_constants(origamiArch).num_xcds;
+        numXCDs = origami::hardware_t::get_default_num_xcds(origamiArch);
     rv["NumXCDs"] = numXCDs;
 
     return rv;
