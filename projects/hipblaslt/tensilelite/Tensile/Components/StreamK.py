@@ -3034,7 +3034,11 @@ class StreamKDynamic(StreamK):
         #   wsMode == 0: per-XCD home queue only (auto-reset bound).
         #   wsMode == 1: home queue + multi-hop next-neighbor stealing.
         #   wsMode == 2: hierarchical L1->L2 (per-XCD chunked L1 pool +
-        #               shared global L2 pool with fixed 7/8 split).
+        #               shared global L2 pool; L2 fraction is runtime-
+        #               adaptive in {1/16, 1/8, 1/4, 1/2} based on
+        #               tiles_per_wg buckets, mirroring tritonBLAS's
+        #               local_frac = max(0.5, 1 - 0.05*max(0, tiles_per_cu-4))
+        #               with skGrid used as a runtime proxy for numCUs).
         #   wsMode == 3: global atomic + chiplet swizzle (per-XCD counters
         #               unused; one shared counter for the whole device).
         #   wsMode == 4: home queue + single-hop next-neighbor steal (one
@@ -3073,9 +3077,29 @@ class StreamKDynamic(StreamK):
         if wsMode == 2:
             # Hierarchical L1->L2 mode (mirrors tritonBLAS HIERARCHICAL).
             #
-            # Tile partition (computed at runtime, no host info needed):
-            #   total_global       = TotalItems >> 3              (~12.5%)
-            #   total_local_raw    = TotalItems - total_global    (~87.5%)
+            # tritonBLAS computes the L1/L2 split on the host as
+            #   local_frac = max(0.5, 1 - 0.05 * max(0, tiles_per_cu - 4))
+            #   LOCAL_TILES_PER_XCD = round(total_tiles * local_frac / NUM_XCDS)
+            # i.e. as the per-CU tile load grows, more work is pushed into
+            # the shared L2 pool to limit straggler imbalance, capped at
+            # 50/50. We approximate that piecewise-linear schedule with a
+            # cheap runtime bucket select using only TotalItems and skGrid
+            # (which is the live runtime proxy for numCUs at this point;
+            # we deliberately avoid adding a host-side numCUs argument).
+            #
+            # Bucket selection (tiles_per_wg ~= TotalItems / skGrid):
+            #   tiles_per_wg <=  4  ->  total_global = TotalItems >> 4   (~ 1/16 L2,  local_frac ~= 15/16)
+            #   tiles_per_wg <=  8  ->  total_global = TotalItems >> 3   (~ 1/8  L2,  local_frac ~=  7/8 )
+            #   tiles_per_wg <= 16  ->  total_global = TotalItems >> 2   (~ 1/4  L2,  local_frac ~=  3/4 )
+            #   else                ->  total_global = TotalItems >> 1   (~ 1/2  L2,  local_frac ~=  1/2 )
+            # Implemented purely as scalar shifts + s_cmp_le_u32 +
+            # s_cselect_b32 against thresholds T1=skGrid<<2, T2=skGrid<<3,
+            # T3=skGrid<<4. No VGPRs, no division, no host-side info.
+            #
+            # Tile partition (everything below is unchanged from the
+            # original 7/8 implementation; only the value of total_global
+            # is now adaptive):
+            #   total_local_raw    = TotalItems - total_global
             #   tiles_per_xcd_local= total_local_raw >> log2NumXCDs
             #   total_local        = tiles_per_xcd_local << log2NumXCDs
             #   total_global       = TotalItems - total_local     (absorbs remainder)
@@ -3107,15 +3131,39 @@ class StreamKDynamic(StreamK):
             module.add(SAndB32(dst=sgpr(sQueueIdx), src0=sgpr("StreamKIdx"), src1=xcdMask, comment="L1 home queue index"))
             self.dynamicQueueBaseAddressFromIdx(writer, module, sAddress, sQueueIdx, "L1 home queue")
 
-            # Partition: tiles_per_xcd_local = (TotalItems - (TotalItems>>3)) >> log2NumXCDs
+            # Adaptive L2 fraction: pick total_global from
+            #   {TotalItems>>1, TotalItems>>2, TotalItems>>3, TotalItems>>4}
+            # based on TotalItems vs {skGrid<<2, skGrid<<3, skGrid<<4}.
+            # SCSelectB32 picks src0 when SCC=1, src1 when SCC=0 (see
+            # existing usage near the workgroupsInQueue computation below).
             sTotalGlobal = writer.sgprPool.checkOut(1, "totalGlobal")
             sTotalLocal = writer.sgprPool.checkOut(1, "totalLocal")
             sTilesPerXcdLocal = writer.sgprPool.checkOut(1, "tilesPerXcdLocal")
-            module.add(SLShiftRightB32(dst=sgpr(sTotalGlobal), src=sgpr("TotalItems"), shiftHex=hex(3), comment="L2 size (raw) = TotalItems >> 3"))
-            module.add(SSubU32(dst=sgpr(sTotalLocal), src0=sgpr("TotalItems"), src1=sgpr(sTotalGlobal), comment="L1 size (raw) = TotalItems - L2_raw"))
+            sHierBucketTmp = writer.sgprPool.checkOut(1, "hierBucketTmp")
+            # Start with the worst-case bucket: cand3 = TotalItems>>1 (1/2 L2).
+            module.add(SLShiftRightB32(dst=sgpr(sTotalGlobal), src=sgpr("TotalItems"), shiftHex=hex(1), comment="cand3 = TotalItems>>1 (1/2 L2, default)"))
+            # Bucket 3: tiles_per_wg <= 16 -> cand2 = TotalItems>>2 (1/4 L2)
+            module.add(SLShiftLeftB32(dst=sgpr(sHierBucketTmp), src=sgpr("skGrid"), shiftHex=hex(4), comment="T3 = skGrid<<4 (tiles_per_wg<=16 threshold)"))
+            module.add(SCmpLeU32(src0=sgpr("TotalItems"), src1=sgpr(sHierBucketTmp), comment="TotalItems <= T3?"))
+            module.add(SLShiftRightB32(dst=sgpr(sHierBucketTmp), src=sgpr("TotalItems"), shiftHex=hex(2), comment="cand2 = TotalItems>>2 (1/4 L2)"))
+            module.add(SCSelectB32(dst=sgpr(sTotalGlobal), src0=sgpr(sHierBucketTmp), src1=sgpr(sTotalGlobal), comment="pick 1/4 L2 if tiles_per_wg<=16, else keep 1/2"))
+            # Bucket 2: tiles_per_wg <= 8 -> cand1 = TotalItems>>3 (1/8 L2)
+            module.add(SLShiftLeftB32(dst=sgpr(sHierBucketTmp), src=sgpr("skGrid"), shiftHex=hex(3), comment="T2 = skGrid<<3 (tiles_per_wg<=8 threshold)"))
+            module.add(SCmpLeU32(src0=sgpr("TotalItems"), src1=sgpr(sHierBucketTmp), comment="TotalItems <= T2?"))
+            module.add(SLShiftRightB32(dst=sgpr(sHierBucketTmp), src=sgpr("TotalItems"), shiftHex=hex(3), comment="cand1 = TotalItems>>3 (1/8 L2)"))
+            module.add(SCSelectB32(dst=sgpr(sTotalGlobal), src0=sgpr(sHierBucketTmp), src1=sgpr(sTotalGlobal), comment="pick 1/8 L2 if tiles_per_wg<=8, else keep"))
+            # Bucket 1: tiles_per_wg <= 4 -> cand0 = TotalItems>>4 (1/16 L2)
+            module.add(SLShiftLeftB32(dst=sgpr(sHierBucketTmp), src=sgpr("skGrid"), shiftHex=hex(2), comment="T1 = skGrid<<2 (tiles_per_wg<=4 threshold)"))
+            module.add(SCmpLeU32(src0=sgpr("TotalItems"), src1=sgpr(sHierBucketTmp), comment="TotalItems <= T1?"))
+            module.add(SLShiftRightB32(dst=sgpr(sHierBucketTmp), src=sgpr("TotalItems"), shiftHex=hex(4), comment="cand0 = TotalItems>>4 (1/16 L2)"))
+            module.add(SCSelectB32(dst=sgpr(sTotalGlobal), src0=sgpr(sHierBucketTmp), src1=sgpr(sTotalGlobal), comment="pick 1/16 L2 if tiles_per_wg<=4, else keep"))
+            writer.sgprPool.checkIn(sHierBucketTmp)
+
+            # Partition: tiles_per_xcd_local = (TotalItems - total_global) >> log2NumXCDs
+            module.add(SSubU32(dst=sgpr(sTotalLocal), src0=sgpr("TotalItems"), src1=sgpr(sTotalGlobal), comment="L1 size (raw) = TotalItems - total_global"))
             module.add(SLShiftRightB32(dst=sgpr(sTilesPerXcdLocal), src=sgpr(sTotalLocal), shiftHex=log2NumXCDs, comment="tiles_per_xcd_local = L1_raw >> log2NumXCDs"))
             module.add(SLShiftLeftB32(dst=sgpr(sTotalLocal), src=sgpr(sTilesPerXcdLocal), shiftHex=log2NumXCDs, comment="total_local = tiles_per_xcd_local << log2NumXCDs"))
-            module.add(SSubU32(dst=sgpr(sTotalGlobal), src0=sgpr("TotalItems"), src1=sgpr(sTotalLocal), comment="total_global = TotalItems - total_local"))
+            module.add(SSubU32(dst=sgpr(sTotalGlobal), src0=sgpr("TotalItems"), src1=sgpr(sTotalLocal), comment="total_global = TotalItems - total_local (re-absorb remainder)"))
 
             # workgroupsInQueue = (skGrid >> log2NumXCDs) + (queueIdx < (skGrid & xcdMask) ? 1 : 0)
             sWorkgroupsInQueue = writer.sgprPool.checkOut(1, "workgroupsInQueue")

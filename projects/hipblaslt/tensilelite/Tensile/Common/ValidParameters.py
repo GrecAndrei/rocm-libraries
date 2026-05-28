@@ -783,13 +783,24 @@ validParameters = { # we need to make sure this matches develop
     # 1: multi-hop next-neighbor stealing. After home queue is empty, the WG
     #    walks queues (queueIdx+1) & xcdMask deterministically, attempting one
     #    atomic per eligible neighbor up to numXCDs-1 real attempts.
-    # 2: hierarchical L1->L2 (mirrors tritonBLAS HIERARCHICAL). ~7/8 of tiles
-    #    form a per-XCD chunked L1 pool (one counter per XCD); the remaining
-    #    ~1/8 form a single shared L2 pool (one counter at the global offset).
-    #    A WG first tries its home L1 counter; on OOB it falls back to the
-    #    shared L2 counter. The fixed 7/8 split is computed at runtime in
-    #    scalar registers (TotalTiles >> 3 = L2 size), so no host-side
-    #    information is needed.
+    # 2: hierarchical L1->L2 (mirrors tritonBLAS HIERARCHICAL). Tiles are
+    #    split between a per-XCD chunked L1 pool (one counter per XCD) and
+    #    a single shared L2 pool (one counter at the global offset). A WG
+    #    first tries its home L1 counter; on OOB it falls back to the shared
+    #    L2 counter. The L1/L2 split is runtime-adaptive (no host-side
+    #    information added): we approximate tritonBLAS's host-side formula
+    #      local_frac = max(0.5, 1 - 0.05 * max(0, tiles_per_cu - 4))
+    #    with a cheap scalar bucket select on TotalItems vs skGrid (skGrid
+    #    is the live runtime proxy for numCUs at this point in the kernel):
+    #      tiles_per_wg <=  4 -> L2 = TotalItems >> 4 (~1/16, local_frac~=15/16)
+    #      tiles_per_wg <=  8 -> L2 = TotalItems >> 3 (~1/8 , local_frac~= 7/8 )
+    #      tiles_per_wg <= 16 -> L2 = TotalItems >> 2 (~1/4 , local_frac~= 3/4 )
+    #      else               -> L2 = TotalItems >> 1 (~1/2 , local_frac~= 1/2 )
+    #    Implemented purely as scalar shifts + s_cmp_le_u32 + s_cselect_b32
+    #    against thresholds T1=skGrid<<2, T2=skGrid<<3, T3=skGrid<<4 (no
+    #    VGPRs, no division). The flag-region geometry (numXCDs+1 counters
+    #    with the global at offset (numXCDs+1)*256) and the CHUNKED tile-id
+    #    mapping are unchanged from the original fixed-7/8 implementation.
     # 3: global atomic + chiplet swizzle (mirrors tritonBLAS GLOBAL_ATOMIC
     #    mode). Per-XCD home counters are not used; every WG races for tiles
     #    on a single shared global counter at offset (numXCDs+1)*256 in the
