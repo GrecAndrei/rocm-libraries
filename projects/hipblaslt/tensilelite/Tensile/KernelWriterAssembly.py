@@ -14005,7 +14005,11 @@ class KernelWriterAssembly(KernelWriter):
         activationSetPCStruct.vgprActCopy, tmpVgpr.idx, actTempSgpr))
 
       for index, activationLabelModule in enumerate(activationLabelModules):
-        actModule = Module(activationLabelModule.getLabelName())
+        callableName = activationLabelModule.getLabelName()
+        actModule = Module(callableName)
+        # Mark this activation block as its own callable region.
+        actModule.isCallable = True
+        actModule.callableName = callableName
         actModule.add(activationLabelModule)
         activationTypeStr = activationEnumStrList[index]
         vgprIdx = activationSetPCStruct.vgprActCopy
@@ -14635,6 +14639,8 @@ class KernelWriterAssembly(KernelWriter):
     sgprOffsetActivation: int = -1
     sgprOffsetBack: int = -1
     vgprActCopy: int = -1
+    # Per-gwvw tuple of candidate-callee Function names visible at the s_swappc_b64 call site.
+    callableNamesByGwvw: Optional[Mapping[int, Tuple[str, ...]]] = None
 
   def globalWriteElements(self, kernel, tPA, tPB, vectorWidths_2, vectorWidths_1, elements_2, elements_1,
                           noGSUBranch=False,
@@ -15257,22 +15263,36 @@ class KernelWriterAssembly(KernelWriter):
       if kernel["ActivationFuncCall"]:
         sgprOffsetActivation = self.sgprPool.checkOutAligned(2, 2, preventOverflow=False)
         sgprOffsetBack = self.sgprPool.checkOutAligned(2, 2, preventOverflow=False)
-        activationSetPCStruct = self.ActivationSetPCStruct(sgprOffsetActivation=sgprOffsetActivation, \
-          sgprOffsetBack=sgprOffsetBack, vgprActCopy=tmpVgpr.idx)
         activationCDataType = kernel["ProblemType"]["ActivationComputeDataType"]
         activationLabelList = {}
         toActModuleList = {}
         supportedBy = ActivationType.SupportedBy.ALL if kernel["ProblemType"]["ActivationType"] == 'all' else ActivationType.SupportedBy.HIPBLASLT
         activationEnumStrList = ActivationType.getEnumStrList(activationCDataType, supportedBy, exportType=actExportType)
+        # Share activation Labels across globalWriteElements invocations
+        if not hasattr(self.states, 'activationLabelCache') or self.states.activationLabelCache is None:
+          self.states.activationLabelCache = {}
         for gwvw in vectorWidths:
           if gwvw in activationLabelList:
             continue
           activationLabelList[gwvw] = []
           toActModuleList[gwvw] = []
           for enumStr in activationEnumStrList:
-            name = self.labels.getNameInc("Activation_%s_VW%u"% (enumStr.capitalize(), gwvw))
-            activationLabelList[gwvw].append(Label(name, ""))
-            toActModuleList[gwvw].append(Label("To_%s"% (name), ""))
+            cacheKey = (gwvw, enumStr)
+            cachedLabel = self.states.activationLabelCache.get(cacheKey)
+            if cachedLabel is None:
+              name = self.labels.getNameInc("Activation_%s_VW%u"% (enumStr.capitalize(), gwvw))
+              cachedLabel = Label(name, "")
+              self.states.activationLabelCache[cacheKey] = cachedLabel
+            activationLabelList[gwvw].append(cachedLabel)
+            toActModuleList[gwvw].append(Label(self.labels.getNameInc("To_%s"% cachedLabel.getLabelName()), ""))
+        # Snapshot the per-gwvw callee Function names so the call site can stamp them on SSwapPCB64.
+        callableNamesByGwvw = {
+          gwvw: tuple(lbl.getLabelName() for lbl in labels)
+          for gwvw, labels in activationLabelList.items()
+        }
+        activationSetPCStruct = self.ActivationSetPCStruct(sgprOffsetActivation=sgprOffsetActivation, \
+          sgprOffsetBack=sgprOffsetBack, vgprActCopy=tmpVgpr.idx, \
+          callableNamesByGwvw=callableNamesByGwvw)
         # Add branch here if all elements are identical
         if vectorWidths.count(vectorWidths[0]) == len(vectorWidths):
           isInsertActFunctionCallAddrCalc = False
