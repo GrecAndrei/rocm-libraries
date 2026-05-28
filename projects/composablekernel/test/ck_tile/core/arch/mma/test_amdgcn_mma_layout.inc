@@ -36,26 +36,27 @@ using namespace ck_tile;
 using namespace ck_tile::core::arch;
 using namespace mma;
 
-using I4        = pk_int4_t;
-using F4        = pk_fp4_t;
-using F6        = pk_fp6x16_t;
-using BF6       = pk_bf6x16_t;
-using F8        = fp8_t;
-using BF8       = bf8_t;
-using I32       = int32_t;
-using F16       = fp16_t;
-using BF16      = bf16_t;
-using F32       = fp32_t;
-using F64       = fp64_t;
-using I8        = int8_t;
-using F8        = fp8_t;
-using I32       = int32_t;
-using Target908 = decltype(make_amdgcn_gfx9_target<amdgcn_target_id::GFX908>());
-using Target90a = decltype(make_amdgcn_gfx9_target<amdgcn_target_id::GFX90A>());
-using Target942 = decltype(make_amdgcn_gfx9_target<amdgcn_target_id::GFX942>());
-using Target950 = decltype(make_amdgcn_gfx9_target<amdgcn_target_id::GFX950>());
-using Target11  = decltype(make_amdgcn_gfx11_target<amdgcn_target_id::GFX1100>());
-using Target12  = decltype(make_amdgcn_gfx12_target<amdgcn_target_id::GFX1201>());
+using I4         = pk_int4_t;
+using F4         = pk_fp4_t;
+using F6         = pk_fp6x16_t;
+using BF6        = pk_bf6x16_t;
+using F8         = fp8_t;
+using BF8        = bf8_t;
+using I32        = int32_t;
+using F16        = fp16_t;
+using BF16       = bf16_t;
+using F32        = fp32_t;
+using F64        = fp64_t;
+using I8         = int8_t;
+using F8         = fp8_t;
+using I32        = int32_t;
+using Target908  = decltype(make_amdgcn_gfx9_target<amdgcn_target_id::GFX908>());
+using Target90a  = decltype(make_amdgcn_gfx9_target<amdgcn_target_id::GFX90A>());
+using Target942  = decltype(make_amdgcn_gfx9_target<amdgcn_target_id::GFX942>());
+using Target950  = decltype(make_amdgcn_gfx9_target<amdgcn_target_id::GFX950>());
+using Target11   = decltype(make_amdgcn_gfx11_target<amdgcn_target_id::GFX1100>());
+using Target12   = decltype(make_amdgcn_gfx12_target<amdgcn_target_id::GFX1201>());
+using Target1250 = decltype(make_amdgcn_gfx12_target<amdgcn_target_id::GFX1250>());
 #if defined(CK_MMA_TEST_ARCH_GFX950)
 using TestTarget = Target950;
 #elif defined(CK_MMA_TEST_ARCH_GFX942)
@@ -251,10 +252,8 @@ struct MmaLayoutTestKernel
             }
             else if constexpr(MmaOpTraits<MmaOp>::IsScale)
             {
-                // The actual scale is computed as pow(2, scale - 127), so:
-                // 125 -> 2^-2 and 129 -> 2^2.
-                int scale_A = 125;
-                int scale_B = 129;
+                int scale_A = 0x7D7D7D7D; // E8M0 = 125 in every byte
+                int scale_B = 0x81818181; // E8M0 = 129 in every byte
                 c_frag      = MmaOp::exec(a_frag, b_frag, c_frag, scale_A, scale_B);
             }
             else
@@ -459,6 +458,13 @@ using Gfx12Intrinsics = ::testing::Types<
     amdgcn_mma<BF8,  BF8,  F32,  16u, 16u, 32u,  DefaultWmmaCtrlFlags,       Target12,   MmaOpFamily::SPARSE>, // swmmac_f32_16x16x32_bf8_bf8_w32
     amdgcn_mma<I4,   I4,   I32,  16u, 16u, 32u,  DefaultWmmaCtrlFlags,       Target12,   MmaOpFamily::SPARSE>, // swmmac_i32_16x16x32_iu4_w32
     amdgcn_mma<I4,   I4,   I32,  16u, 16u, 64u,  DefaultWmmaCtrlFlags,       Target12,   MmaOpFamily::SPARSE>  // swmmac_i32_16x16x64_iu4_w32
+>;
+
+using Gfx1250Intrinsics = ::testing::Types<
+    // Scale WMMA
+    amdgcn_mma<F8,   F8,   F32,  16u, 16u, 128u, DefaultScaleWmmaCtrlFlags,  Target1250, MmaOpFamily::SCALE>,  // wmma_scale_f32_16x16x128_fp8
+    amdgcn_mma<F6,   F6,   F32,  16u, 16u, 128u, DefaultScaleWmmaCtrlFlags,  Target1250, MmaOpFamily::SCALE>,  // wmma_scale_f32_16x16x128_fp6
+    amdgcn_mma<F4,   F4,   F32,  16u, 16u, 128u, DefaultScaleWmmaCtrlFlags,  Target1250, MmaOpFamily::SCALE>   // wmma_scale_f32_16x16x128_fp4
 >;
 // clang-format on
 
