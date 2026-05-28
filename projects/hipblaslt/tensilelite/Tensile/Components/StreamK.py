@@ -26,7 +26,7 @@ from rocisa.container import vgpr, sgpr, SMEMModifiers, MUBUFModifiers, replaceH
     VOP3PModifiers, ContinuousRegister, DSModifiers
 from rocisa.instruction import GlobalInv, GlobalWb, SAddCU32, SAddU32, SAndB32, SBarrier, \
     SBranch, SCBranchSCC0, SCBranchSCC1, SCMovB32, SCSelectB32, SCmpEQU32, SCmpEQU64, \
-    SCmpGtU32, SCmpLeU32, SCmpLtU32, SLShiftLeftB32, SLShiftLeftB64, SLShiftRightB32, VLShiftLeftB32, SLoadB32, \
+    SCmpGtU32, SCmpLeU32, SCmpLtU32, SCmpGeU32, SLShiftLeftB32, SLShiftLeftB64, SLShiftRightB32, VLShiftLeftB32, SLoadB32, \
     SMaxI32, SMinU32, SMovB32, SMovB64, SMulI32, SNop, SOrB32, SSleep, SStoreB32, SSubU32, \
     SWaitCnt, SWaitXCnt, VAddF32, VAddF64, VAddPKF16, VAddU32, VSubU32, VLShiftRightB32, VMovB32, \
     VReadfirstlaneB32, VCvtBF16toFP32, BufferLoadB32, BufferStoreB32, SAtomicInc, DSLoadB32, DSStoreB32, \
