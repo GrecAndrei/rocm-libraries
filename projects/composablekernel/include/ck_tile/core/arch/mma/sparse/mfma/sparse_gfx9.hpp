@@ -46,8 +46,8 @@ struct amdgcn_mma<fp16_t, fp16_t, fp32_t, 16u, 16u, 32u, CtrlFlags, CompilerTarg
 {
     static constexpr const char* instruction_name = "__builtin_amdgcn_smfmac_f32_16x16x32_f16";
 
-    CK_TILE_DEVICE static auto
-    exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx) -> CVecType
+    CK_TILE_DEVICE static CVecType
+    exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec, int32_t idx)
     {
         using PARAMS = sparse::detail::BuiltinParams<CtrlFlags::CompressionIndex>;
         return {__builtin_amdgcn_smfmac_f32_16x16x32_f16(
