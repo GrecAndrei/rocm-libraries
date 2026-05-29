@@ -33,14 +33,7 @@ CK_TILE_HOST_DEVICE void print_flags(DefaultScaleMfmaCtrlFlags const& ctrlFlags)
            ctrlFlags.OPSEL_B);
 }
 
-/**
- * @struct DefaultScaleWmmaCtrlFlags
- * @brief Default WMMA scale control flags for GFX1250 scale WMMA operations.
- *
- * The nested @c ScaleType alias selects which underlying builtin family is used:
- *   - @c int32_t -> @c __builtin_amdgcn_wmma_scale_*    (single E8M0 scale per operand)
- *   - @c int64_t -> @c __builtin_amdgcn_wmma_scale16_*  (16 packed E8M0 scales per operand)
- */
+// Default Scale control flags
 struct DefaultScaleWmmaCtrlFlags
 {
     using ScaleType = int32_t;
@@ -51,14 +44,7 @@ CK_TILE_HOST_DEVICE void print_flags(DefaultScaleWmmaCtrlFlags const&)
     printf("CtrlFlags      (ScaleWmma, scale-width=32)\n");
 }
 
-/**
- * @struct Scale16WmmaCtrlFlags
- * @brief WMMA scale control flags selecting the scale16 builtin family on GFX1250.
- *
- * Identical shape/layout to @ref DefaultScaleWmmaCtrlFlags, but the scale operands are
- * 64-bit values that pack 16 E8M0 sub-scales each, dispatching to the
- * @c __builtin_amdgcn_wmma_scale16_* builtins.
- */
+// Scale control flags for GFX1250 scale16 WMMA instructions
 struct Scale16WmmaCtrlFlags
 {
     using ScaleType = int64_t;

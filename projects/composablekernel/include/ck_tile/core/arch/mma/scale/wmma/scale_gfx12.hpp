@@ -25,7 +25,7 @@ namespace ck_tile::core::arch::mma {
  * @tparam CtrlFlags Control flags for the WMMA operation
  * @tparam CompilerTarget Current compiler target
  */
-// TODO: c++20 template <CtrlFlagsGfx1250I CtrlFlags, amdgcn_target CompilerTarget>
+// TODO: c++20 template <ScaleWmmaCtrlFlags CtrlFlags, amdgcn_target CompilerTarget>
 // TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
@@ -91,7 +91,7 @@ struct amdgcn_mma<fp8_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
  * @tparam CtrlFlags Control flags for the WMMA operation
  * @tparam CompilerTarget Current compiler target
  */
-// TODO: c++20 template <CtrlFlagsGfx1250I CtrlFlags, amdgcn_target CompilerTarget>
+// TODO: c++20 template <ScaleWmmaCtrlFlags CtrlFlags, amdgcn_target CompilerTarget>
 // TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
@@ -157,7 +157,7 @@ struct amdgcn_mma<bf8_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
  * @tparam CtrlFlags Control flags for the WMMA operation
  * @tparam CompilerTarget Current compiler target
  */
-// TODO: c++20 template <CtrlFlagsGfx1250I CtrlFlags, amdgcn_target CompilerTarget>
+// TODO: c++20 template <ScaleWmmaCtrlFlags CtrlFlags, amdgcn_target CompilerTarget>
 // TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
@@ -256,7 +256,7 @@ struct amdgcn_mma<pk_fp6x16_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
  * @tparam CtrlFlags Control flags for the WMMA operation
  * @tparam CompilerTarget Current compiler target
  */
-// TODO: c++20 template <CtrlFlagsGfx1250I CtrlFlags, amdgcn_target CompilerTarget>
+// TODO: c++20 template <ScaleWmmaCtrlFlags CtrlFlags, amdgcn_target CompilerTarget>
 // TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
@@ -355,7 +355,7 @@ struct amdgcn_mma<pk_bf6x16_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
  * @tparam CtrlFlags Control flags for the WMMA operation
  * @tparam CompilerTarget Current compiler target
  */
-// TODO: c++20 template <CtrlFlagsGfx1250I CtrlFlags, amdgcn_target CompilerTarget>
+// TODO: c++20 template <ScaleWmmaCtrlFlags CtrlFlags, amdgcn_target CompilerTarget>
 // TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
