@@ -86,6 +86,21 @@ using TestTarget = Target908;
 // gather back into C matrix. The position of "1" in C is checked against the expected (m, n)
 // location.
 
+template <typename MmaOp, typename = void>
+struct scale_value_type
+{
+    using type = int32_t;
+};
+
+template <typename MmaOp>
+struct scale_value_type<MmaOp, std::void_t<typename MmaOp::ScaleType>>
+{
+    using type = typename MmaOp::ScaleType;
+};
+
+template <typename MmaOp>
+using scale_value_type_t = typename scale_value_type<MmaOp>::type;
+
 // Helper function to place a single "1" value in any datatype. For packed types, "off"
 // indicates the offset at which the "1" must be placed within the pack. The packed datatypes
 // don't always have utilities to convert "1" to their type so we use raw bits instead.
@@ -252,9 +267,20 @@ struct MmaLayoutTestKernel
             }
             else if constexpr(MmaOpTraits<MmaOp>::IsScale)
             {
-                int scale_A = 0x7D7D7D7D; // E8M0 = 125 in every byte
-                int scale_B = 0x81818181; // E8M0 = 129 in every byte
-                c_frag      = MmaOp::exec(a_frag, b_frag, c_frag, scale_A, scale_B);
+                using ScaleT = scale_value_type_t<MmaOp>;
+                if constexpr(sizeof(ScaleT) == sizeof(int64_t))
+                {
+                    // E8M0 = 125 / 129 packed into every byte of a 64-bit value
+                    ScaleT scale_A = 0x7D7D7D7D7D7D7D7DLL;
+                    ScaleT scale_B = 0x8181818181818181LL;
+                    c_frag         = MmaOp::exec(a_frag, b_frag, c_frag, scale_A, scale_B);
+                }
+                else
+                {
+                    ScaleT scale_A = 0x7D7D7D7D; // E8M0 = 125 in every byte
+                    ScaleT scale_B = 0x81818181; // E8M0 = 129 in every byte
+                    c_frag         = MmaOp::exec(a_frag, b_frag, c_frag, scale_A, scale_B);
+                }
             }
             else
             {
@@ -461,12 +487,18 @@ using Gfx12Intrinsics = ::testing::Types<
 >;
 
 using Gfx1250Intrinsics = ::testing::Types<
-    // Scale WMMA
+    // Scale WMMA (32-bit scale)
     amdgcn_mma<F8,   F8,   F32,  16u, 16u, 128u, DefaultScaleWmmaCtrlFlags,  Target1250, MmaOpFamily::SCALE>,  // wmma_scale_f32_16x16x128_fp8
     amdgcn_mma<BF8,  BF8,  F32,  16u, 16u, 128u, DefaultScaleWmmaCtrlFlags,  Target1250, MmaOpFamily::SCALE>,  // wmma_scale_f32_16x16x128_bf8
     amdgcn_mma<F6,   F6,   F32,  16u, 16u, 128u, DefaultScaleWmmaCtrlFlags,  Target1250, MmaOpFamily::SCALE>,  // wmma_scale_f32_16x16x128_fp6
     amdgcn_mma<BF6,  BF6,  F32,  16u, 16u, 128u, DefaultScaleWmmaCtrlFlags,  Target1250, MmaOpFamily::SCALE>,  // wmma_scale_f32_16x16x128_bf6
-    amdgcn_mma<F4,   F4,   F32,  16u, 16u, 128u, DefaultScaleWmmaCtrlFlags,  Target1250, MmaOpFamily::SCALE>   // wmma_scale_f32_16x16x128_fp4
+    amdgcn_mma<F4,   F4,   F32,  16u, 16u, 128u, DefaultScaleWmmaCtrlFlags,  Target1250, MmaOpFamily::SCALE>,  // wmma_scale_f32_16x16x128_fp4
+    // Scale16 WMMA (64-bit scale)
+    amdgcn_mma<F8,   F8,   F32,  16u, 16u, 128u, Scale16WmmaCtrlFlags,       Target1250, MmaOpFamily::SCALE>,  // wmma_scale16_f32_16x16x128_fp8
+    amdgcn_mma<BF8,  BF8,  F32,  16u, 16u, 128u, Scale16WmmaCtrlFlags,       Target1250, MmaOpFamily::SCALE>,  // wmma_scale16_f32_16x16x128_bf8
+    amdgcn_mma<F6,   F6,   F32,  16u, 16u, 128u, Scale16WmmaCtrlFlags,       Target1250, MmaOpFamily::SCALE>,  // wmma_scale16_f32_16x16x128_fp6
+    amdgcn_mma<BF6,  BF6,  F32,  16u, 16u, 128u, Scale16WmmaCtrlFlags,       Target1250, MmaOpFamily::SCALE>,  // wmma_scale16_f32_16x16x128_bf6
+    amdgcn_mma<F4,   F4,   F32,  16u, 16u, 128u, Scale16WmmaCtrlFlags,       Target1250, MmaOpFamily::SCALE>   // wmma_scale16_f32_16x16x128_fp4
 >;
 // clang-format on
 

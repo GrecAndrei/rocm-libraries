@@ -34,29 +34,53 @@ struct amdgcn_mma<fp8_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
 : amdgcn_mma_base<fp8_t, fp8_t, fp32_t, 16u, 16u, 128u, 32u, 64, 1, 1, 1, 1, 8, 1, WmmaOp, MmaOpFamily::SCALE>
 // clang-format on
 {
+    using ScaleType = typename CtrlFlags::ScaleType;
+
     static constexpr const char* instruction_name =
-        "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
+        sizeof(ScaleType) == sizeof(int64_t) ? "__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4"
+                                             : "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
 
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        int32_t scaleA,
-                                        int32_t scaleB)
+                                        ScaleType scaleA,
+                                        ScaleType scaleB)
     {
-        return {__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4(PackedDataTypeToFlag_v<fp8_t>,
-                                                                 bit_cast<int32x16_t>(aVec),
-                                                                 PackedDataTypeToFlag_v<fp8_t>,
-                                                                 bit_cast<int32x16_t>(bVec),
-                                                                 0,
-                                                                 cVec,
-                                                                 0,
-                                                                 0,
-                                                                 scaleA,
-                                                                 0,
-                                                                 0,
-                                                                 scaleB,
-                                                                 false,
-                                                                 false)};
+        if constexpr(sizeof(ScaleType) == sizeof(int64_t))
+        {
+            return {
+                __builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4(PackedDataTypeToFlag_v<fp8_t>,
+                                                                   bit_cast<int32x16_t>(aVec),
+                                                                   PackedDataTypeToFlag_v<fp8_t>,
+                                                                   bit_cast<int32x16_t>(bVec),
+                                                                   0,
+                                                                   cVec,
+                                                                   0,
+                                                                   0,
+                                                                   scaleA,
+                                                                   0,
+                                                                   0,
+                                                                   scaleB,
+                                                                   false,
+                                                                   false)};
+        }
+        else
+        {
+            return {__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4(PackedDataTypeToFlag_v<fp8_t>,
+                                                                     bit_cast<int32x16_t>(aVec),
+                                                                     PackedDataTypeToFlag_v<fp8_t>,
+                                                                     bit_cast<int32x16_t>(bVec),
+                                                                     0,
+                                                                     cVec,
+                                                                     0,
+                                                                     0,
+                                                                     scaleA,
+                                                                     0,
+                                                                     0,
+                                                                     scaleB,
+                                                                     false,
+                                                                     false)};
+        }
     }
 };
 
@@ -76,29 +100,53 @@ struct amdgcn_mma<bf8_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
 : amdgcn_mma_base<bf8_t, bf8_t, fp32_t, 16u, 16u, 128u, 32u, 64, 1, 1, 1, 1, 8, 1, WmmaOp, MmaOpFamily::SCALE>
 // clang-format on
 {
+    using ScaleType = typename CtrlFlags::ScaleType;
+
     static constexpr const char* instruction_name =
-        "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
+        sizeof(ScaleType) == sizeof(int64_t) ? "__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4"
+                                             : "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
 
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        int32_t scaleA,
-                                        int32_t scaleB)
+                                        ScaleType scaleA,
+                                        ScaleType scaleB)
     {
-        return {__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4(PackedDataTypeToFlag_v<bf8_t>,
-                                                                 bit_cast<int32x16_t>(aVec),
-                                                                 PackedDataTypeToFlag_v<bf8_t>,
-                                                                 bit_cast<int32x16_t>(bVec),
-                                                                 0,
-                                                                 cVec,
-                                                                 0,
-                                                                 0,
-                                                                 scaleA,
-                                                                 0,
-                                                                 0,
-                                                                 scaleB,
-                                                                 false,
-                                                                 false)};
+        if constexpr(sizeof(ScaleType) == sizeof(int64_t))
+        {
+            return {
+                __builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4(PackedDataTypeToFlag_v<bf8_t>,
+                                                                   bit_cast<int32x16_t>(aVec),
+                                                                   PackedDataTypeToFlag_v<bf8_t>,
+                                                                   bit_cast<int32x16_t>(bVec),
+                                                                   0,
+                                                                   cVec,
+                                                                   0,
+                                                                   0,
+                                                                   scaleA,
+                                                                   0,
+                                                                   0,
+                                                                   scaleB,
+                                                                   false,
+                                                                   false)};
+        }
+        else
+        {
+            return {__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4(PackedDataTypeToFlag_v<bf8_t>,
+                                                                     bit_cast<int32x16_t>(aVec),
+                                                                     PackedDataTypeToFlag_v<bf8_t>,
+                                                                     bit_cast<int32x16_t>(bVec),
+                                                                     0,
+                                                                     cVec,
+                                                                     0,
+                                                                     0,
+                                                                     scaleA,
+                                                                     0,
+                                                                     0,
+                                                                     scaleB,
+                                                                     false,
+                                                                     false)};
+        }
     }
 };
 
@@ -118,14 +166,17 @@ struct amdgcn_mma<pk_fp6x16_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
 : amdgcn_mma_base<pk_fp6x16_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, 32u, 64, 1, 1, 1, 1, 8, 1, WmmaOp, MmaOpFamily::SCALE>
 // clang-format on
 {
+    using ScaleType = typename CtrlFlags::ScaleType;
+
     static constexpr const char* instruction_name =
-        "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
+        sizeof(ScaleType) == sizeof(int64_t) ? "__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4"
+                                             : "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
 
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        int32_t scaleA,
-                                        int32_t scaleB)
+                                        ScaleType scaleA,
+                                        ScaleType scaleB)
     {
         int32x16_t a_padded = {aVec.data[0],
                                aVec.data[1],
@@ -159,21 +210,42 @@ struct amdgcn_mma<pk_fp6x16_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
                                0,
                                0,
                                0};
-        return {
-            __builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4(PackedDataTypeToFlag_v<pk_fp6x16_t>,
-                                                             a_padded,
-                                                             PackedDataTypeToFlag_v<pk_fp6x16_t>,
-                                                             b_padded,
-                                                             0,
-                                                             cVec,
-                                                             0,
-                                                             0,
-                                                             scaleA,
-                                                             0,
-                                                             0,
-                                                             scaleB,
-                                                             false,
-                                                             false)};
+        if constexpr(sizeof(ScaleType) == sizeof(int64_t))
+        {
+            return {__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4(
+                PackedDataTypeToFlag_v<pk_fp6x16_t>,
+                a_padded,
+                PackedDataTypeToFlag_v<pk_fp6x16_t>,
+                b_padded,
+                0,
+                cVec,
+                0,
+                0,
+                scaleA,
+                0,
+                0,
+                scaleB,
+                false,
+                false)};
+        }
+        else
+        {
+            return {__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4(
+                PackedDataTypeToFlag_v<pk_fp6x16_t>,
+                a_padded,
+                PackedDataTypeToFlag_v<pk_fp6x16_t>,
+                b_padded,
+                0,
+                cVec,
+                0,
+                0,
+                scaleA,
+                0,
+                0,
+                scaleB,
+                false,
+                false)};
+        }
     }
 };
 
@@ -193,14 +265,17 @@ struct amdgcn_mma<pk_bf6x16_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
 : amdgcn_mma_base<pk_bf6x16_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, 32u, 64, 1, 1, 1, 1, 8, 1, WmmaOp, MmaOpFamily::SCALE>
 // clang-format on
 {
+    using ScaleType = typename CtrlFlags::ScaleType;
+
     static constexpr const char* instruction_name =
-        "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
+        sizeof(ScaleType) == sizeof(int64_t) ? "__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4"
+                                             : "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
 
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        int32_t scaleA,
-                                        int32_t scaleB)
+                                        ScaleType scaleA,
+                                        ScaleType scaleB)
     {
         int32x16_t a_padded = {aVec.data[0],
                                aVec.data[1],
@@ -234,21 +309,42 @@ struct amdgcn_mma<pk_bf6x16_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
                                0,
                                0,
                                0};
-        return {
-            __builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4(PackedDataTypeToFlag_v<pk_bf6x16_t>,
-                                                             a_padded,
-                                                             PackedDataTypeToFlag_v<pk_bf6x16_t>,
-                                                             b_padded,
-                                                             0,
-                                                             cVec,
-                                                             0,
-                                                             0,
-                                                             scaleA,
-                                                             0,
-                                                             0,
-                                                             scaleB,
-                                                             false,
-                                                             false)};
+        if constexpr(sizeof(ScaleType) == sizeof(int64_t))
+        {
+            return {__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4(
+                PackedDataTypeToFlag_v<pk_bf6x16_t>,
+                a_padded,
+                PackedDataTypeToFlag_v<pk_bf6x16_t>,
+                b_padded,
+                0,
+                cVec,
+                0,
+                0,
+                scaleA,
+                0,
+                0,
+                scaleB,
+                false,
+                false)};
+        }
+        else
+        {
+            return {__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4(
+                PackedDataTypeToFlag_v<pk_bf6x16_t>,
+                a_padded,
+                PackedDataTypeToFlag_v<pk_bf6x16_t>,
+                b_padded,
+                0,
+                cVec,
+                0,
+                0,
+                scaleA,
+                0,
+                0,
+                scaleB,
+                false,
+                false)};
+        }
     }
 };
 
@@ -268,14 +364,17 @@ struct amdgcn_mma<pk_fp4_t, pk_fp4_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
 : amdgcn_mma_base<pk_fp4_t, pk_fp4_t, fp32_t, 16u, 16u, 128u, 32u, 64, 1, 1, 1, 1, 8, 1, WmmaOp, MmaOpFamily::SCALE>
 // clang-format on
 {
+    using ScaleType = typename CtrlFlags::ScaleType;
+
     static constexpr const char* instruction_name =
-        "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
+        sizeof(ScaleType) == sizeof(int64_t) ? "__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4"
+                                             : "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
 
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        int32_t scaleA,
-                                        int32_t scaleB)
+                                        ScaleType scaleA,
+                                        ScaleType scaleB)
     {
         int32x8_t a8        = bit_cast<int32x8_t>(aVec);
         int32x8_t b8        = bit_cast<int32x8_t>(bVec);
@@ -283,7 +382,28 @@ struct amdgcn_mma<pk_fp4_t, pk_fp4_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
             a8[0], a8[1], a8[2], a8[3], a8[4], a8[5], a8[6], a8[7], 0, 0, 0, 0, 0, 0, 0, 0};
         int32x16_t b_padded = {
             b8[0], b8[1], b8[2], b8[3], b8[4], b8[5], b8[6], b8[7], 0, 0, 0, 0, 0, 0, 0, 0};
-        return {__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4(PackedDataTypeToFlag_v<pk_fp4_t>,
+        if constexpr(sizeof(ScaleType) == sizeof(int64_t))
+        {
+            return {
+                __builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4(PackedDataTypeToFlag_v<pk_fp4_t>,
+                                                                   a_padded,
+                                                                   PackedDataTypeToFlag_v<pk_fp4_t>,
+                                                                   b_padded,
+                                                                   0,
+                                                                   cVec,
+                                                                   0,
+                                                                   0,
+                                                                   scaleA,
+                                                                   0,
+                                                                   0,
+                                                                   scaleB,
+                                                                   false,
+                                                                   false)};
+        }
+        else
+        {
+            return {
+                __builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4(PackedDataTypeToFlag_v<pk_fp4_t>,
                                                                  a_padded,
                                                                  PackedDataTypeToFlag_v<pk_fp4_t>,
                                                                  b_padded,
@@ -297,6 +417,7 @@ struct amdgcn_mma<pk_fp4_t, pk_fp4_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
                                                                  scaleB,
                                                                  false,
                                                                  false)};
+        }
     }
 };
 
