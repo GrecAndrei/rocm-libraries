@@ -97,7 +97,7 @@ struct MmaDefaultSelector<ADataType,
                           WaveTileK,
                           CompilerTarget,
                           OpFamily,
-                          enable_if_all<enable_if_target_family_gfx1250_t<CompilerTarget>,
+                          enable_if_all<enable_if_target_gfx1250_t<CompilerTarget>,
                                         std::enable_if_t<OpFamily == MmaOpFamily::SCALE>>>
 {
     private:

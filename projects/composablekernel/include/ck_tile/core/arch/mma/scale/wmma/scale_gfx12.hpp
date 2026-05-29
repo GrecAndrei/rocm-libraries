@@ -30,7 +30,7 @@ namespace ck_tile::core::arch::mma {
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               | A B C DataTypes      | MNK + WaveSize    |AParams |BPar |CPar |
-struct amdgcn_mma<fp8_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarget, MmaOpFamily::SCALE, enable_if_target_family_gfx1250_t<CompilerTarget>>
+struct amdgcn_mma<fp8_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarget, MmaOpFamily::SCALE, enable_if_target_gfx1250_t<CompilerTarget>>
 : amdgcn_mma_base<fp8_t, fp8_t, fp32_t, 16u, 16u, 128u, 32u, 64, 1, 1, 1, 1, 8, 1, WmmaOp, MmaOpFamily::SCALE>
 // clang-format on
 {
@@ -96,7 +96,7 @@ struct amdgcn_mma<fp8_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               | A B C DataTypes      | MNK + WaveSize    |AParams |BPar |CPar |
-struct amdgcn_mma<bf8_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarget, MmaOpFamily::SCALE, enable_if_target_family_gfx1250_t<CompilerTarget>>
+struct amdgcn_mma<bf8_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarget, MmaOpFamily::SCALE, enable_if_target_gfx1250_t<CompilerTarget>>
 : amdgcn_mma_base<bf8_t, bf8_t, fp32_t, 16u, 16u, 128u, 32u, 64, 1, 1, 1, 1, 8, 1, WmmaOp, MmaOpFamily::SCALE>
 // clang-format on
 {
@@ -162,7 +162,7 @@ struct amdgcn_mma<bf8_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               | A B C DataTypes                    | MNK + WaveSize    |AParams |BPar |CPar |
-struct amdgcn_mma<pk_fp6x16_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarget, MmaOpFamily::SCALE, enable_if_target_family_gfx1250_t<CompilerTarget>>
+struct amdgcn_mma<pk_fp6x16_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarget, MmaOpFamily::SCALE, enable_if_target_gfx1250_t<CompilerTarget>>
 : amdgcn_mma_base<pk_fp6x16_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, 32u, 64, 1, 1, 1, 1, 8, 1, WmmaOp, MmaOpFamily::SCALE>
 // clang-format on
 {
@@ -261,7 +261,7 @@ struct amdgcn_mma<pk_fp6x16_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               | A B C DataTypes                    | MNK + WaveSize    |AParams |BPar |CPar |
-struct amdgcn_mma<pk_bf6x16_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarget, MmaOpFamily::SCALE, enable_if_target_family_gfx1250_t<CompilerTarget>>
+struct amdgcn_mma<pk_bf6x16_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarget, MmaOpFamily::SCALE, enable_if_target_gfx1250_t<CompilerTarget>>
 : amdgcn_mma_base<pk_bf6x16_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, 32u, 64, 1, 1, 1, 1, 8, 1, WmmaOp, MmaOpFamily::SCALE>
 // clang-format on
 {
@@ -360,7 +360,7 @@ struct amdgcn_mma<pk_bf6x16_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
 //               | A B C DataTypes          | MNK + WaveSize    |AParams |BPar |CPar |
-struct amdgcn_mma<pk_fp4_t, pk_fp4_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarget, MmaOpFamily::SCALE, enable_if_target_family_gfx1250_t<CompilerTarget>>
+struct amdgcn_mma<pk_fp4_t, pk_fp4_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarget, MmaOpFamily::SCALE, enable_if_target_gfx1250_t<CompilerTarget>>
 : amdgcn_mma_base<pk_fp4_t, pk_fp4_t, fp32_t, 16u, 16u, 128u, 32u, 64, 1, 1, 1, 1, 8, 1, WmmaOp, MmaOpFamily::SCALE>
 // clang-format on
 {
