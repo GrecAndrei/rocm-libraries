@@ -1334,6 +1334,14 @@ struct impl::ext_vector<pk_bf6x16_t, 1>
 };
 
 template <>
+struct impl::ext_vector<pk_bf6x16_t, 4>
+{
+    static constexpr index_t N = 4;
+    using value_type           = f6x16xN_tt<4, f6_kind::bf6>;
+    using type                 = f6x16xN_tt<4, f6_kind::bf6>;
+};
+
+template <>
 struct impl::ext_vector<pk_bf6x16_t, 2>
 {
     static constexpr index_t N = 2;
