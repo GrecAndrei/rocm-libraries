@@ -634,8 +634,9 @@ void Real2DEvenNode::BuildTree_internal_TR_pair(SchemeTreeVec& child_scheme_tree
         row1Plan->RecursiveBuildTree((noSolution) ? nullptr : child_scheme_trees[0].get());
 
         // first transpose
-        auto trans1Plan    = NodeFactory::CreateNodeFromScheme(CS_KERNEL_TRANSPOSE, this);
-        trans1Plan->length = row1Plan->outputLength;
+        auto trans1Plan       = NodeFactory::CreateNodeFromScheme(CS_KERNEL_TRANSPOSE, this);
+        trans1Plan->length    = row1Plan->outputLength;
+        trans1Plan->dimension = 2;
         trans1Plan->SetTransposeOutputLength();
 
         // second row fft
@@ -646,8 +647,9 @@ void Real2DEvenNode::BuildTree_internal_TR_pair(SchemeTreeVec& child_scheme_tree
         row2Plan->RecursiveBuildTree((noSolution) ? nullptr : child_scheme_trees[2].get());
 
         // second transpose
-        auto trans2Plan    = NodeFactory::CreateNodeFromScheme(CS_KERNEL_TRANSPOSE, this);
-        trans2Plan->length = trans1Plan->outputLength;
+        auto trans2Plan       = NodeFactory::CreateNodeFromScheme(CS_KERNEL_TRANSPOSE, this);
+        trans2Plan->length    = trans1Plan->outputLength;
+        trans2Plan->dimension = 2;
         trans2Plan->SetTransposeOutputLength();
 
         // --------------------------------
@@ -879,7 +881,14 @@ void Real2DEvenNode::AssignParams_internal_TR_pair()
 
             trans1Plan->outStride.push_back(trans1Plan->length[1]);
             trans1Plan->outStride.push_back(1);
-            trans1Plan->oDist = trans1Plan->length[0] * trans1Plan->outStride[0];
+            auto tmp = trans1Plan->length[0] * trans1Plan->outStride[0];
+            for(size_t len_dim = 2; len_dim < trans1Plan->length.size(); len_dim++)
+            {
+                // extra batch dimension(s)
+                trans1Plan->outStride.push_back(tmp);
+                tmp *= trans1Plan->length[len_dim];
+            }
+            trans1Plan->oDist = tmp;
         }
 
         auto& row2Plan = childNodes[2];
@@ -915,7 +924,14 @@ void Real2DEvenNode::AssignParams_internal_TR_pair()
 
             trans1Plan->outStride.push_back(trans1Plan->length[1]);
             trans1Plan->outStride.push_back(1);
-            trans1Plan->oDist = trans1Plan->length[0] * trans1Plan->outStride[0];
+            auto tmp = trans1Plan->length[0] * trans1Plan->outStride[0];
+            for(size_t len_dim = 2; len_dim < trans1Plan->length.size(); len_dim++)
+            {
+                // extra batch dimension(s)
+                trans1Plan->outStride.push_back(tmp);
+                tmp *= trans1Plan->length[len_dim];
+            }
+            trans1Plan->oDist = tmp;
         }
         auto& c2cPlan = childNodes[1];
         {
@@ -936,7 +952,7 @@ void Real2DEvenNode::AssignParams_internal_TR_pair()
 
             trans2Plan->outStride = trans1Plan->inStride;
             std::swap(trans2Plan->outStride[0], trans2Plan->outStride[1]);
-            trans2Plan->oDist = trans2Plan->length[0] * trans2Plan->outStride[0];
+            trans2Plan->oDist = trans2Plan->iDist;
         }
         auto& c2rPlan = childNodes[3];
         {
@@ -1336,7 +1352,7 @@ void Real3DEvenNode::BuildTree_internal_TR_pairs(SchemeTreeVec& child_scheme_tre
         auto trans1    = NodeFactory::CreateNodeFromScheme(CS_KERNEL_TRANSPOSE_Z_XY, this);
         trans1->length = rcplan->outputLength;
         trans1->SetTransposeOutputLength();
-        trans1->dimension = 2;
+        trans1->dimension = 3;
 
         // first column
         NodeMetaData c1planData(this);
@@ -1350,7 +1366,7 @@ void Real3DEvenNode::BuildTree_internal_TR_pairs(SchemeTreeVec& child_scheme_tre
         auto trans2    = NodeFactory::CreateNodeFromScheme(CS_KERNEL_TRANSPOSE_Z_XY, this);
         trans2->length = trans1->outputLength;
         trans2->SetTransposeOutputLength();
-        trans2->dimension = 2;
+        trans2->dimension = 3;
 
         // second column
         NodeMetaData c2planData(this);
@@ -1364,7 +1380,7 @@ void Real3DEvenNode::BuildTree_internal_TR_pairs(SchemeTreeVec& child_scheme_tre
         auto trans3    = NodeFactory::CreateNodeFromScheme(CS_KERNEL_TRANSPOSE_Z_XY, this);
         trans3->length = trans2->outputLength;
         trans3->SetTransposeOutputLength();
-        trans3->dimension = 2;
+        trans3->dimension = 3;
 
         // --------------------------------
         // Fuse Shims: [RealEven + T][RT][RT]
@@ -1451,7 +1467,7 @@ void Real3DEvenNode::BuildTree_internal_TR_pairs(SchemeTreeVec& child_scheme_tre
         trans3->length = length;
         trans3->SetTransposeOutputLength();
         std::swap(trans3->length[1], trans3->length[2]);
-        trans3->dimension = 2;
+        trans3->dimension = 3;
 
         // column
         NodeMetaData c2planData(this);
@@ -1466,7 +1482,7 @@ void Real3DEvenNode::BuildTree_internal_TR_pairs(SchemeTreeVec& child_scheme_tre
         trans2->length = trans3->outputLength;
         trans2->SetTransposeOutputLength();
         std::swap(trans2->length[1], trans2->length[2]);
-        trans2->dimension = 2;
+        trans2->dimension = 3;
 
         // column
         NodeMetaData c1planData(this);
@@ -1481,7 +1497,7 @@ void Real3DEvenNode::BuildTree_internal_TR_pairs(SchemeTreeVec& child_scheme_tre
         trans1->length = trans2->outputLength;
         trans1->SetTransposeOutputLength();
         std::swap(trans1->length[1], trans1->length[2]);
-        trans1->dimension = 2;
+        trans1->dimension = 3;
 
         // --------------------------------
         // Fuse Shims:
@@ -2022,7 +2038,7 @@ size_t PrePostKernelNode::GetTwiddleTableLength()
     if(scheme == CS_KERNEL_CMPLX_TO_R)
         return 2 * (length[0] - 1);
     else if(scheme == CS_KERNEL_TRANSPOSE_CMPLX_TO_R)
-        return 2 * (length.back() - 1);
+        return 2 * (length[dimension - 1] - 1);
 
     throw std::runtime_error("GetTwiddleTableLength: Unexpected scheme in PrePostKernelNode: "
                              + PrintScheme(scheme));
@@ -2037,12 +2053,14 @@ size_t PrePostKernelNode::GetTwiddleTableLengthLimit()
 std::vector<size_t> PrePostKernelNode::CollapsibleDims()
 {
     // regular non-transposing kernel can collapse everything but the
-    // fastest dimension where the real-complex processing happens
-    if(scheme != CS_KERNEL_R_TO_CMPLX_TRANSPOSE && scheme != CS_KERNEL_TRANSPOSE_CMPLX_TO_R)
-    {
-        std::vector<size_t> ret(length.size() - 1);
-        std::iota(ret.begin(), ret.end(), 1);
-        return ret;
-    }
-    return {};
+    // fastest dimension where the real-complex processing happens.
+    // Transposing kernels can collapse every length dimension turned
+    // batch dimension.
+
+    if(length.size() <= dimension)
+        return {};
+
+    std::vector<size_t> ret(length.size() - dimension);
+    std::iota(ret.begin(), ret.end(), dimension);
+    return ret;
 }
