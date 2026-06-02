@@ -8,6 +8,8 @@
 #include "ck_tile/core/arch/mma/mma_op_family.hpp"
 #include "ck_tile/core/arch/mma/wmma/wmma_traits.hpp"
 #include "ck_tile/core/config.hpp"
+#include "ck_tile/core/numeric/e4m3.hpp"
+#include "ck_tile/core/numeric/e5m3.hpp"
 #include "ck_tile/core/numeric/e8m0.hpp"
 #include "ck_tile/core/numeric/ext_vector_base.hpp"
 #include "ck_tile/core/numeric/integer.hpp"
@@ -281,7 +283,13 @@ concept MmaOpI =
         { MmaOp::kCompressionRatio } -> std::convertible_to<unsigned int>;
     } &&
     (HasExecSignature<MmaOp> || HasExecSignature<MmaOp, int> ||
-     HasExecSignature<MmaOp, e8m0x4_t, e8m0x4_t> || HasExecSignature<MmaOp, e8m0x8_t, e8m0x8_t>);
+     HasExecSignature<MmaOp, e8m0x4_t, e8m0x4_t> || HasExecSignature<MmaOp, e8m0x8_t, e8m0x8_t> ||
+     HasExecSignature<MmaOp, e8m0x4_t, e5m3x4_t> || HasExecSignature<MmaOp, e8m0x8_t, e5m3x8_t> ||
+     HasExecSignature<MmaOp, e8m0x4_t, e4m3x4_t> || HasExecSignature<MmaOp, e8m0x8_t, e4m3x8_t> ||
+     HasExecSignature<MmaOp, e5m3x4_t, e8m0x4_t> || HasExecSignature<MmaOp, e5m3x8_t, e8m0x8_t> ||
+     HasExecSignature<MmaOp, e4m3x4_t, e8m0x4_t> || HasExecSignature<MmaOp, e4m3x8_t, e8m0x8_t> ||
+     HasExecSignature<MmaOp, e5m3x4_t, e5m3x4_t> || HasExecSignature<MmaOp, e5m3x8_t, e5m3x8_t> ||
+     HasExecSignature<MmaOp, e4m3x4_t, e4m3x4_t> || HasExecSignature<MmaOp, e4m3x8_t, e4m3x8_t>);
 
 #endif // CK_TILE_CONCEPTS && CK_TILE_CONCEPTS_HEADER
 
