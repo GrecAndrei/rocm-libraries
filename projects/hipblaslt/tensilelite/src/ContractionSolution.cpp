@@ -882,7 +882,8 @@ namespace TensileLite
 
         // Batch offset support for General Batched GEMM (SupportUserArgs kernels)
         // Placed after core GEMM args (strides, alpha/beta, StreamK) to match kernel signature
-        if(problemType.supportDeviceUserArguments && !problemType.groupedGemm)
+        //if(problemType.supportDeviceUserArguments && !problemType.groupedGemm)
+        if(!problemType.groupedGemm)
         {
             args.template append<int64_t>("batchOffsetD", inputs.batchOffsetD);
             args.template append<int64_t>("batchOffsetC", inputs.batchOffsetC);
@@ -1879,11 +1880,11 @@ namespace TensileLite
             rv.args.append<void const* const*>("batchC", inputs.batchC);
 
         // Pass batch offsets when kernel expects them (SupportUserArgs=true, not GroupedGemm)
-        if(problemType.supportDeviceUserArguments && !problemType.groupedGemm)
-        {
-            rv.args.append<int64_t>("batchOffsetD", inputs.batchOffsetD);
-            rv.args.append<int64_t>("batchOffsetC", inputs.batchOffsetC);
-        }
+//        if(problemType.supportDeviceUserArguments && !problemType.groupedGemm)
+//        {
+//            rv.args.append<int64_t>("batchOffsetD", inputs.batchOffsetD);
+//            rv.args.append<int64_t>("batchOffsetC", inputs.batchOffsetC);
+//        }
 
         if(problemType.useBias && sizeMapping.globalAccumulation == 0 && (!problemType.useGradient))
         {
@@ -2053,14 +2054,6 @@ namespace TensileLite
             args.template append<void const*>("C", inputs.c);
         else
             args.template append<void const* const*>("batchC", inputs.batchC);
-
-        // Pass batch offsets when kernel expects them (SupportUserArgs=true, not GroupedGemm)
-        //if(problemType.supportDeviceUserArguments && !problemType.groupedGemm)
-//        if(!problemType.groupedGemm)
-//        {
-//            args.template append<int64_t>("batchOffsetD", inputs.batchOffsetD);
-//            args.template append<int64_t>("batchOffsetC", inputs.batchOffsetC);
-//        }
 
         bool useBias = false;
         if(problemType.useBias)
