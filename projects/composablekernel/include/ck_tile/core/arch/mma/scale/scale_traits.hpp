@@ -72,6 +72,10 @@ concept ScaleMfmaDataTypeToFlag = requires(DataTypeToFlag dataTypeToFlag) {
 
 } // namespace scale::detail
 
+/**
+ * @struct DefaultScaleMfmaCtrlFlags
+ * @brief Default control flags for scale MFMA operations
+ */
 struct DefaultScaleMfmaCtrlFlags
 {
     static constexpr int32_t OPSEL_A = 0;
