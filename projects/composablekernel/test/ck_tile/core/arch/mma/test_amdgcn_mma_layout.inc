@@ -488,17 +488,17 @@ using Gfx12Intrinsics = ::testing::Types<
 
 using Gfx1250Intrinsics = ::testing::Types<
     // Scale WMMA (32-bit scale)
-    amdgcn_mma<F8,   F8,   F32,  16u, 16u, 128u, DefaultScaleWmmaCtrlFlags,  Target1250, MmaOpFamily::SCALE>,  // wmma_scale_f32_16x16x128_fp8
-    amdgcn_mma<BF8,  BF8,  F32,  16u, 16u, 128u, DefaultScaleWmmaCtrlFlags,  Target1250, MmaOpFamily::SCALE>,  // wmma_scale_f32_16x16x128_bf8
-    amdgcn_mma<F6,   F6,   F32,  16u, 16u, 128u, DefaultScaleWmmaCtrlFlags,  Target1250, MmaOpFamily::SCALE>,  // wmma_scale_f32_16x16x128_fp6
-    amdgcn_mma<BF6,  BF6,  F32,  16u, 16u, 128u, DefaultScaleWmmaCtrlFlags,  Target1250, MmaOpFamily::SCALE>,  // wmma_scale_f32_16x16x128_bf6
-    amdgcn_mma<F4,   F4,   F32,  16u, 16u, 128u, DefaultScaleWmmaCtrlFlags,  Target1250, MmaOpFamily::SCALE>,  // wmma_scale_f32_16x16x128_fp4
+    amdgcn_mma<F8,   F8,   F32,  16u, 16u, 128u, DefaultScaleWmmaCtrlFlags,  Target1250, MmaOpFamily::SCALE>,  // wmma_scale_f32_16x16x128_f8f6f4
+    amdgcn_mma<BF8,  BF8,  F32,  16u, 16u, 128u, DefaultScaleWmmaCtrlFlags,  Target1250, MmaOpFamily::SCALE>,  // wmma_scale_f32_16x16x128_f8f6f4
+    amdgcn_mma<F6,   F6,   F32,  16u, 16u, 128u, DefaultScaleWmmaCtrlFlags,  Target1250, MmaOpFamily::SCALE>,  // wmma_scale_f32_16x16x128_f8f6f4
+    amdgcn_mma<BF6,  BF6,  F32,  16u, 16u, 128u, DefaultScaleWmmaCtrlFlags,  Target1250, MmaOpFamily::SCALE>,  // wmma_scale_f32_16x16x128_f8f6f4
+    amdgcn_mma<F4,   F4,   F32,  16u, 16u, 128u, DefaultScaleWmmaCtrlFlags,  Target1250, MmaOpFamily::SCALE>,  // wmma_scale_f32_16x16x128_f8f6f4
     // Scale16 WMMA (64-bit scale)
-    amdgcn_mma<F8,   F8,   F32,  16u, 16u, 128u, Scale16WmmaCtrlFlags,       Target1250, MmaOpFamily::SCALE>,  // wmma_scale16_f32_16x16x128_fp8
-    amdgcn_mma<BF8,  BF8,  F32,  16u, 16u, 128u, Scale16WmmaCtrlFlags,       Target1250, MmaOpFamily::SCALE>,  // wmma_scale16_f32_16x16x128_bf8
-    amdgcn_mma<F6,   F6,   F32,  16u, 16u, 128u, Scale16WmmaCtrlFlags,       Target1250, MmaOpFamily::SCALE>,  // wmma_scale16_f32_16x16x128_fp6
-    amdgcn_mma<BF6,  BF6,  F32,  16u, 16u, 128u, Scale16WmmaCtrlFlags,       Target1250, MmaOpFamily::SCALE>,  // wmma_scale16_f32_16x16x128_bf6
-    amdgcn_mma<F4,   F4,   F32,  16u, 16u, 128u, Scale16WmmaCtrlFlags,       Target1250, MmaOpFamily::SCALE>   // wmma_scale16_f32_16x16x128_fp4
+    amdgcn_mma<F8,   F8,   F32,  16u, 16u, 128u, Scale16WmmaCtrlFlags,       Target1250, MmaOpFamily::SCALE>,  // wmma_scale16_f32_16x16x128_f8f6f4
+    amdgcn_mma<BF8,  BF8,  F32,  16u, 16u, 128u, Scale16WmmaCtrlFlags,       Target1250, MmaOpFamily::SCALE>,  // wmma_scale16_f32_16x16x128_f8f6f4
+    amdgcn_mma<F6,   F6,   F32,  16u, 16u, 128u, Scale16WmmaCtrlFlags,       Target1250, MmaOpFamily::SCALE>,  // wmma_scale16_f32_16x16x128_f8f6f4
+    amdgcn_mma<BF6,  BF6,  F32,  16u, 16u, 128u, Scale16WmmaCtrlFlags,       Target1250, MmaOpFamily::SCALE>,  // wmma_scale16_f32_16x16x128_f8f6f4
+    amdgcn_mma<F4,   F4,   F32,  16u, 16u, 128u, Scale16WmmaCtrlFlags,       Target1250, MmaOpFamily::SCALE>   // wmma_scale16_f32_16x16x128_f8f6f4
 >;
 // clang-format on
 

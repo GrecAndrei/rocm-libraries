@@ -7,10 +7,10 @@
 #include "ck_tile/core/arch/mma/amdgcn_mma.hpp"
 #include "ck_tile/core/arch/mma/mma_data_format.hpp"
 #include "ck_tile/core/arch/mma/mma_op_family.hpp"
-#include "ck_tile/core/arch/mma/scale/scale_traits.hpp"
 #include "ck_tile/core/arch/mma/wmma/wmma_traits.hpp"
 #include "ck_tile/core/config.hpp"
 #include "ck_tile/core/numeric/float8.hpp"
+#include "ck_tile/core/numeric/integer.hpp"
 #include "ck_tile/core/numeric/pk_f6.hpp"
 #include "ck_tile/core/numeric/pk_fp4.hpp"
 #include "ck_tile/core/numeric/vector_type.hpp"
@@ -29,7 +29,7 @@ namespace ck_tile::core::arch::mma {
 // TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
-//               | A B C DataTypes      | MNK + WaveSize    |AParams |BPar |CPar |
+//               | A B C DataTypes    | MNK + WaveSize     |AParams  |BPar |CPar |
 struct amdgcn_mma<fp8_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarget, MmaOpFamily::SCALE, enable_if_target_gfx1250_t<CompilerTarget>>
 : amdgcn_mma_base<fp8_t, fp8_t, fp32_t, 16u, 16u, 128u, 32u, 64, 1, 1, 1, 1, 8, 1, WmmaOp, MmaOpFamily::SCALE>
 // clang-format on
@@ -95,7 +95,7 @@ struct amdgcn_mma<fp8_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
 // TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
-//               | A B C DataTypes      | MNK + WaveSize    |AParams |BPar |CPar |
+//               | A B C DataTypes    | MNK + WaveSize     |AParams  |BPar |CPar |
 struct amdgcn_mma<bf8_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarget, MmaOpFamily::SCALE, enable_if_target_gfx1250_t<CompilerTarget>>
 : amdgcn_mma_base<bf8_t, bf8_t, fp32_t, 16u, 16u, 128u, 32u, 64, 1, 1, 1, 1, 8, 1, WmmaOp, MmaOpFamily::SCALE>
 // clang-format on
@@ -161,7 +161,7 @@ struct amdgcn_mma<bf8_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
 // TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
-//               | A B C DataTypes                    | MNK + WaveSize    |AParams |BPar |CPar |
+//               | A B C DataTypes                | MNK + WaveSize     |AParams  |BPar |CPar |
 struct amdgcn_mma<pk_fp6x16_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarget, MmaOpFamily::SCALE, enable_if_target_gfx1250_t<CompilerTarget>>
 : amdgcn_mma_base<pk_fp6x16_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, 32u, 64, 1, 1, 1, 1, 8, 1, WmmaOp, MmaOpFamily::SCALE>
 // clang-format on
@@ -178,38 +178,12 @@ struct amdgcn_mma<pk_fp6x16_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
                                         ScaleType scaleA,
                                         ScaleType scaleB)
     {
-        int32x16_t a_padded = {aVec.data[0],
-                               aVec.data[1],
-                               aVec.data[2],
-                               aVec.data[3],
-                               aVec.data[4],
-                               aVec.data[5],
-                               aVec.data[6],
-                               aVec.data[7],
-                               aVec.data[8],
-                               aVec.data[9],
-                               aVec.data[10],
-                               aVec.data[11],
-                               0,
-                               0,
-                               0,
-                               0};
-        int32x16_t b_padded = {bVec.data[0],
-                               bVec.data[1],
-                               bVec.data[2],
-                               bVec.data[3],
-                               bVec.data[4],
-                               bVec.data[5],
-                               bVec.data[6],
-                               bVec.data[7],
-                               bVec.data[8],
-                               bVec.data[9],
-                               bVec.data[10],
-                               bVec.data[11],
-                               0,
-                               0,
-                               0,
-                               0};
+        // clang-format off
+        int32x16_t a_padded = {aVec.data[0], aVec.data[1], aVec.data[2],  aVec.data[3],  aVec.data[4], aVec.data[5], aVec.data[6], aVec.data[7],
+                               aVec.data[8], aVec.data[9], aVec.data[10], aVec.data[11], 0, 0, 0, 0};
+        int32x16_t b_padded = {bVec.data[0], bVec.data[1], bVec.data[2],  bVec.data[3],  bVec.data[4], bVec.data[5], bVec.data[6], bVec.data[7],
+                               bVec.data[8], bVec.data[9], bVec.data[10], bVec.data[11], 0, 0, 0, 0};
+        // clang-format on
         if constexpr(sizeof(ScaleType) == sizeof(int64_t))
         {
             return {__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4(
@@ -260,7 +234,7 @@ struct amdgcn_mma<pk_fp6x16_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
 // TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
-//               | A B C DataTypes                    | MNK + WaveSize    |AParams |BPar |CPar |
+//               | A B C DataTypes                | MNK + WaveSize     |AParams  |BPar |CPar |
 struct amdgcn_mma<pk_bf6x16_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarget, MmaOpFamily::SCALE, enable_if_target_gfx1250_t<CompilerTarget>>
 : amdgcn_mma_base<pk_bf6x16_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, 32u, 64, 1, 1, 1, 1, 8, 1, WmmaOp, MmaOpFamily::SCALE>
 // clang-format on
@@ -277,38 +251,12 @@ struct amdgcn_mma<pk_bf6x16_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
                                         ScaleType scaleA,
                                         ScaleType scaleB)
     {
-        int32x16_t a_padded = {aVec.data[0],
-                               aVec.data[1],
-                               aVec.data[2],
-                               aVec.data[3],
-                               aVec.data[4],
-                               aVec.data[5],
-                               aVec.data[6],
-                               aVec.data[7],
-                               aVec.data[8],
-                               aVec.data[9],
-                               aVec.data[10],
-                               aVec.data[11],
-                               0,
-                               0,
-                               0,
-                               0};
-        int32x16_t b_padded = {bVec.data[0],
-                               bVec.data[1],
-                               bVec.data[2],
-                               bVec.data[3],
-                               bVec.data[4],
-                               bVec.data[5],
-                               bVec.data[6],
-                               bVec.data[7],
-                               bVec.data[8],
-                               bVec.data[9],
-                               bVec.data[10],
-                               bVec.data[11],
-                               0,
-                               0,
-                               0,
-                               0};
+        // clang-format off
+        int32x16_t a_padded = {aVec.data[0], aVec.data[1], aVec.data[2],  aVec.data[3],  aVec.data[4], aVec.data[5], aVec.data[6], aVec.data[7],
+                               aVec.data[8], aVec.data[9], aVec.data[10], aVec.data[11], 0, 0, 0, 0};
+        int32x16_t b_padded = {bVec.data[0], bVec.data[1], bVec.data[2],  bVec.data[3],  bVec.data[4], bVec.data[5], bVec.data[6], bVec.data[7],
+                               bVec.data[8], bVec.data[9], bVec.data[10], bVec.data[11], 0, 0, 0, 0};
+        // clang-format on
         if constexpr(sizeof(ScaleType) == sizeof(int64_t))
         {
             return {__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4(
@@ -359,7 +307,7 @@ struct amdgcn_mma<pk_bf6x16_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
 // TODO: c++20 requires
 template <typename CtrlFlags, typename CompilerTarget>
 // clang-format off
-//               | A B C DataTypes          | MNK + WaveSize    |AParams |BPar |CPar |
+//               | A B C DataTypes          | MNK + WaveSize     |AParams  |BPar |CPar |
 struct amdgcn_mma<pk_fp4_t, pk_fp4_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarget, MmaOpFamily::SCALE, enable_if_target_gfx1250_t<CompilerTarget>>
 : amdgcn_mma_base<pk_fp4_t, pk_fp4_t, fp32_t, 16u, 16u, 128u, 32u, 64, 1, 1, 1, 1, 8, 1, WmmaOp, MmaOpFamily::SCALE>
 // clang-format on

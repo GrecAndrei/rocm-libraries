@@ -4,17 +4,12 @@
 #pragma once
 
 #include "ck_tile/core/arch/arch.hpp"
-#include "ck_tile/core/arch/mma/mma_data_format.hpp"
 #include "ck_tile/core/config.hpp"
-#include "ck_tile/core/numeric/float8.hpp"
-#include "ck_tile/core/numeric/pk_fp4.hpp"
-#include "ck_tile/core/numeric/pk_f6.hpp"
+#include "ck_tile/core/numeric/integer.hpp"
 
-#include <cstdint>
 #include <stdio.h>
 #if CK_TILE_CONCEPTS && CK_TILE_CONCEPTS_HEADER
 #include <concepts>
-#include <type_traits>
 #endif // CK_TILE_CONCEPTS && CK_TILE_CONCEPTS_HEADER
 
 namespace ck_tile::core::arch::mma {
@@ -32,6 +27,22 @@ CK_TILE_HOST_DEVICE void print_flags(DefaultScaleMfmaCtrlFlags const& ctrlFlags)
            ctrlFlags.OPSEL_A,
            ctrlFlags.OPSEL_B);
 }
+
+#if CK_TILE_CONCEPTS && CK_TILE_CONCEPTS_HEADER
+
+/**
+ * @concept ScaleMfmaCtrlFlags
+ * @brief  Expresses the interface of required members for each CtrlFlags type on Gfx9
+ */
+template <typename CtrlFlags>
+concept ScaleMfmaCtrlFlags = requires(CtrlFlags ctrlFlags) {
+    requires std::same_as<typename CtrlFlags::ScaleType, int32_t>;
+    // Flag members for scale MFMA instructions
+    { CtrlFlags::OPSEL_A } -> std::convertible_to<int32_t>;
+    { CtrlFlags::OPSEL_B } -> std::convertible_to<int32_t>;
+};
+
+#endif // CK_TILE_CONCEPTS && CK_TILE_CONCEPTS_HEADER
 
 // Default Scale control flags
 struct DefaultScaleWmmaCtrlFlags
@@ -62,24 +73,9 @@ CK_TILE_HOST_DEVICE void print_flags(Scale16WmmaCtrlFlags const&)
  * @brief Expresses the interface required for scale WMMA control flag types.
  */
 template <typename CtrlFlags>
-concept ScaleWmmaCtrlFlags = requires {
-    typename CtrlFlags::ScaleType;
-    requires std::is_integral_v<typename CtrlFlags::ScaleType>;
-};
-
-#endif // CK_TILE_CONCEPTS && CK_TILE_CONCEPTS_HEADER
-
-#if CK_TILE_CONCEPTS && CK_TILE_CONCEPTS_HEADER
-
-/**
- * @concept ScaleMfmaCtrlFlags
- * @brief  Expresses the interface of required members for each CtrlFlags type on Gfx9
- */
-template <typename CtrlFlags>
-concept ScaleMfmaCtrlFlags = requires(CtrlFlags ctrlFlags) {
-    // Flag members for scale MFMA instructions
-    { CtrlFlags::OPSEL_A } -> std::convertible_to<int32_t>;
-    { CtrlFlags::OPSEL_B } -> std::convertible_to<int32_t>;
+concept ScaleWmmaCtrlFlags = requires(CtrlFlags ctrlFlags) {
+    requires std::same_as<typename CtrlFlags::ScaleType, int32_t> ||
+                 std::same_as<typename CtrlFlags::ScaleType, int64_t>;
 };
 
 #endif // CK_TILE_CONCEPTS && CK_TILE_CONCEPTS_HEADER

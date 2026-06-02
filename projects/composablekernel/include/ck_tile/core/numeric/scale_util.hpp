@@ -4,6 +4,11 @@
 #pragma once
 
 #include "ck_tile/core/config.hpp"
+#include "ck_tile/core/numeric/integer.hpp"
+#include "ck_tile/core/utility/bit_cast.hpp"
+
+#include <limits>
+#include <math.h>
 
 namespace ck_tile {
 

@@ -4,11 +4,11 @@
 #pragma once
 
 #include "ck_tile/core/config.hpp"
+#include "ck_tile/core/numeric/integer.hpp"
+#include "ck_tile/core/numeric/mxfp_convert.hpp"
+#include "ck_tile/core/numeric/numeric.hpp"
 #include "ck_tile/core/numeric/scale_util.hpp"
-#if __clang_major__ >= 23
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wlifetime-safety-intra-tu-suggestions"
-#endif
+
 namespace ck_tile {
 
 struct e5m3_bexp_t
@@ -25,7 +25,7 @@ struct e5m3_bexp_t
     {
     }
     CK_TILE_HOST_DEVICE constexpr operator type() const { return data; }
-    CK_TILE_HOST_DEVICE constexpr raw_type& get() { return data; }
+    CK_TILE_HOST_DEVICE constexpr raw_type& get() [[clang::lifetimebound]] { return data; }
     CK_TILE_HOST_DEVICE constexpr raw_type get() const { return data; }
     CK_TILE_HOST_DEVICE operator float() const;
 
@@ -47,10 +47,6 @@ struct numeric_traits<e5m3_t>
     static constexpr int bias       = 15;
     static constexpr int PackedSize = 1;
 };
-
-// limits
-template <class T>
-struct numeric;
 
 template <>
 struct numeric<e5m3_t>
@@ -95,6 +91,3 @@ CK_TILE_HOST_DEVICE e5m3_bexp_t::operator float() const
 }
 
 } // namespace ck_tile
-#if __clang_major__ >= 23
-#pragma clang diagnostic pop
-#endif
