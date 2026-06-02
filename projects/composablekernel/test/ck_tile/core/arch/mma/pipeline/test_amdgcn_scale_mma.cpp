@@ -209,8 +209,8 @@ void MmaSelector_Scale_Real_impl()
         std::uint32_t, typename TestType::ScaleAType, typename TestType::ScaleBType)>
         validator =
             [](std::uint32_t fragK, TestType::ScaleAType scale_A, TestType::ScaleBType scale_B) {
-                fp32_t actual_scale_A = std::powf(2.0f, scale_A - 127.0f);
-                fp32_t actual_scale_B = std::powf(2.0f, scale_B - 127.0f);
+                fp32_t actual_scale_A = scale_A[0];
+                fp32_t actual_scale_B = scale_B[0];
                 return static_cast<fp32_t>(fragK) * actual_scale_A * actual_scale_B;
             };
     const auto kernel = [](std::uint32_t waveSize,

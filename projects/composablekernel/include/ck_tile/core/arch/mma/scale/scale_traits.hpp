@@ -16,7 +16,6 @@ namespace ck_tile::core::arch::mma {
 
 struct DefaultScaleMfmaCtrlFlags
 {
-    using ScaleType                  = int32_t;
     static constexpr int32_t OPSEL_A = 0;
     static constexpr int32_t OPSEL_B = 0;
 };
@@ -36,7 +35,6 @@ CK_TILE_HOST_DEVICE void print_flags(DefaultScaleMfmaCtrlFlags const& ctrlFlags)
  */
 template <typename CtrlFlags>
 concept ScaleMfmaCtrlFlags = requires(CtrlFlags ctrlFlags) {
-    requires std::same_as<typename CtrlFlags::ScaleType, int32_t>;
     // Flag members for scale MFMA instructions
     { CtrlFlags::OPSEL_A } -> std::convertible_to<int32_t>;
     { CtrlFlags::OPSEL_B } -> std::convertible_to<int32_t>;
@@ -47,7 +45,6 @@ concept ScaleMfmaCtrlFlags = requires(CtrlFlags ctrlFlags) {
 // Default Scale control flags
 struct DefaultScaleWmmaCtrlFlags
 {
-    using ScaleType = int32_t;
 };
 
 CK_TILE_HOST_DEVICE void print_flags(DefaultScaleWmmaCtrlFlags const&)
@@ -58,7 +55,6 @@ CK_TILE_HOST_DEVICE void print_flags(DefaultScaleWmmaCtrlFlags const&)
 // Scale control flags for GFX1250 scale16 WMMA instructions
 struct Scale16WmmaCtrlFlags
 {
-    using ScaleType = int64_t;
 };
 
 CK_TILE_HOST_DEVICE void print_flags(Scale16WmmaCtrlFlags const&)
@@ -73,10 +69,7 @@ CK_TILE_HOST_DEVICE void print_flags(Scale16WmmaCtrlFlags const&)
  * @brief Expresses the interface required for scale WMMA control flag types.
  */
 template <typename CtrlFlags>
-concept ScaleWmmaCtrlFlags = requires(CtrlFlags ctrlFlags) {
-    requires std::same_as<typename CtrlFlags::ScaleType, int32_t> ||
-                 std::same_as<typename CtrlFlags::ScaleType, int64_t>;
-};
+concept ScaleWmmaCtrlFlags = requires(CtrlFlags ctrlFlags) { typename CtrlFlags; };
 
 #endif // CK_TILE_CONCEPTS && CK_TILE_CONCEPTS_HEADER
 

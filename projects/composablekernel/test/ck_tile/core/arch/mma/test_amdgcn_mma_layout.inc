@@ -12,6 +12,7 @@
 #include "ck_tile/core/arch/mma/utility/tile_distribution_encoding_register_mapper.hpp"
 #include "ck_tile/core/arch/mma/wmma/wmma.hpp"
 #include "ck_tile/core/numeric/bfloat16.hpp"
+#include "ck_tile/core/numeric/e8m0.hpp"
 #include "ck_tile/core/numeric/float8.hpp"
 #include "ck_tile/core/numeric/half.hpp"
 #include "ck_tile/core/numeric/int8.hpp"
@@ -28,6 +29,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <type_traits>
 #include <vector>
 
 namespace {
@@ -87,19 +89,19 @@ using TestTarget = Target908;
 // location.
 
 template <typename MmaOp, typename = void>
-struct scale_value_type
+struct scale_vec_type
 {
-    using type = int32_t;
+    using type = e8m0x4_t;
 };
 
 template <typename MmaOp>
-struct scale_value_type<MmaOp, std::void_t<typename MmaOp::ScaleType>>
+struct scale_vec_type<MmaOp, std::enable_if_t<MmaOp::IsScale16>>
 {
-    using type = typename MmaOp::ScaleType;
+    using type = e8m0x8_t;
 };
 
 template <typename MmaOp>
-using scale_value_type_t = typename scale_value_type<MmaOp>::type;
+using scale_vec_type_t = typename scale_vec_type<MmaOp>::type;
 
 // Helper function to place a single "1" value in any datatype. For packed types, "off"
 // indicates the offset at which the "1" must be placed within the pack. The packed datatypes
@@ -267,20 +269,18 @@ struct MmaLayoutTestKernel
             }
             else if constexpr(MmaOpTraits<MmaOp>::IsScale)
             {
-                using ScaleT = scale_value_type_t<MmaOp>;
-                if constexpr(sizeof(ScaleT) == sizeof(int64_t))
+                using ScaleVecT = scale_vec_type_t<MmaOp>;
+
+                ScaleVecT scale_A{};
+                ScaleVecT scale_B{};
+                for(index_t i = 0; i < ScaleVecT::N; ++i)
                 {
-                    // E8M0 = 125 / 129 packed into every byte of a 64-bit value
-                    ScaleT scale_A = 0x7D7D7D7D7D7D7D7DLL;
-                    ScaleT scale_B = 0x8181818181818181LL;
-                    c_frag         = MmaOp::exec(a_frag, b_frag, c_frag, scale_A, scale_B);
+                    scale_A[i] =
+                        typename ScaleVecT::value_type{uint8_t{0x7Du}}; // E8M0 = 125 in every byte
+                    scale_B[i] =
+                        typename ScaleVecT::value_type{uint8_t{0x81u}}; // E8M0 = 129 in every byte
                 }
-                else
-                {
-                    ScaleT scale_A = 0x7D7D7D7D; // E8M0 = 125 in every byte
-                    ScaleT scale_B = 0x81818181; // E8M0 = 129 in every byte
-                    c_frag         = MmaOp::exec(a_frag, b_frag, c_frag, scale_A, scale_B);
-                }
+                c_frag = MmaOp::exec(a_frag, b_frag, c_frag, scale_A, scale_B);
             }
             else
             {

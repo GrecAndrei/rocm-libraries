@@ -8,6 +8,7 @@
 #include "ck_tile/core/arch/mma/mma_op_family.hpp"
 #include "ck_tile/core/arch/mma/wmma/wmma_traits.hpp"
 #include "ck_tile/core/config.hpp"
+#include "ck_tile/core/numeric/e8m0.hpp"
 #include "ck_tile/core/numeric/ext_vector_base.hpp"
 #include "ck_tile/core/numeric/integer.hpp"
 #include "ck_tile/core/numeric/vector_type.hpp"
@@ -256,28 +257,31 @@ concept HasExecSignature = requires {
  */
 // TODO: Make sure this actually matches amdgcn_mma.
 template <typename MmaOp>
-concept MmaOpI = requires(MmaOp op) {
-    // Requires an op context
-    typename MmaOp::OpType;
-    { MmaOp::OpFamily } -> std::convertible_to<MmaOpFamily>;
+concept MmaOpI =
+    requires(MmaOp op) {
+        // Requires an op context
+        typename MmaOp::OpType;
+        { MmaOp::OpFamily } -> std::convertible_to<MmaOpFamily>;
 
-    // Captures types for inputs / outputs to mma function
-    typename MmaOp::ADataType;
-    typename MmaOp::BDataType;
-    typename MmaOp::CDataType;
-    typename MmaOp::AVecType;
-    typename MmaOp::BVecType;
-    typename MmaOp::CVecType;
-    // Captures CK-specific layout properties
-    { MmaOp::kABKPerLane } -> std::convertible_to<unsigned int>;
-    { MmaOp::kAKNumAccess } -> std::convertible_to<unsigned int>;
-    { MmaOp::kARepeat } -> std::convertible_to<unsigned int>;
-    { MmaOp::kBKNumAccess } -> std::convertible_to<unsigned int>;
-    { MmaOp::kBRepeat } -> std::convertible_to<unsigned int>;
-    { MmaOp::kCMPerLane } -> std::convertible_to<unsigned int>;
-    { MmaOp::kCMNumAccess } -> std::convertible_to<unsigned int>;
-    { MmaOp::kCompressionRatio } -> std::convertible_to<unsigned int>;
-} && (HasExecSignature<MmaOp> || HasExecSignature<MmaOp, int> || HasExecSignature<MmaOp, int, int>);
+        // Captures types for inputs / outputs to mma function
+        typename MmaOp::ADataType;
+        typename MmaOp::BDataType;
+        typename MmaOp::CDataType;
+        typename MmaOp::AVecType;
+        typename MmaOp::BVecType;
+        typename MmaOp::CVecType;
+        // Captures CK-specific layout properties
+        { MmaOp::kABKPerLane } -> std::convertible_to<unsigned int>;
+        { MmaOp::kAKNumAccess } -> std::convertible_to<unsigned int>;
+        { MmaOp::kARepeat } -> std::convertible_to<unsigned int>;
+        { MmaOp::kBKNumAccess } -> std::convertible_to<unsigned int>;
+        { MmaOp::kBRepeat } -> std::convertible_to<unsigned int>;
+        { MmaOp::kCMPerLane } -> std::convertible_to<unsigned int>;
+        { MmaOp::kCMNumAccess } -> std::convertible_to<unsigned int>;
+        { MmaOp::kCompressionRatio } -> std::convertible_to<unsigned int>;
+    } &&
+    (HasExecSignature<MmaOp> || HasExecSignature<MmaOp, int> ||
+     HasExecSignature<MmaOp, e8m0x4_t, e8m0x4_t> || HasExecSignature<MmaOp, e8m0x8_t, e8m0x8_t>);
 
 #endif // CK_TILE_CONCEPTS && CK_TILE_CONCEPTS_HEADER
 

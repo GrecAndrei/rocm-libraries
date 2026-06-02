@@ -3,18 +3,20 @@
 
 #pragma once
 
+#include "../get_wave_size_helper.hpp"
+
+#include "ck_tile/core/arch/arch.hpp"
+#include "ck_tile/core/numeric/e8m0.hpp"
+#include "ck_tile/core/numeric/integer.hpp"
+#include "ck_tile/core/numeric/type_convert.hpp"
+#include "ck_tile/host/hip_check_error.hpp"
+
+#include <gtest/gtest.h>
+#include <hip/hip_runtime.h>
+
 #include <cstdint>
 #include <functional>
 #include <vector>
-
-#include <gtest/gtest.h>
-
-#include "ck_tile/core/arch/arch.hpp"
-#include "ck_tile/core/numeric/type_convert.hpp"
-#include "ck_tile/host/hip_check_error.hpp"
-#include <hip/hip_runtime.h>
-
-#include "../get_wave_size_helper.hpp"
 
 template <typename AType_      = ck_tile::fp16_t,
           typename BType_      = ck_tile::fp16_t,
@@ -22,8 +24,8 @@ template <typename AType_      = ck_tile::fp16_t,
           uint32_t WaveTileM_  = 16,
           uint32_t WaveTileN_  = 16,
           uint32_t WaveTileK_  = 32,
-          typename ScaleAType_ = int,
-          typename ScaleBType_ = int>
+          typename ScaleAType_ = ck_tile::e8m0x4_t,
+          typename ScaleBType_ = ck_tile::e8m0x4_t>
 struct MmaPipelineTest
 {
     using AType                     = AType_;
@@ -186,8 +188,15 @@ struct MmaPipelineTest
         std::vector<CType> h_out(CElements, type_convert<CType>(0.0f));
         // The actual scale is computed as pow(2, scale - 127), so:
         // 126 -> 2^-1 and 129 -> 2^2.
-        ScaleAType h_scale_a = 126;
-        ScaleBType h_scale_b = 129;
+        ScaleAType h_scale_a{};
+        ScaleBType h_scale_b{};
+        for(index_t i = 0; i < ScaleAType::N; ++i)
+        {
+            h_scale_a[i] =
+                typename ScaleAType::value_type{uint8_t{0x7Du}}; // E8M0 = 125 in every byte
+            h_scale_b[i] =
+                typename ScaleBType::value_type{uint8_t{0x81u}}; // E8M0 = 129 in every byte
+        }
 
         AType* d_a;
         BType* d_b;
