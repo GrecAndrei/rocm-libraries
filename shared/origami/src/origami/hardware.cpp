@@ -73,6 +73,23 @@ hardware_t::hardware_t(const hardware_t& other)
     , mem_bw_per_wg_coefficients(other.mem_bw_per_wg_coefficients)
     , NUM_XCD(other.NUM_XCD) {}
 
+// On RDNA, HIP runs in WGP mode by default but the Stream-K grid selector
+// reasons in physical compute units. In WGP mode hipDeviceProp_t::multiProcessorCount
+// reports WGPs (2 CUs each), so scale WGP -> CU on the RDNA families origami models.
+static size_t cus_per_multiprocessor(hardware_t::architecture_t arch) {
+  switch (arch) {
+    case hardware_t::architecture_t::gfx1100:  // RDNA3
+    case hardware_t::architecture_t::gfx1150:  // RDNA3.5 (Strix)
+    case hardware_t::architecture_t::gfx1151:
+    case hardware_t::architecture_t::gfx1152:
+    case hardware_t::architecture_t::gfx1153:
+    case hardware_t::architecture_t::gfx1201:  // RDNA4
+      return 2;
+    default:
+      return 1;
+  }
+}
+
 hardware_t hardware_t::get_hardware_for_properties(hipDeviceProp_t properties,
                                                    size_t num_xcds_override) {
   auto arch_name = get_before_first_colon(properties.gcnArchName);
@@ -86,8 +103,10 @@ hardware_t hardware_t::get_hardware_for_properties(hipDeviceProp_t properties,
   auto num_xcds   = (num_xcds_override > 0)
                       ? num_xcds_override
                       : get_default_num_xcds(arch_enum);
+  size_t n_cu = static_cast<size_t>(properties.multiProcessorCount)
+                * cus_per_multiprocessor(arch_enum);
   return hardware_t(arch_enum,
-                    properties.multiProcessorCount,
+                    n_cu,
                     properties.sharedMemPerBlock,
                     constants,
                     num_xcds,
