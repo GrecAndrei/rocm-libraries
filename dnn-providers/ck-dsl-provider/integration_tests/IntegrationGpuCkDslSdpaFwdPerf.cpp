@@ -220,6 +220,16 @@ class IntegrationGpuCkDslSdpaFwdPerfGpu : public ::testing::TestWithParam<SdpaPe
 
 TEST_P(IntegrationGpuCkDslSdpaFwdPerfGpu, Perf) {
     const SdpaPerfCase& cse = GetParam();
+    // head_size=256 exceeds the gfx942 (CDNA3) 64 KB LDS budget for the
+    // tiled-2D kernel (~140 KB) with no non-tiled fallback, so it is
+    // unsupported on gfx942 (fits gfx950's 160 KB). Skip on gfx942.
+    if (cse.D >= 256) {
+        hipDeviceProp_t _props{};
+        ASSERT_EQ(hipGetDeviceProperties(&_props, 0), hipSuccess);
+        if (std::string(_props.gcnArchName).find("gfx942") != std::string::npos) {
+            GTEST_SKIP() << cse.name << ": head_size=256 exceeds the gfx942 64 KB LDS budget";
+        }
+    }
     switch (cse.dtype) {
         case data_objects::DataType::HALF:
             runSdpaPerfCase<half>(cse, *_handle, *_planBuilder);
