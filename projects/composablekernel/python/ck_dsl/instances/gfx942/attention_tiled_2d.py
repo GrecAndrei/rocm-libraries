@@ -691,18 +691,21 @@ def supports_tiled_2d(
                 f"tiled 2D kernel: tile_size={tile_size} must be a positive "
                 f"multiple of block_size={block_size}",
             )
-        # The async DMA call carries THREADS*8 lane-contiguous halves; the
-        # per-tile KV slab must hold at least that much, otherwise the wave
-        # under-fills the LDS slab and corrupts the partial buffer.
+        # The async DMA call carries THREADS*2 lane-contiguous halves on
+        # gfx942 (CDNA3 caps load-to-LDS at 1 dword = 4 bytes = 2 halves per
+        # lane); the per-tile KV slab must hold at least that much, otherwise
+        # the wave under-fills the LDS slab and corrupts the partial buffer.
+        halves_per_lane = 2
         threads = num_warps * 64
-        if tile_size * head_size < threads * 8:
+        if tile_size * head_size < threads * halves_per_lane:
             return (
                 False,
                 f"tiled 2D kernel: tile_size*head_size={tile_size * head_size} too "
-                f"small for num_warps={num_warps} (need >= {threads * 8})",
+                f"small for num_warps={num_warps} (need >= {threads * halves_per_lane})",
             )
         # Per-wave window must fit within one block. Each wave (64 lanes)
-        # owns ``WAVE * 8 // head_size`` consecutive tokens within a call.
+        # owns ``WAVE * 2 // head_size`` consecutive tokens within a call
+        # (gfx942: 2 halves per lane per call).
         # If a wave straddles two blocks, the per-lane block_table lookup
         # diverges within the wave -- the multi-block descriptor's
         # ``global_load_i32`` becomes lane-divergent (per-lane VMEM) and
@@ -711,7 +714,7 @@ def supports_tiled_2d(
         # uniformity (waves land in different blocks but each wave is
         # entirely in one block) is allowed; this is the
         # ``num_warps=8, HD=64, BS=32, T=64`` Triton-class config.
-        per_wave_tokens = (64 * 8) // head_size
+        per_wave_tokens = (64 * 2) // head_size
         if per_wave_tokens > block_size:
             return (
                 False,
