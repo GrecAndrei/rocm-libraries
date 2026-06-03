@@ -593,8 +593,12 @@ int runGemm(size_t         m,
     {
         if(mxBlock > 0)
         {
-            contraction.setMXScaleA(rocisa::DataType::E8, mxBlock);
-            contraction.setMXScaleB(rocisa::DataType::E8, mxBlock);
+            // Use unpadded MX scale tensors so the columnMajorGemm reference
+            // indexing matches: mxsa = {m, k/mxBlock} with m as leading stride.
+            // (Default padScaleTensor=true would round M up to next 32 and
+            // K/mxBlock up to next 8, breaking the index math below.)
+            contraction.setMXScaleA(rocisa::DataType::E8, mxBlock, /*saStride=*/{}, /*padScaleTensor=*/false);
+            contraction.setMXScaleB(rocisa::DataType::E8, mxBlock, /*sbStride=*/{}, /*padScaleTensor=*/false);
 
             size_t nmxsa = contraction.mxsa().totalLogicalElements();
             size_t nmxsb = contraction.mxsb().totalLogicalElements();
@@ -837,6 +841,8 @@ int main(int argc, char* argv[])
 
     auto strToDataType = [](const std::string& s, rocisa::DataType& out) -> bool {
         if(s == "f32")            { out = rocisa::DataType::Float;        return true; }
+        if(s == "f64")            { out = rocisa::DataType::Double;       return true; }
+        if(s == "tf32")           { out = rocisa::DataType::Float;        return true; }
         if(s == "f16")            { out = rocisa::DataType::Half;         return true; }
         if(s == "bf16")           { out = rocisa::DataType::BFloat16;     return true; }
 #ifdef TENSILE_USE_FP8_BF8
@@ -844,6 +850,9 @@ int main(int argc, char* argv[])
         if(s == "bf8")            { out = rocisa::DataType::BFloat8;      return true; }
         if(s == "f8fnuz")         { out = rocisa::DataType::Float8_fnuz;  return true; }
         if(s == "bf8fnuz")        { out = rocisa::DataType::BFloat8_fnuz; return true; }
+#endif
+#ifndef _WIN32
+        if(s == "f4")             { out = rocisa::DataType::Float4;       return true; }
 #endif
         return false;
     };
