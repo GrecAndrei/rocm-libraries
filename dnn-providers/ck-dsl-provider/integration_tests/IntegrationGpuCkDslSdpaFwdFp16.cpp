@@ -238,7 +238,7 @@ void runSdpaCase(const SdpaCase& cse, ::CkDslHandle& handle, SdpaFwdPlanBuilder&
 class IntegrationGpuCkDslSdpaFwdFp16Gpu : public ::testing::TestWithParam<SdpaCase> {
    protected:
     void SetUp() override {
-        CK_DSL_PROVIDER_SKIP_IF_NOT_GFX950("IntegrationGpuCkDslSdpaFwdFp16Gpu");
+        CK_DSL_PROVIDER_SKIP_IF_SDPA_FWD_ARCH_UNSUPPORTED("IntegrationGpuCkDslSdpaFwdFp16Gpu");
 
         _container = std::make_unique<CkDslContainer>();
         _handle = std::make_unique<::CkDslHandle>();

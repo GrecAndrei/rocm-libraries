@@ -49,7 +49,7 @@ using DataType = data_objects::DataType;
 /// the SdpaCase in IntegrationGpuCkDslSdpaFwdFp16.cpp -- same fields, but
 /// these shapes are prefill-scale (Sq=Skv in the thousands) so a CPU
 /// reference compare is intentionally omitted (prohibitively slow); we
-/// only want a TFLOPS signal on gfx950.
+/// only want a TFLOPS signal on the target device.
 struct SdpaPerfCase {
     const char* name;
     data_objects::DataType dtype;
@@ -197,14 +197,15 @@ void runSdpaPerfCase(const SdpaPerfCase& cse, ::CkDslHandle& handle,
     }
 }
 
-/// PERF-ONLY gfx950 harness for the unified SDPA-forward kernel over
-/// realistic LARGE (prefill-scale) shapes. No CPU correctness compare --
+/// PERF-ONLY harness (gfx950 / gfx942) for the unified SDPA-forward kernel
+/// over realistic LARGE (prefill-scale) shapes. No CPU correctness compare --
 /// the large Sq makes the reference prohibitively slow; we only collect
-/// timings (median us + TFLOPS). Skips on non-gfx950.
+/// timings (median us + TFLOPS) to gauge the device path vs PyTorch.
+/// Skips on an unsupported arch.
 class IntegrationGpuCkDslSdpaFwdPerfGpu : public ::testing::TestWithParam<SdpaPerfCase> {
    protected:
     void SetUp() override {
-        CK_DSL_PROVIDER_SKIP_IF_NOT_GFX950("IntegrationGpuCkDslSdpaFwdPerfGpu");
+        CK_DSL_PROVIDER_SKIP_IF_SDPA_FWD_ARCH_UNSUPPORTED("IntegrationGpuCkDslSdpaFwdPerfGpu");
 
         _container = std::make_unique<CkDslContainer>();
         _handle = std::make_unique<::CkDslHandle>();
@@ -551,12 +552,14 @@ void runPagedVarlenProbe(const char* caseName, DataType dtype, PagedVarlenKind k
     }
 }
 
-/// PERF-ONLY gfx950 harness for the paged / varlen launch paths. Same
-/// container/handle setup as the dense fixture; skips on non-gfx950.
+/// PERF-ONLY harness (gfx950 / gfx942) for the paged / varlen launch paths.
+/// Same container/handle setup as the dense fixture; skips on an unsupported
+/// arch.
 class IntegrationGpuCkDslSdpaFwdPagedVarlenGpu : public ::testing::Test {
    protected:
     void SetUp() override {
-        CK_DSL_PROVIDER_SKIP_IF_NOT_GFX950("IntegrationGpuCkDslSdpaFwdPagedVarlenGpu");
+        CK_DSL_PROVIDER_SKIP_IF_SDPA_FWD_ARCH_UNSUPPORTED(
+            "IntegrationGpuCkDslSdpaFwdPagedVarlenGpu");
 
         _container = std::make_unique<CkDslContainer>();
         _handle = std::make_unique<::CkDslHandle>();

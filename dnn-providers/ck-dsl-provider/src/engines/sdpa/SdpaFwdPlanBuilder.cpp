@@ -109,8 +109,10 @@ std::string normalizeScoringDtype(const std::string& specDtype) {
 }
 
 /// Build the selection problem the candidate enumerator + scorer read,
-/// from the (already block-size-finalised) spec.
-SdpaSelectionProblem buildSelectionProblem(const SdpaSpec& spec) {
+/// from the (already block-size-finalised) spec. ``arch`` is the bare
+/// gfx token of the target device (from ``detectDeviceArch``); it drives
+/// the per-arch LDS-capacity gate and the analytic-vs-ML knob fork.
+SdpaSelectionProblem buildSelectionProblem(const SdpaSpec& spec, const std::string& arch) {
     SdpaSelectionProblem selProblem;
     selProblem.batch = spec.problem.B;
     selProblem.num_query_heads = spec.problem.Hq;
@@ -120,6 +122,7 @@ SdpaSelectionProblem buildSelectionProblem(const SdpaSpec& spec) {
     selProblem.head_size = spec.problem.D;
     selProblem.block_size = spec.block_size;
     selProblem.dtype = normalizeScoringDtype(spec.dtype);
+    selProblem.arch = arch;
 
     // The unified kernel is ALWAYS paged (real paged graph or the dense
     // degenerate one-block-per-sequence layout), so use_paged_kv is the
@@ -262,8 +265,10 @@ void SdpaFwdPlanBuilder::buildPlan(const ::CkDslHandle& handle,
         spec.block_size = chooseDegenerateBlockSize(spec.problem.Skv);
     }
 
-    // 2. Build the selection problem from the finalised spec.
-    const SdpaSelectionProblem selProblem = buildSelectionProblem(spec);
+    // 2. Build the selection problem from the finalised spec. The
+    //    detected arch drives the per-arch LDS gate and the
+    //    analytic-vs-ML fork inside the selector.
+    const SdpaSelectionProblem selProblem = buildSelectionProblem(spec, arch);
 
     // 3. Enumerate buildable candidates. Post-gate, at least one combo
     //    must exist; an empty set is a genuine fault on the commit path.
