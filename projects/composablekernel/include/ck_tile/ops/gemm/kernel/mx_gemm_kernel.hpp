@@ -99,6 +99,37 @@ struct MxGemmKernel
     static constexpr int MThreadPerXdl = BlockGemmShape::WarpTile::at(number<0>{});
     static constexpr int NThreadPerXdl = BlockGemmShape::WarpTile::at(number<1>{});
 
+#ifdef __gfx950__
+    // Effective pack sizes: fall back to 1 when dimension is too small
+    using BlockWarps_                      = typename BlockGemmShape::BlockWarps;
+    static constexpr index_t MPerBlock_    = BlockGemmShape::kM;
+    static constexpr index_t NPerBlock_    = BlockGemmShape::kN;
+    static constexpr index_t KPerBlock_    = BlockGemmShape::kK;
+    static constexpr index_t MWarp_        = BlockWarps_::at(number<0>{});
+    static constexpr index_t NWarp_        = BlockWarps_::at(number<1>{});
+    static constexpr index_t KPerXdl_      = BlockGemmShape::WarpTile::at(number<2>{});
+    static constexpr index_t MIterPerWarp_ = MPerBlock_ / (MWarp_ * MThreadPerXdl);
+    static constexpr index_t NIterPerWarp_ = NPerBlock_ / (NWarp_ * NThreadPerXdl);
+    static constexpr index_t KIterPerWarp_ = KPerBlock_ / KPerXdl_;
+
+    static constexpr index_t MXdlPack = 2;
+    static constexpr index_t NXdlPack = 2;
+    static constexpr index_t KXdlPack = 2;
+
+    static constexpr index_t MXdlPackEff =
+        (MIterPerWarp_ >= MXdlPack && MIterPerWarp_ % MXdlPack == 0) ? MXdlPack : 1;
+    static constexpr index_t NXdlPackEff =
+        (NIterPerWarp_ >= NXdlPack && NIterPerWarp_ % NXdlPack == 0) ? NXdlPack : 1;
+    static constexpr index_t KXdlPackEff =
+        (KIterPerWarp_ >= KXdlPack && KIterPerWarp_ % KXdlPack == 0) ? KXdlPack : 1;
+#else
+    static constexpr index_t MXdlPackEff = 1;
+    static constexpr index_t NXdlPackEff = 1;
+    static constexpr index_t KXdlPackEff = 4; // 4 is because scale tensor is
+                                              // int32_t data type, each int32_t
+                                              // exists 4 fp8 scale values
+#endif
+
     using KernelArgs = MxGemmKernelArgs<NumATensor, NumBTensor, NumDTensor>;
 
     CK_TILE_HOST static constexpr KernelArgs
@@ -141,11 +172,8 @@ struct MxGemmKernel
                           index_t block_idx_m)
     {
         static constexpr int BlockScaleSize = 32;
-        const auto&& scale_packs_m          = integer_divide_ceil(kargs.M, MThreadPerXdl);
-        const auto&& scale_packs_k =
-            kargs.K / BlockScaleSize / 4; // 4 is because scale tensor is
-                                          // int32_t data type, each int32_t
-                                          // exists 4 fp8 scale values
+        const auto&& scale_packs_m = integer_divide_ceil(kargs.M, MThreadPerXdl * MXdlPackEff);
+        const auto&& scale_packs_k = kargs.K / BlockScaleSize / KXdlPackEff;
 
         const auto scale_a_naive_desc = make_naive_tensor_descriptor_packed(
             make_tuple(scale_packs_m, scale_packs_k, MThreadPerXdl));
@@ -164,9 +192,10 @@ struct MxGemmKernel
             [&](auto i) {
                 return make_tile_window(
                     scale_a_tensor_view[i],
-                    make_tuple(number<TilePartitioner::MPerBlock>{},
-                               number<TilePartitioner::KPerBlock / (BlockScaleSize * 4)>{}),
-                    {block_idx_m, 0});
+                    make_tuple(
+                        number<TilePartitioner::MPerBlock / MXdlPackEff>{},
+                        number<TilePartitioner::KPerBlock / (BlockScaleSize * KXdlPackEff)>{}),
+                    {block_idx_m / MXdlPackEff, 0});
             },
             number<NumATensor>{});
 
@@ -180,11 +209,8 @@ struct MxGemmKernel
                           index_t block_idx_n)
     {
         static constexpr int BlockScaleSize = 32;
-        const auto&& scale_packs_n          = integer_divide_ceil(kargs.N, NThreadPerXdl);
-        const auto&& scale_packs_k =
-            kargs.K / BlockScaleSize / 4; // 4 is because scale tensor is
-                                          // int32_t data type, each int32_t
-                                          // exists 4 fp8 scale values
+        const auto&& scale_packs_n = integer_divide_ceil(kargs.N, NThreadPerXdl * NXdlPackEff);
+        const auto&& scale_packs_k = kargs.K / BlockScaleSize / KXdlPackEff;
 
         const auto scale_b_naive_desc = make_naive_tensor_descriptor_packed(
             make_tuple(scale_packs_n, scale_packs_k, NThreadPerXdl));
@@ -203,9 +229,10 @@ struct MxGemmKernel
             [&](auto i) {
                 return make_tile_window(
                     scale_b_tensor_view[i],
-                    make_tuple(number<TilePartitioner::NPerBlock>{},
-                               number<TilePartitioner::KPerBlock / (BlockScaleSize * 4)>{}),
-                    {block_idx_n, 0});
+                    make_tuple(
+                        number<TilePartitioner::NPerBlock / NXdlPackEff>{},
+                        number<TilePartitioner::KPerBlock / (BlockScaleSize * KXdlPackEff)>{}),
+                    {block_idx_n / NXdlPackEff, 0});
             },
             number<NumBTensor>{});
         return scale_b_block_window;

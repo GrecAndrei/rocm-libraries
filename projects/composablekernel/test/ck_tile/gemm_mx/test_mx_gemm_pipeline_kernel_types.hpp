@@ -17,6 +17,7 @@ using Intrawave = ck_tile::integral_constant<ck_tile::GemmPipelineScheduler,
 
 using CompTDMV1 = ck_tile::integral_constant<MxGemmPipelineType, MxGemmPipelineType::CompTDMV1>;
 using CompTDMV2 = ck_tile::integral_constant<MxGemmPipelineType, MxGemmPipelineType::CompTDMV2>;
+using CompAsync = ck_tile::integral_constant<MxGemmPipelineType, MxGemmPipelineType::CompAsync>;
 
 using I16  = ck_tile::number<16>;
 using I32  = ck_tile::number<32>;
@@ -44,5 +45,9 @@ using KernelTypesMxGemmCompTDMWmma = ::testing::Types<
     std::tuple<    Row,     Row,     Row,       BF8,       F8,    E8M0,  E8M0,      F32,       F16,        I64,         I64,          I128,       I32,        I32, Intrawave,        CompTDMV2>,
     std::tuple<    Row,     Row,     Row,       F4,        F4,    E5M3,  E5M3,      F32,       F16,        I64,         I64,          I128,       I32,        I32, Intrawave,        CompTDMV1>,
     std::tuple<    Col,     Row,     Row,       F4,        F8,    E5M3,  E8M0,      F32,       F16,        I64,         I64,          I128,       I32,        I32, Intrawave,        CompTDMV1>
+>;
+
+using KernelTypesMxGemmCompAsync = ::testing::Types<
+    std::tuple<    Row,     Col,     Row,       F8,        F8,    E8M0,  E8M0,      F32,       F16,        I64,        I64,          I256,       I16,        I16, Intrawave,        CompAsync>
 >;
 // clang-format on
