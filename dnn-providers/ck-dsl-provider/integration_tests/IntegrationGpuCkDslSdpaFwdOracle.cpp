@@ -262,6 +262,15 @@ void runOracleSweepImpl(const OracleCase& cse, CkDslContainer& container, ::CkDs
     const int kSkv = cse.Skv;
     const int kD = cse.D;
 
+    // head_size=256 exceeds the gfx942 (CDNA3) 64 KB LDS budget for the
+    // tiled-2D kernel (~140 KB) with no non-tiled fallback, so it is
+    // unsupported on gfx942 (fits gfx950's 160 KB). Skip on gfx942 -- with
+    // no candidate that fits the 64 KB gate, enumerateCandidates would be
+    // empty and the sweep's ASSERT_GT(sweptOk, 0) would fail.
+    if (kD >= 256 && arch.find("gfx942") != std::string::npos) {
+        GTEST_SKIP() << cse.name << ": head_size=256 exceeds the gfx942 64 KB LDS budget";
+    }
+
     const std::vector<std::int64_t> qDims{kB, kHq, kSq, kD};
     const std::vector<std::int64_t> kDims{kB, kHkv, kSkv, kD};
     const std::vector<std::int64_t> vDims{kB, kHkv, kSkv, kD};
@@ -298,8 +307,15 @@ void runOracleSweepImpl(const OracleCase& cse, CkDslContainer& container, ::CkDs
     spec.is_varlen = false;
 
     // 3. Build the selection problem inline (replicated from the plan
-    //    builder's anonymous-namespace helper).
-    const SdpaSelectionProblem selProblem = buildSelectionProblemLocal(spec);
+    //    builder's anonymous-namespace helper), then stamp it with the
+    //    DETECTED device arch. buildSelectionProblemLocal leaves arch at its
+    //    "gfx950" default; the real arch drives both the per-candidate LDS
+    //    budget gate in enumerateCandidates (gfx942 -> 64 KB, gfx950 ->
+    //    160 KB) and the production selectPerfKnobs fork (gfx942 forces the
+    //    analytic path; only gfx950 engages the lgbm model). _arch is bare
+    //    (e.g. "gfx942"), matching the exact == checks those paths use.
+    SdpaSelectionProblem selProblem = buildSelectionProblemLocal(spec);
+    selProblem.arch = arch;
 
     // 4. Enumerate every buildable candidate for this problem.
     const std::vector<SdpaPerfKnobs> candidates = ck_dsl_provider::enumerateCandidates(selProblem);
@@ -367,11 +383,13 @@ void runOracleSweepImpl(const OracleCase& cse, CkDslContainer& container, ::CkDs
                            << "': every candidate failed to compile/launch (" << sweptFail
                            << " failures); cannot determine an oracle best";
 
-    // 7. The heuristic's pick. Construct the scorer (loads the gfx950
-    //    LightGBM model) and select over the SAME candidate set. Then
-    //    match the picked knobs back to a swept result by scored-field
-    //    equality; if it was a swept FAILURE (didn't compile/launch), time
-    //    it explicitly here so the comparison still has a number.
+    // 7. The PRODUCTION heuristic's pick. Construct the scorer (loads the
+    //    gfx950 LightGBM model) and select over the SAME candidate set using
+    //    selProblem.arch (the real device arch). selectPerfKnobs forks on
+    //    arch: gfx950 engages the lgbm model; gfx942 (and any non-gfx950)
+    //    forces the analytic path, so on gfx942 this "heuristic" pick is
+    //    identical to the analytic pick (7b). Then re-time the picked combo
+    //    so the comparison has a number even if it was a swept FAILURE.
     SdpaScorer scorer;
     const SdpaPerfKnobs picked = ck_dsl_provider::selectPerfKnobs(selProblem, candidates, scorer);
     if (!scorer.isLoaded()) {
@@ -435,9 +453,43 @@ void runOracleSweepImpl(const OracleCase& cse, CkDslContainer& container, ::CkDs
         }
     }
 
+    // 7c. The gfx950-trained ML model's pick, run OUT-OF-ARCH. On a gfx942
+    //     device selProblem.arch is "gfx942", so the production
+    //     selectPerfKnobs above forced the analytic path -- i.e. heuristic ==
+    //     analytic, NOT the lgbm model. To still surface what the ML model
+    //     WOULD pick, copy the problem, force arch="gfx950" to engage the
+    //     lgbm scorer's selectArgmax, and rank the SAME gfx942-valid
+    //     candidate set (enumerated under the real arch). This is a
+    //     DIAGNOSTIC only -- it is not the shipping path on gfx942. On a real
+    //     gfx950 device this equals the heuristic pick (both engage the
+    //     model over the same candidates), which is harmless. Guarded: if the
+    //     scorer model is not loaded, the model is unavailable.
+    double mlTflops = -1.0;
+    double mlUs = 0.0;
+    bool mlMatched = false;
+    SdpaSelectionProblem mlProblem = selProblem;
+    mlProblem.arch = "gfx950";
+    const SdpaPerfKnobs mlPicked = ck_dsl_provider::selectPerfKnobs(mlProblem, candidates, scorer);
+    if (scorer.isLoaded()) {
+        double medianUs = 0.0;
+        std::optional<double> tflops =
+            timeCandidate(container, handle, arch, spec, mlPicked, deviceBuffers, kFlops, medianUs);
+        if (tflops.has_value()) {
+            mlTflops = *tflops;
+            mlUs = medianUs;
+            mlMatched = true;
+        }
+    } else {
+        HIPDNN_PLUGIN_LOG_INFO(
+            "[Oracle] ml pick UNAVAILABLE: scorer model not loaded -- the gfx950 lgbm model "
+            "cannot be queried for its out-of-arch pick");
+    }
+
     // 8. SUMMARY line. ratio = oracle/heuristic (>1 means the heuristic
     //    left perf on the table; ~1 means the plateau is a config-space /
-    //    kernel ceiling, not the heuristic's fault).
+    //    kernel ceiling, not the heuristic's fault). On gfx942 heuristic ==
+    //    analytic (production forces analytic); ml= is the gfx950-trained
+    //    model run out-of-arch over the gfx942-valid configs (diagnostic).
     std::ostringstream summary;
     summary << "[Oracle] " << cse.name << " candidates=" << candidates.size()
             << " swept_ok=" << sweptOk << " swept_fail=" << sweptFail << " best=" << bestTflops
@@ -460,6 +512,16 @@ void runOracleSweepImpl(const OracleCase& cse, CkDslContainer& container, ::CkDs
     } else {
         summary << " analytic=UNAVAILABLE @(" << formatKnobs(analytic) << ")";
     }
+    // ml= : the gfx950-trained lgbm model's pick, ranked OUT-OF-ARCH over the
+    // gfx942-valid candidate set. Diagnostic on gfx942 (heuristic == analytic
+    // there); on gfx950 it mirrors heuristic.
+    if (mlMatched) {
+        const double ratioM = mlTflops > 0.0 ? (bestTflops / mlTflops) : 0.0;
+        summary << " ml=" << mlTflops << " tflops @(" << formatKnobs(mlPicked)
+                << ") median_us=" << mlUs << " oracle/ml=" << ratioM << "x";
+    } else {
+        summary << " ml=UNAVAILABLE @(" << formatKnobs(mlPicked) << ")";
+    }
     HIPDNN_PLUGIN_LOG_INFO(summary.str());
     // Also to stdout so the summary survives even with plugin logging off.
     std::cout << summary.str() << std::endl;
@@ -481,15 +543,15 @@ void runOracleSweep(const OracleCase& cse, CkDslContainer& container, ::CkDslHan
     }
 }
 
-/// gfx950-gated oracle perf-sweep fixture, parameterized over the SAME shape
-/// set as IntegrationGpuCkDslSdpaFwdPerf (and the external PyTorch script), so
-/// the per-shape oracle-best / heuristic-pick / analytic numbers line up
-/// column-for-column with the perf and PyTorch results. Brings up the embedded
-/// interpreter (CkDslContainer) + a handle once per test.
+/// Oracle perf-sweep fixture (gfx950 or gfx942), parameterized over the SAME
+/// shape set as IntegrationGpuCkDslSdpaFwdPerf (and the external PyTorch
+/// script), so the per-shape oracle-best / heuristic-pick / analytic / ml
+/// numbers line up column-for-column with the perf and PyTorch results. Brings
+/// up the embedded interpreter (CkDslContainer) + a handle once per test.
 class IntegrationGpuCkDslSdpaFwdOracleGpu : public ::testing::TestWithParam<OracleCase> {
    protected:
     void SetUp() override {
-        CK_DSL_PROVIDER_SKIP_IF_NOT_GFX950("IntegrationGpuCkDslSdpaFwdOracleGpu");
+        CK_DSL_PROVIDER_SKIP_IF_SDPA_FWD_ARCH_UNSUPPORTED("IntegrationGpuCkDslSdpaFwdOracleGpu");
         _container = std::make_unique<CkDslContainer>();
         _handle = std::make_unique<::CkDslHandle>();
         std::optional<std::string> arch = ck_dsl_provider::detectDeviceArch(_handle->getStream());
