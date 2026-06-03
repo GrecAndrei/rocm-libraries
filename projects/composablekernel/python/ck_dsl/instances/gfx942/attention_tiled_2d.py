@@ -894,6 +894,25 @@ def build_unified_attention_2d_tiled(
     NUM_WARPS = spec.num_warps
     WAVE = 64
     THREADS = NUM_WARPS * WAVE
+    # CDNA3 (gfx942) async global->LDS DMA width cap.
+    #
+    # ``llvm.amdgcn.raw.ptr.buffer.load.lds`` on CDNA3 can only legalise a
+    # per-lane DWORD (4-byte) load-to-LDS. The wider b96/b128 load-to-LDS
+    # forms (dwords 3 and 4) are a CDNA4 (gfx950)-only feature; emitting a
+    # 16-byte (dwords=4) LDS DMA on gfx942 makes the backend abort with
+    # ``LLVM ERROR: Do not know how to expand this operator's operand!``.
+    # The tiled-2D loaders were templated from the gfx950 async-copy width
+    # (16 bytes/lane), so on gfx942 we clamp every async-LDS-DMA to 1 dword
+    # and issue proportionally more calls to move the same bytes. The LDS
+    # deposit stays lane-contiguous, so the [T, HD] K_lds / V_lds layout
+    # (and the strided-V B-operand math that depends on it) is unchanged.
+    #
+    # There is no catalog field for this today: ``memory.buffer_load_max_dwords``
+    # describes the *register* vector buffer-load width (4 on both gfx942 and
+    # gfx950) and does NOT capture the narrower load-*to-LDS* limit, so we
+    # encode the gfx942-specific value here rather than touching core/arch/.
+    ASYNC_LDS_MAX_DWORDS = 1
+    ASYNC_LDS_MAX_BYTES_PER_LANE = ASYNC_LDS_MAX_DWORDS * 4
     BLOCK_M_PER_WARP = spec.block_m_per_warp
     # Number of stacked MFMA-M=16 atoms per warp's M dimension. For
     # ``block_m_per_warp=16`` this is 1 (the original kernel); for
@@ -1479,30 +1498,37 @@ def build_unified_attention_2d_tiled(
     key_rsrc = b.buffer_rsrc(key, big_bytes)
     value_rsrc = b.buffer_rsrc(value, big_bytes)
 
-    # Async load contract (bf16 K/V path): dwords=4 means each lane writes
-    # 16 bytes lane-contiguous in LDS. One call writes 64 * 8 halfs = 512
-    # halfs = 1024 bytes, i.e. a contiguous slice of the natural [T, HD] tile.
-    # This works for HD=128 and HD=256 without changing the LDS layout.
-    KV_HALVES_PER_CALL = THREADS * 8
+    # Async load contract (bf16 K/V path): on gfx942 each lane writes
+    # ``ASYNC_LDS_MAX_BYTES_PER_LANE`` (= 4 bytes = 2 halves) lane-contiguous
+    # in LDS per call (CDNA3 caps load-to-LDS at 1 dword; see
+    # ASYNC_LDS_MAX_DWORDS above). One call writes THREADS*2 halves = a
+    # contiguous slice of the natural [T, HD] tile, so we issue 4x the calls
+    # the gfx950 16-byte template did while preserving the lane-contiguous
+    # [T, HD] LDS layout. Works for HD=128 and HD=256 unchanged.
+    KV_HALVES_PER_LANE = ASYNC_LDS_MAX_BYTES_PER_LANE // 2  # bf16: 2 bytes/half
+    KV_HALVES_PER_CALL = THREADS * KV_HALVES_PER_LANE
     assert (T * HD) % KV_HALVES_PER_CALL == 0
     kv_calls_per_tile = (T * HD) // KV_HALVES_PER_CALL
     bytes_per_call = KV_HALVES_PER_CALL * 2
-    # For fp8-MFMA mode K_lds is sized in fp8 (1 byte/element). The async
-    # DMA writes 16 bytes/lane regardless of dtype; that maps to 16 fp8
-    # elements per lane vs 8 bf16 halves per lane, so half the calls
-    # cover the same tile.
+    # For fp8-MFMA mode K_lds is sized in fp8 (1 byte/element). On gfx942 the
+    # async DMA is capped at ``ASYNC_LDS_MAX_BYTES_PER_LANE`` (4 bytes) per
+    # lane (CDNA3 1-dword load-to-LDS limit; see ASYNC_LDS_MAX_DWORDS above),
+    # so 4 fp8 elements per lane vs the 2 bf16 halves the bf16 path moves.
     K_FP8_MFMA = FP8_MFMA_QK
     PV_FP8_MFMA = FP8_MFMA_PV
     if K_FP8_MFMA or PV_FP8_MFMA:
         # Pick the largest dwords (and therefore widest per-lane payload)
-        # the tile bytes support. The AMDGPU async-DMA intrinsic
-        # ``raw.ptr.buffer.load.lds`` accepts dwords in {1, 3, 4} =
-        # {4, 12, 16} bytes/lane (a hardware quirk -- 2 is rejected).
-        # For T*HD smaller than the widest payload (e.g. T=32 HD=64 with
-        # nw=4 -> 2048 bytes/tile vs 4096 bytes/full-call), drop to a
-        # narrower per-lane payload so the loader still tiles cleanly.
+        # the tile bytes support, clamped to the gfx942 load-to-LDS max.
+        # The AMDGPU async-DMA intrinsic ``raw.ptr.buffer.load.lds`` accepts
+        # dwords in {1, 3, 4}; on CDNA3 only 1 (4 bytes/lane) legalises for
+        # the load-*to-LDS* form, so the candidate list is clamped here.
         tile_bytes = T * HD  # 1 byte per fp8 element
-        for dwords_try, bytes_per_lane in [(4, 16), (3, 12), (1, 4)]:
+        fp8_dword_candidates = [
+            (d, by)
+            for (d, by) in [(4, 16), (3, 12), (1, 4)]
+            if d <= ASYNC_LDS_MAX_DWORDS
+        ]
+        for dwords_try, bytes_per_lane in fp8_dword_candidates:
             payload = THREADS * bytes_per_lane
             if tile_bytes >= payload and tile_bytes % payload == 0:
                 K_FP8_DWORDS = dwords_try
@@ -1511,14 +1537,15 @@ def build_unified_attention_2d_tiled(
         else:
             raise AssertionError(
                 f"fp8-mfma K loader: T*HD={tile_bytes} cannot be covered by "
-                f"any supported async-DMA payload (THREADS={THREADS})"
+                f"any supported async-DMA payload (THREADS={THREADS}, "
+                f"max dwords={ASYNC_LDS_MAX_DWORDS})"
             )
         K_ELEMS_PER_CALL = THREADS * K_BYTES_PER_LANE
         K_BYTES_PER_CALL = K_ELEMS_PER_CALL  # 1 byte per fp8 element
         k_fp8_calls_per_tile = tile_bytes // K_ELEMS_PER_CALL
     else:
-        K_FP8_DWORDS = 4
-        K_BYTES_PER_LANE = 16
+        K_FP8_DWORDS = ASYNC_LDS_MAX_DWORDS
+        K_BYTES_PER_LANE = ASYNC_LDS_MAX_BYTES_PER_LANE
         k_fp8_calls_per_tile = 0  # unused
     # Byte strides for the paged-KV cache. ``KV_BYTES`` is 2 for bf16, 1
     # for fp8e4m3. The async DMA reads bytes verbatim (no implicit cast),
@@ -1530,7 +1557,10 @@ def build_unified_attention_2d_tiled(
     kv_stride_h_b = HD * KV_BYTES
     kv_block_bytes_c = b.const_i32(kv_stride_blk_b)  # one-block buffer bound
 
-    lane_half_base = b.mul(tid, b.const_i32(8))
+    # Per-lane starting half index. With the gfx942 1-dword DMA each lane
+    # contributes ``KV_HALVES_PER_LANE`` (= 2) contiguous halves per call,
+    # so the lane base advances by that many halves (not the gfx950 8).
+    lane_half_base = b.mul(tid, b.const_i32(KV_HALVES_PER_LANE))
 
     K_lds_addr = b.smem_addr_of(K_lds)
     V_lds_addr = b.smem_addr_of(V_lds)
@@ -1543,7 +1573,14 @@ def build_unified_attention_2d_tiled(
     # the wave-uniform `lds_dst`. Each wave issues its own instruction
     # but they share the LDS pointer unless we add a wave offset; with
     # NUM_WARPS=1 this collapses to zero.
-    WAVE_BYTES = WAVE * 16  # dwords=4 → 16 bytes per lane × 64 lanes
+    # Per-wave LDS slab stride for one async call. Each wave's 64 lanes
+    # deposit ``ASYNC_LDS_MAX_BYTES_PER_LANE`` bytes lane-contiguous, so the
+    # wave offset advances by ``WAVE * ASYNC_LDS_MAX_BYTES_PER_LANE`` (= 256
+    # bytes on gfx942). Pairing this with the ``bytes_per_call`` per-call
+    # stride keeps the LDS deposit an exact identity copy of the linear
+    # [T, HD] tile for every (wave, call, lane) — across all NUM_WARPS and
+    # call counts — which the [T, HD] K_lds/V_lds readers rely on.
+    WAVE_BYTES = WAVE * ASYNC_LDS_MAX_BYTES_PER_LANE
     if NUM_WARPS == 1:
         wave_lds_offset_i64 = b.const_i64(0)
     else:
@@ -1610,15 +1647,15 @@ def build_unified_attention_2d_tiled(
     # in_prefix masks already discard the bogus tokens.
     block_table_max_idx = b.to_sgpr_u32(b.mul(num_seqs_p, bt_stride_p))
     if FAST_PAGED_KV_DESC:
-        assert (BS, T, HD, NUM_KV, KV_BYTES, NUM_WARPS, kv_calls_per_tile) == (
-            32,
-            64,
-            64,
-            8,
-            2,
-            4,
-            2,
-        )
+        # Two logical blocks per tile (T=64 = 2 * BS=32). On gfx942 the
+        # 1-dword async DMA needs ``FAST_CALLS_PER_BLOCK`` calls to drain one
+        # block instead of the single 16-byte call the gfx950 template used,
+        # so a tile now takes ``2 * FAST_CALLS_PER_BLOCK`` calls. Each block
+        # is BS*HD halves; ``KV_HALVES_PER_CALL`` halves are moved per call.
+        assert (BS, T, HD, NUM_KV, KV_BYTES, NUM_WARPS) == (32, 64, 64, 8, 2, 4)
+        assert (BS * HD) % KV_HALVES_PER_CALL == 0
+        FAST_CALLS_PER_BLOCK = (BS * HD) // KV_HALVES_PER_CALL
+        assert kv_calls_per_tile == 2 * FAST_CALLS_PER_BLOCK
 
         def _fast_paged_kv_blocks(kv_tile_idx: Value) -> tuple[Value, Value]:
             logical_block0 = b.mul(kv_tile_idx, b.const_i32(2))
@@ -1644,13 +1681,20 @@ def build_unified_attention_2d_tiled(
             return b.to_sgpr_u32(block0), b.to_sgpr_u32(block1)
 
         def _fast_paged_kv_voff(call: int, block0: Value, block1: Value):
-            # Each call covers one full block. ``physical`` is uniform.
+            # ``FAST_CALLS_PER_BLOCK`` consecutive calls drain one logical
+            # block; calls ``[0, CPB)`` -> block0, ``[CPB, 2*CPB)`` -> block1.
+            # ``physical`` is uniform per call. Within the block the half
+            # index is ``(call_in_block)*KV_HALVES_PER_CALL + lane_half_base``.
             # Returns (i64 block base byte offset, within-block i32 voffset)
             # when I64_KV_ADDR (cache may exceed the 2 GiB i32-voffset cap),
             # else the legacy single i32 voffset (fast path, base = key).
-            physical = block0 if call == 0 else block1
-            token = b.lshr(lane_half_base, b.const_i32(6))  # lane_half_base / HD
-            dim = b.land(lane_half_base, b.const_i32(63))  # lane_half_base % HD
+            physical = block0 if call < FAST_CALLS_PER_BLOCK else block1
+            call_in_block = call % FAST_CALLS_PER_BLOCK
+            half_in_block = b.add(
+                b.const_i32(call_in_block * KV_HALVES_PER_CALL), lane_half_base
+            )
+            token = b.lshr(half_in_block, b.const_i32(6))  # half_in_block / HD
+            dim = b.land(half_in_block, b.const_i32(63))  # half_in_block % HD
             token_b = b.shl(token, b.const_i32(10))  # 8 * 64 * 2
             head_b = b.shl(kv_head_idx, b.const_i32(7))  # 64 * 2
             dim_b = b.shl(dim, b.const_i32(1))
@@ -1758,7 +1802,12 @@ def build_unified_attention_2d_tiled(
             # ``dsl_docs/primitives/intrinsics_and_primitives.md`` as the
             # right hint for K-loop streaming tile loads.
             b.async_buffer_load_lds_addr(
-                k_rsrc, k_dst, voff, zero_soff, 4, coherency=CACHE_STREAM
+                k_rsrc,
+                k_dst,
+                voff,
+                zero_soff,
+                ASYNC_LDS_MAX_DWORDS,
+                coherency=CACHE_STREAM,
             )
 
     def _issue_v_load_runtime(kv_tile_idx: Value, buf_idx: Value) -> None:
@@ -1808,17 +1857,21 @@ def build_unified_attention_2d_tiled(
             # re-read within this kernel; see _issue_k_load_runtime for
             # the rationale.
             b.async_buffer_load_lds_addr(
-                v_rsrc, v_dst, voff, zero_soff, 4, coherency=CACHE_STREAM
+                v_rsrc,
+                v_dst,
+                voff,
+                zero_soff,
+                ASYNC_LDS_MAX_DWORDS,
+                coherency=CACHE_STREAM,
             )
 
     # ---------------- FP8 K/V cache: async DMA loader (round 2) ----------------
     # Two-phase split that mirrors the bf16 path's HW DMA pipeline:
     #   1. `_issue_kv_fp8_async_load` issues `raw.ptr.buffer.load.lds`
-    #      writing fp8 bytes directly into K_fp8_lds / V_fp8_lds. Same
-    #      dwords=4 (16 bytes/lane) as the bf16 path; one wave covers
-    #      16 fp8 elements per lane vs 8 bf16 halves per lane, so fp8
-    #      needs half the calls per tile (1 call vs 2 for T=64 HD=64
-    #      THREADS=256).
+    #      writing fp8 bytes directly into K_fp8_lds / V_fp8_lds. On gfx942
+    #      this is the same capped 1-dword (4 bytes/lane) width as the bf16
+    #      path (CDNA3 load-to-LDS limit); each lane moves 4 fp8 elements
+    #      vs 2 bf16 halves, so fp8 needs half the bf16 call count.
     #   2. `_dequant_fp8_lds_to_bf16` runs in the kv loop, after the
     #      ``s_waitcnt vmcnt=0; s_barrier`` that publishes the fp8
     #      bytes. Each thread reads 8 fp8 from the fp8 slab, applies
@@ -2125,11 +2178,11 @@ def build_unified_attention_2d_tiled(
 
         K_lds is allocated as fp8 (8 KB for double-buf at T=64 HD=64 vs
         16 KB bf16). The async DMA writes ``K_BYTES_PER_LANE`` bytes per
-        lane per call; the dwords selector is picked at build time from
-        {1, 2, 4} = {4, 8, 16} bytes/lane based on T*HD so the loader
-        works for both T=64 (16 B/lane) and T=32 (8 B/lane) tiles. QK
-        reads K_lds as fp8 and dequants in-register with k_scale to the
-        bf16 input the standard bf16 MFMA expects.
+        lane per call; on gfx942 the dwords selector is clamped to the
+        CDNA3 load-to-LDS max (1 dword = 4 bytes/lane), issuing more calls
+        per tile to move the same bytes. QK reads K_lds as fp8 and dequants
+        in-register with k_scale to the bf16 input the standard bf16 MFMA
+        expects.
         """
         buf_off_i32 = b.mul(buf_idx, b.const_i32(T * HD))  # fp8: 1 byte/elem
         buf_off_i64 = b.zext(buf_off_i32, I64)

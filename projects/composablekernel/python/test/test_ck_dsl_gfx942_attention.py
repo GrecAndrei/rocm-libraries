@@ -294,5 +294,77 @@ class TestGfx942BuildSmoke(unittest.TestCase):
         self.assertEqual(ArchTarget.from_gfx("gfx950").lds_capacity_bytes, 163840)
 
 
+class TestGfx942CompileSmoke(unittest.TestCase):
+    """gfx942 must lower through the AMDGPU backend (comgr) without aborting.
+
+    The async K/V LDS staging was templated from the gfx950 width and emitted a
+    16-byte (``i32 16``) ``llvm.amdgcn.raw.ptr.buffer.load.lds``. The wide
+    (b96/b128) load-*to-LDS* DMA is a CDNA4 (gfx950)-only feature; on CDNA3
+    (gfx942) only a 1-dword (4-byte) load-to-LDS legalises, so the 16-byte form
+    made the backend abort with ``LLVM ERROR: Do not know how to expand this
+    operator's operand!``. This guards the regression in Python (no GPU/C++
+    harness): a clean ``compile_kernel(arch="gfx942")`` plus an IR check that no
+    ``buffer.load.lds`` carries a size operand wider than one DWORD.
+    """
+
+    _CASES = ((64, 0), (128, 64))  # (head_size, tile_size); 0 -> omit tile_size
+
+    def _build(self, build942, Spec942, dtype, head_size, tile_size):
+        kw = dict(
+            head_size=head_size,
+            block_size=16,
+            num_query_heads=8,
+            num_kv_heads=8,
+            dtype=dtype,
+            use_sinks=False,
+            sliding_window=0,
+            has_softcap=False,
+        )
+        if tile_size:
+            kw["tile_size"] = tile_size
+        return build942(Spec942(**kw), arch="gfx942")
+
+    def test_compiles_to_hsaco_f16_bf16(self):
+        from ck_dsl.helpers.compile import compile_kernel
+        from ck_dsl.instances.common.attention_unified import _tiled_2d_impl
+
+        Spec942, build942, _ = _tiled_2d_impl("gfx942")
+        for dtype in ("fp16", "bf16"):
+            for head_size, tile_size in self._CASES:
+                with self.subTest(dtype=dtype, hd=head_size, tile=tile_size):
+                    kd = self._build(build942, Spec942, dtype, head_size, tile_size)
+                    art = compile_kernel(kd, arch="gfx942")
+                    self.assertTrue(
+                        art.hsaco,
+                        f"gfx942 {dtype} HD{head_size} T{tile_size}: empty hsaco",
+                    )
+
+    def test_no_wide_load_lds_on_gfx942(self):
+        # CDNA3 load-to-LDS is DWORD-only: every buffer.load.lds CALL must carry
+        # a 4-byte (i32 4) size operand -- never i32 8/12/16.
+        import re
+
+        from ck_dsl.helpers.compile import compile_kernel
+        from ck_dsl.instances.common.attention_unified import _tiled_2d_impl
+
+        Spec942, build942, _ = _tiled_2d_impl("gfx942")
+        call_re = re.compile(
+            r"call void @llvm\.amdgcn\.raw\.ptr\.buffer\.load\.lds\("
+            r"[^,]+,[^,]+,\s*i32\s+(\d+)"
+        )
+        for dtype in ("fp16", "bf16"):
+            for head_size, tile_size in self._CASES:
+                with self.subTest(dtype=dtype, hd=head_size, tile=tile_size):
+                    kd = self._build(build942, Spec942, dtype, head_size, tile_size)
+                    art = compile_kernel(kd, arch="gfx942")
+                    sizes = [int(m) for m in call_re.findall(art.llvm_text)]
+                    self.assertTrue(sizes, "expected at least one buffer.load.lds")
+                    self.assertTrue(
+                        all(s <= 4 for s in sizes),
+                        f"gfx942 {dtype} HD{head_size} T{tile_size}: "
+                        f"buffer.load.lds size>4 found: {sorted(set(sizes))}",
+                    )
+
+
 if __name__ == "__main__":
     unittest.main()
