@@ -1374,10 +1374,10 @@ namespace TensileLite
             size_t         mxBlockA    = problem.mxBlockA();
             size_t         mxBlockB    = problem.mxBlockB();
             bool           hasMX       = (mxBlockA > 0) || (mxBlockB > 0);
-            const MXScale* mxsaPtr
-                = (mxBlockA > 0) ? static_cast<const MXScale*>(inputs.mxsa) : nullptr;
-            const MXScale* mxsbPtr
-                = (mxBlockB > 0) ? static_cast<const MXScale*>(inputs.mxsb) : nullptr;
+            const E8* mxsaPtr
+                = (mxBlockA > 0) ? static_cast<const E8*>(inputs.mxsa) : nullptr;
+            const E8* mxsbPtr
+                = (mxBlockB > 0) ? static_cast<const E8*>(inputs.mxsb) : nullptr;
             size_t strideMxsaM = 0, strideMxsaBlk = 0;
             size_t strideMxsbN = 0, strideMxsbBlk = 0;
             size_t strideBatchMxsa = 0, strideBatchMxsb = 0;
@@ -1418,9 +1418,9 @@ namespace TensileLite
                 const AccumT* curBatchC = shadowC.data() + (b * strideBatchC);
                 AccumT*       curBatchD = ptrD + (b * strideBatchD);
 
-                const MXScale* mxsaBatch
+                const E8* mxsaBatch
                     = mxsaPtr ? mxsaPtr + b * strideBatchMxsa : nullptr;
-                const MXScale* mxsbBatch
+                const E8* mxsbBatch
                     = mxsbPtr ? mxsbPtr + b * strideBatchMxsb : nullptr;
 
                 for(size_t m = 0; m < mTiles; ++m)

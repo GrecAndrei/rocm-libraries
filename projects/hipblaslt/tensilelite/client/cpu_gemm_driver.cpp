@@ -208,8 +208,8 @@ namespace
                          QuantizeFn     quantizeB     = nullptr
 #ifndef _WIN32
                          ,
-                         const MXScale* mxScaleA      = nullptr,
-                         const MXScale* mxScaleB      = nullptr,
+                         const E8*      mxScaleA      = nullptr,
+                         const E8*      mxScaleB      = nullptr,
                          int            mxBlock       = 0
 #endif
                          )
@@ -489,6 +489,17 @@ int runGemm(size_t         m,
     {
         auto initOperand = [&](auto& vec, bool quantizes) {
             using T = typename std::decay_t<decltype(vec)>::value_type;
+#ifndef _WIN32
+            if constexpr(std::is_same_v<T, Float4x2>)
+            {
+                // FP4 mixed-input init unsupported in this branch; the FP4-only
+                // path above handles the pure FP4 case. Mixed FP4/non-FP4
+                // dispatch is rejected at the dispatcher level.
+                throw std::runtime_error(
+                    "Mixed FP4 / non-FP4 input is not supported.");
+            }
+            else
+#endif
             if(quantizes)
             {
                 // Values representable in storage but not on the compute-input grid -
@@ -576,14 +587,14 @@ int runGemm(size_t         m,
 
 #ifndef _WIN32
     // MX scale setup (FP4 with mxBlock > 0 only)
-    [[maybe_unused]] std::vector<MXScale> mxsa, mxsb;
+    [[maybe_unused]] std::vector<E8> mxsa, mxsb;
 
     if constexpr(isFP4)
     {
         if(mxBlock > 0)
         {
-            contraction.setMXScaleA(mxBlock);
-            contraction.setMXScaleB(mxBlock);
+            contraction.setMXScaleA(rocisa::DataType::E8, mxBlock);
+            contraction.setMXScaleB(rocisa::DataType::E8, mxBlock);
 
             size_t nmxsa = contraction.mxsa().totalLogicalElements();
             size_t nmxsb = contraction.mxsb().totalLogicalElements();
@@ -601,9 +612,9 @@ int runGemm(size_t         m,
             // Distinct exponents in [0..7] so wrong indexing breaks validation
             std::uniform_int_distribution<> expDist(0, 7);
             for(size_t i = 0; i < nmxsa; i++)
-                mxsa[i] = MXScale(std::ldexp(1.0f, expDist(gen)));
+                mxsa[i] = E8(std::ldexp(1.0f, expDist(gen)));
             for(size_t i = 0; i < nmxsb; i++)
-                mxsb[i] = MXScale(std::ldexp(1.0f, expDist(gen)));
+                mxsb[i] = E8(std::ldexp(1.0f, expDist(gen)));
         }
     }
 #endif
@@ -659,6 +670,10 @@ int runGemm(size_t         m,
             bRef.resize(numB);
             for(size_t i = 0; i < numB; i++)
                 bRef[i] = static_cast<AccumulateT>(b[i / 2].getElement(i % 2));
+        }
+        else if constexpr(std::is_same_v<InputAT, Float4x2> || std::is_same_v<InputBT, Float4x2>)
+        {
+            throw std::runtime_error("Mixed FP4 / non-FP4 input is not supported.");
         }
         else
 #endif
