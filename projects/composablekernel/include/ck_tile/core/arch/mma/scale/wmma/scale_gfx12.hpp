@@ -43,14 +43,16 @@ struct amdgcn_mma<fp8_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
         IsScale16 ? "__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4"
                   : "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
 
-    template <typename ScaleVecType,
-              typename = std::enable_if_t<(IsScale16 && (std::is_same_v<ScaleVecType, e8m0x8_t>)) ||
-                                          (!IsScale16 && (std::is_same_v<ScaleVecType, e8m0x4_t>))>>
+    template <typename ScaleAVecType,
+              typename ScaleBVecType,
+              typename = std::enable_if_t<
+                  scale::detail::
+                      is_legal_combination<fp8_t, fp8_t, ScaleAVecType, ScaleBVecType, IsScale16>>>
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleVecType scaleA,
-                                        ScaleVecType scaleB)
+                                        ScaleAVecType scaleA,
+                                        ScaleBVecType scaleB)
     {
         if constexpr(IsScale16)
         {
@@ -62,10 +64,10 @@ struct amdgcn_mma<fp8_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int64_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int64_t>(scaleB),
                 false,
                 false)};
@@ -80,10 +82,10 @@ struct amdgcn_mma<fp8_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int32_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int32_t>(scaleB),
                 false,
                 false)};
@@ -113,14 +115,16 @@ struct amdgcn_mma<fp8_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
         IsScale16 ? "__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4"
                   : "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
 
-    template <typename ScaleVecType,
-              typename = std::enable_if_t<(IsScale16 && (std::is_same_v<ScaleVecType, e8m0x8_t>)) ||
-                                          (!IsScale16 && (std::is_same_v<ScaleVecType, e8m0x4_t>))>>
+    template <typename ScaleAVecType,
+              typename ScaleBVecType,
+              typename = std::enable_if_t<
+                  scale::detail::
+                      is_legal_combination<fp8_t, bf8_t, ScaleAVecType, ScaleBVecType, IsScale16>>>
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleVecType scaleA,
-                                        ScaleVecType scaleB)
+                                        ScaleAVecType scaleA,
+                                        ScaleBVecType scaleB)
     {
         if constexpr(IsScale16)
         {
@@ -132,10 +136,10 @@ struct amdgcn_mma<fp8_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int64_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int64_t>(scaleB),
                 false,
                 false)};
@@ -150,10 +154,10 @@ struct amdgcn_mma<fp8_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int32_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int32_t>(scaleB),
                 false,
                 false)};
@@ -183,14 +187,17 @@ struct amdgcn_mma<fp8_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
         IsScale16 ? "__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4"
                   : "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
 
-    template <typename ScaleVecType,
-              typename = std::enable_if_t<(IsScale16 && (std::is_same_v<ScaleVecType, e8m0x8_t>)) ||
-                                          (!IsScale16 && (std::is_same_v<ScaleVecType, e8m0x4_t>))>>
+    template <
+        typename ScaleAVecType,
+        typename ScaleBVecType,
+        typename = std::enable_if_t<
+            scale::detail::
+                is_legal_combination<fp8_t, pk_fp6x16_t, ScaleAVecType, ScaleBVecType, IsScale16>>>
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleVecType scaleA,
-                                        ScaleVecType scaleB)
+                                        ScaleAVecType scaleA,
+                                        ScaleBVecType scaleB)
     {
         // clang-format off
         int32x16_t b_padded = {bVec.data[0], bVec.data[1], bVec.data[2],  bVec.data[3],  bVec.data[4], bVec.data[5], bVec.data[6], bVec.data[7],
@@ -206,10 +213,10 @@ struct amdgcn_mma<fp8_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int64_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int64_t>(scaleB),
                 false,
                 false)};
@@ -224,10 +231,10 @@ struct amdgcn_mma<fp8_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int32_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int32_t>(scaleB),
                 false,
                 false)};
@@ -257,14 +264,17 @@ struct amdgcn_mma<fp8_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
         IsScale16 ? "__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4"
                   : "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
 
-    template <typename ScaleVecType,
-              typename = std::enable_if_t<(IsScale16 && (std::is_same_v<ScaleVecType, e8m0x8_t>)) ||
-                                          (!IsScale16 && (std::is_same_v<ScaleVecType, e8m0x4_t>))>>
+    template <
+        typename ScaleAVecType,
+        typename ScaleBVecType,
+        typename = std::enable_if_t<
+            scale::detail::
+                is_legal_combination<fp8_t, pk_bf6x16_t, ScaleAVecType, ScaleBVecType, IsScale16>>>
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleVecType scaleA,
-                                        ScaleVecType scaleB)
+                                        ScaleAVecType scaleA,
+                                        ScaleBVecType scaleB)
     {
         // clang-format off
         int32x16_t b_padded = {bVec.data[0], bVec.data[1], bVec.data[2],  bVec.data[3],  bVec.data[4], bVec.data[5], bVec.data[6], bVec.data[7],
@@ -280,10 +290,10 @@ struct amdgcn_mma<fp8_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int64_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int64_t>(scaleB),
                 false,
                 false)};
@@ -298,10 +308,10 @@ struct amdgcn_mma<fp8_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int32_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int32_t>(scaleB),
                 false,
                 false)};
@@ -335,12 +345,8 @@ struct amdgcn_mma<fp8_t, pk_fp4_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTa
         typename ScaleAVecType,
         typename ScaleBVecType,
         typename = std::enable_if_t<
-            (IsScale16 && (std::is_same_v<ScaleAVecType, e8m0x8_t>) &&
-             (std::is_same_v<ScaleBVecType, e8m0x8_t> || std::is_same_v<ScaleBVecType, e5m3x8_t> ||
-              std::is_same_v<ScaleBVecType, e4m3x8_t>)) ||
-            (!IsScale16 && (std::is_same_v<ScaleAVecType, e8m0x4_t>) &&
-             (std::is_same_v<ScaleBVecType, e8m0x4_t> || std::is_same_v<ScaleBVecType, e5m3x4_t> ||
-              std::is_same_v<ScaleBVecType, e4m3x4_t>))>>
+            scale::detail::
+                is_legal_combination<fp8_t, pk_fp4_t, ScaleAVecType, ScaleBVecType, IsScale16>>>
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
@@ -411,14 +417,16 @@ struct amdgcn_mma<bf8_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
         IsScale16 ? "__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4"
                   : "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
 
-    template <typename ScaleVecType,
-              typename = std::enable_if_t<(IsScale16 && (std::is_same_v<ScaleVecType, e8m0x8_t>)) ||
-                                          (!IsScale16 && (std::is_same_v<ScaleVecType, e8m0x4_t>))>>
+    template <typename ScaleAVecType,
+              typename ScaleBVecType,
+              typename = std::enable_if_t<
+                  scale::detail::
+                      is_legal_combination<bf8_t, fp8_t, ScaleAVecType, ScaleBVecType, IsScale16>>>
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleVecType scaleA,
-                                        ScaleVecType scaleB)
+                                        ScaleAVecType scaleA,
+                                        ScaleBVecType scaleB)
     {
         if constexpr(IsScale16)
         {
@@ -430,10 +438,10 @@ struct amdgcn_mma<bf8_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int64_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int64_t>(scaleB),
                 false,
                 false)};
@@ -448,10 +456,10 @@ struct amdgcn_mma<bf8_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int32_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int32_t>(scaleB),
                 false,
                 false)};
@@ -481,14 +489,16 @@ struct amdgcn_mma<bf8_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
         IsScale16 ? "__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4"
                   : "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
 
-    template <typename ScaleVecType,
-              typename = std::enable_if_t<(IsScale16 && (std::is_same_v<ScaleVecType, e8m0x8_t>)) ||
-                                          (!IsScale16 && (std::is_same_v<ScaleVecType, e8m0x4_t>))>>
+    template <typename ScaleAVecType,
+              typename ScaleBVecType,
+              typename = std::enable_if_t<
+                  scale::detail::
+                      is_legal_combination<bf8_t, bf8_t, ScaleAVecType, ScaleBVecType, IsScale16>>>
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleVecType scaleA,
-                                        ScaleVecType scaleB)
+                                        ScaleAVecType scaleA,
+                                        ScaleBVecType scaleB)
     {
         if constexpr(IsScale16)
         {
@@ -500,10 +510,10 @@ struct amdgcn_mma<bf8_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int64_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int64_t>(scaleB),
                 false,
                 false)};
@@ -518,10 +528,10 @@ struct amdgcn_mma<bf8_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int32_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int32_t>(scaleB),
                 false,
                 false)};
@@ -551,14 +561,17 @@ struct amdgcn_mma<bf8_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
         IsScale16 ? "__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4"
                   : "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
 
-    template <typename ScaleVecType,
-              typename = std::enable_if_t<(IsScale16 && (std::is_same_v<ScaleVecType, e8m0x8_t>)) ||
-                                          (!IsScale16 && (std::is_same_v<ScaleVecType, e8m0x4_t>))>>
+    template <
+        typename ScaleAVecType,
+        typename ScaleBVecType,
+        typename = std::enable_if_t<
+            scale::detail::
+                is_legal_combination<bf8_t, pk_fp6x16_t, ScaleAVecType, ScaleBVecType, IsScale16>>>
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleVecType scaleA,
-                                        ScaleVecType scaleB)
+                                        ScaleAVecType scaleA,
+                                        ScaleBVecType scaleB)
     {
         // clang-format off
         int32x16_t b_padded = {bVec.data[0], bVec.data[1], bVec.data[2],  bVec.data[3],  bVec.data[4], bVec.data[5], bVec.data[6], bVec.data[7],
@@ -574,10 +587,10 @@ struct amdgcn_mma<bf8_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int64_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int64_t>(scaleB),
                 false,
                 false)};
@@ -592,10 +605,10 @@ struct amdgcn_mma<bf8_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int32_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int32_t>(scaleB),
                 false,
                 false)};
@@ -625,14 +638,17 @@ struct amdgcn_mma<bf8_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
         IsScale16 ? "__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4"
                   : "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
 
-    template <typename ScaleVecType,
-              typename = std::enable_if_t<(IsScale16 && (std::is_same_v<ScaleVecType, e8m0x8_t>)) ||
-                                          (!IsScale16 && (std::is_same_v<ScaleVecType, e8m0x4_t>))>>
+    template <
+        typename ScaleAVecType,
+        typename ScaleBVecType,
+        typename = std::enable_if_t<
+            scale::detail::
+                is_legal_combination<bf8_t, pk_bf6x16_t, ScaleAVecType, ScaleBVecType, IsScale16>>>
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleVecType scaleA,
-                                        ScaleVecType scaleB)
+                                        ScaleAVecType scaleA,
+                                        ScaleBVecType scaleB)
     {
         // clang-format off
         int32x16_t b_padded = {bVec.data[0], bVec.data[1], bVec.data[2],  bVec.data[3],  bVec.data[4], bVec.data[5], bVec.data[6], bVec.data[7],
@@ -648,10 +664,10 @@ struct amdgcn_mma<bf8_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int64_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int64_t>(scaleB),
                 false,
                 false)};
@@ -666,10 +682,10 @@ struct amdgcn_mma<bf8_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int32_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int32_t>(scaleB),
                 false,
                 false)};
@@ -703,12 +719,8 @@ struct amdgcn_mma<bf8_t, pk_fp4_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTa
         typename ScaleAVecType,
         typename ScaleBVecType,
         typename = std::enable_if_t<
-            (IsScale16 && (std::is_same_v<ScaleAVecType, e8m0x8_t>) &&
-             (std::is_same_v<ScaleBVecType, e8m0x8_t> || std::is_same_v<ScaleBVecType, e5m3x8_t> ||
-              std::is_same_v<ScaleBVecType, e4m3x8_t>)) ||
-            (!IsScale16 && (std::is_same_v<ScaleAVecType, e8m0x4_t>) &&
-             (std::is_same_v<ScaleBVecType, e8m0x4_t> || std::is_same_v<ScaleBVecType, e5m3x4_t> ||
-              std::is_same_v<ScaleBVecType, e4m3x4_t>))>>
+            scale::detail::
+                is_legal_combination<bf8_t, pk_fp4_t, ScaleAVecType, ScaleBVecType, IsScale16>>>
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
@@ -779,14 +791,17 @@ struct amdgcn_mma<pk_fp6x16_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
         IsScale16 ? "__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4"
                   : "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
 
-    template <typename ScaleVecType,
-              typename = std::enable_if_t<(IsScale16 && (std::is_same_v<ScaleVecType, e8m0x8_t>)) ||
-                                          (!IsScale16 && (std::is_same_v<ScaleVecType, e8m0x4_t>))>>
+    template <
+        typename ScaleAVecType,
+        typename ScaleBVecType,
+        typename = std::enable_if_t<
+            scale::detail::
+                is_legal_combination<pk_fp6x16_t, fp8_t, ScaleAVecType, ScaleBVecType, IsScale16>>>
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleVecType scaleA,
-                                        ScaleVecType scaleB)
+                                        ScaleAVecType scaleA,
+                                        ScaleBVecType scaleB)
     {
         // clang-format off
         int32x16_t a_padded = {aVec.data[0], aVec.data[1], aVec.data[2],  aVec.data[3],  aVec.data[4], aVec.data[5], aVec.data[6], aVec.data[7],
@@ -802,10 +817,10 @@ struct amdgcn_mma<pk_fp6x16_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int64_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int64_t>(scaleB),
                 false,
                 false)};
@@ -820,10 +835,10 @@ struct amdgcn_mma<pk_fp6x16_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int32_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int32_t>(scaleB),
                 false,
                 false)};
@@ -853,14 +868,17 @@ struct amdgcn_mma<pk_fp6x16_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
         IsScale16 ? "__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4"
                   : "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
 
-    template <typename ScaleVecType,
-              typename = std::enable_if_t<(IsScale16 && (std::is_same_v<ScaleVecType, e8m0x8_t>)) ||
-                                          (!IsScale16 && (std::is_same_v<ScaleVecType, e8m0x4_t>))>>
+    template <
+        typename ScaleAVecType,
+        typename ScaleBVecType,
+        typename = std::enable_if_t<
+            scale::detail::
+                is_legal_combination<pk_fp6x16_t, bf8_t, ScaleAVecType, ScaleBVecType, IsScale16>>>
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleVecType scaleA,
-                                        ScaleVecType scaleB)
+                                        ScaleAVecType scaleA,
+                                        ScaleBVecType scaleB)
     {
         // clang-format off
         int32x16_t a_padded = {aVec.data[0], aVec.data[1], aVec.data[2],  aVec.data[3],  aVec.data[4], aVec.data[5], aVec.data[6], aVec.data[7],
@@ -876,10 +894,10 @@ struct amdgcn_mma<pk_fp6x16_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int64_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int64_t>(scaleB),
                 false,
                 false)};
@@ -894,10 +912,10 @@ struct amdgcn_mma<pk_fp6x16_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int32_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int32_t>(scaleB),
                 false,
                 false)};
@@ -927,14 +945,18 @@ struct amdgcn_mma<pk_fp6x16_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
         IsScale16 ? "__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4"
                   : "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
 
-    template <typename ScaleVecType,
-              typename = std::enable_if_t<(IsScale16 && (std::is_same_v<ScaleVecType, e8m0x8_t>)) ||
-                                          (!IsScale16 && (std::is_same_v<ScaleVecType, e8m0x4_t>))>>
+    template <typename ScaleAVecType,
+              typename ScaleBVecType,
+              typename = std::enable_if_t<scale::detail::is_legal_combination<pk_fp6x16_t,
+                                                                              pk_fp6x16_t,
+                                                                              ScaleAVecType,
+                                                                              ScaleBVecType,
+                                                                              IsScale16>>>
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleVecType scaleA,
-                                        ScaleVecType scaleB)
+                                        ScaleAVecType scaleA,
+                                        ScaleBVecType scaleB)
     {
         // clang-format off
         int32x16_t a_padded = {aVec.data[0], aVec.data[1], aVec.data[2],  aVec.data[3],  aVec.data[4], aVec.data[5], aVec.data[6], aVec.data[7],
@@ -952,10 +974,10 @@ struct amdgcn_mma<pk_fp6x16_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int64_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int64_t>(scaleB),
                 false,
                 false)};
@@ -970,10 +992,10 @@ struct amdgcn_mma<pk_fp6x16_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int32_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int32_t>(scaleB),
                 false,
                 false)};
@@ -1003,14 +1025,18 @@ struct amdgcn_mma<pk_fp6x16_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
         IsScale16 ? "__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4"
                   : "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
 
-    template <typename ScaleVecType,
-              typename = std::enable_if_t<(IsScale16 && (std::is_same_v<ScaleVecType, e8m0x8_t>)) ||
-                                          (!IsScale16 && (std::is_same_v<ScaleVecType, e8m0x4_t>))>>
+    template <typename ScaleAVecType,
+              typename ScaleBVecType,
+              typename = std::enable_if_t<scale::detail::is_legal_combination<pk_fp6x16_t,
+                                                                              pk_bf6x16_t,
+                                                                              ScaleAVecType,
+                                                                              ScaleBVecType,
+                                                                              IsScale16>>>
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleVecType scaleA,
-                                        ScaleVecType scaleB)
+                                        ScaleAVecType scaleA,
+                                        ScaleBVecType scaleB)
     {
         // clang-format off
         int32x16_t a_padded = {aVec.data[0], aVec.data[1], aVec.data[2],  aVec.data[3],  aVec.data[4], aVec.data[5], aVec.data[6], aVec.data[7],
@@ -1028,10 +1054,10 @@ struct amdgcn_mma<pk_fp6x16_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int64_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int64_t>(scaleB),
                 false,
                 false)};
@@ -1046,10 +1072,10 @@ struct amdgcn_mma<pk_fp6x16_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int32_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int32_t>(scaleB),
                 false,
                 false)};
@@ -1079,16 +1105,13 @@ struct amdgcn_mma<pk_fp6x16_t, pk_fp4_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Comp
         IsScale16 ? "__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4"
                   : "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
 
-    template <
-        typename ScaleAVecType,
-        typename ScaleBVecType,
-        typename = std::enable_if_t<
-            (IsScale16 && (std::is_same_v<ScaleAVecType, e8m0x8_t>) &&
-             (std::is_same_v<ScaleBVecType, e8m0x8_t> || std::is_same_v<ScaleBVecType, e5m3x8_t> ||
-              std::is_same_v<ScaleBVecType, e4m3x8_t>)) ||
-            (!IsScale16 && (std::is_same_v<ScaleAVecType, e8m0x4_t>) &&
-             (std::is_same_v<ScaleBVecType, e8m0x4_t> || std::is_same_v<ScaleBVecType, e5m3x4_t> ||
-              std::is_same_v<ScaleBVecType, e4m3x4_t>))>>
+    template <typename ScaleAVecType,
+              typename ScaleBVecType,
+              typename = std::enable_if_t<scale::detail::is_legal_combination<pk_fp6x16_t,
+                                                                              pk_fp4_t,
+                                                                              ScaleAVecType,
+                                                                              ScaleBVecType,
+                                                                              IsScale16>>>
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
@@ -1163,14 +1186,17 @@ struct amdgcn_mma<pk_bf6x16_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
         IsScale16 ? "__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4"
                   : "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
 
-    template <typename ScaleVecType,
-              typename = std::enable_if_t<(IsScale16 && (std::is_same_v<ScaleVecType, e8m0x8_t>)) ||
-                                          (!IsScale16 && (std::is_same_v<ScaleVecType, e8m0x4_t>))>>
+    template <
+        typename ScaleAVecType,
+        typename ScaleBVecType,
+        typename = std::enable_if_t<
+            scale::detail::
+                is_legal_combination<pk_bf6x16_t, fp8_t, ScaleAVecType, ScaleBVecType, IsScale16>>>
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleVecType scaleA,
-                                        ScaleVecType scaleB)
+                                        ScaleAVecType scaleA,
+                                        ScaleBVecType scaleB)
     {
         // clang-format off
         int32x16_t a_padded = {aVec.data[0], aVec.data[1], aVec.data[2],  aVec.data[3],  aVec.data[4], aVec.data[5], aVec.data[6], aVec.data[7],
@@ -1186,10 +1212,10 @@ struct amdgcn_mma<pk_bf6x16_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int64_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int64_t>(scaleB),
                 false,
                 false)};
@@ -1204,10 +1230,10 @@ struct amdgcn_mma<pk_bf6x16_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int32_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int32_t>(scaleB),
                 false,
                 false)};
@@ -1237,14 +1263,17 @@ struct amdgcn_mma<pk_bf6x16_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
         IsScale16 ? "__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4"
                   : "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
 
-    template <typename ScaleVecType,
-              typename = std::enable_if_t<(IsScale16 && (std::is_same_v<ScaleVecType, e8m0x8_t>)) ||
-                                          (!IsScale16 && (std::is_same_v<ScaleVecType, e8m0x4_t>))>>
+    template <
+        typename ScaleAVecType,
+        typename ScaleBVecType,
+        typename = std::enable_if_t<
+            scale::detail::
+                is_legal_combination<pk_bf6x16_t, bf8_t, ScaleAVecType, ScaleBVecType, IsScale16>>>
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleVecType scaleA,
-                                        ScaleVecType scaleB)
+                                        ScaleAVecType scaleA,
+                                        ScaleBVecType scaleB)
     {
         // clang-format off
         int32x16_t a_padded = {aVec.data[0], aVec.data[1], aVec.data[2],  aVec.data[3],  aVec.data[4], aVec.data[5], aVec.data[6], aVec.data[7],
@@ -1260,10 +1289,10 @@ struct amdgcn_mma<pk_bf6x16_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int64_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int64_t>(scaleB),
                 false,
                 false)};
@@ -1278,10 +1307,10 @@ struct amdgcn_mma<pk_bf6x16_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int32_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int32_t>(scaleB),
                 false,
                 false)};
@@ -1311,14 +1340,18 @@ struct amdgcn_mma<pk_bf6x16_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
         IsScale16 ? "__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4"
                   : "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
 
-    template <typename ScaleVecType,
-              typename = std::enable_if_t<(IsScale16 && (std::is_same_v<ScaleVecType, e8m0x8_t>)) ||
-                                          (!IsScale16 && (std::is_same_v<ScaleVecType, e8m0x4_t>))>>
+    template <typename ScaleAVecType,
+              typename ScaleBVecType,
+              typename = std::enable_if_t<scale::detail::is_legal_combination<pk_bf6x16_t,
+                                                                              pk_fp6x16_t,
+                                                                              ScaleAVecType,
+                                                                              ScaleBVecType,
+                                                                              IsScale16>>>
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleVecType scaleA,
-                                        ScaleVecType scaleB)
+                                        ScaleAVecType scaleA,
+                                        ScaleBVecType scaleB)
     {
         // clang-format off
         int32x16_t a_padded = {aVec.data[0], aVec.data[1], aVec.data[2],  aVec.data[3],  aVec.data[4], aVec.data[5], aVec.data[6], aVec.data[7],
@@ -1336,10 +1369,10 @@ struct amdgcn_mma<pk_bf6x16_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int64_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int64_t>(scaleB),
                 false,
                 false)};
@@ -1354,10 +1387,10 @@ struct amdgcn_mma<pk_bf6x16_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int32_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int32_t>(scaleB),
                 false,
                 false)};
@@ -1387,14 +1420,18 @@ struct amdgcn_mma<pk_bf6x16_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
         IsScale16 ? "__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4"
                   : "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
 
-    template <typename ScaleVecType,
-              typename = std::enable_if_t<(IsScale16 && (std::is_same_v<ScaleVecType, e8m0x8_t>)) ||
-                                          (!IsScale16 && (std::is_same_v<ScaleVecType, e8m0x4_t>))>>
+    template <typename ScaleAVecType,
+              typename ScaleBVecType,
+              typename = std::enable_if_t<scale::detail::is_legal_combination<pk_bf6x16_t,
+                                                                              pk_bf6x16_t,
+                                                                              ScaleAVecType,
+                                                                              ScaleBVecType,
+                                                                              IsScale16>>>
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleVecType scaleA,
-                                        ScaleVecType scaleB)
+                                        ScaleAVecType scaleA,
+                                        ScaleBVecType scaleB)
     {
         // clang-format off
         int32x16_t a_padded = {aVec.data[0], aVec.data[1], aVec.data[2],  aVec.data[3],  aVec.data[4], aVec.data[5], aVec.data[6], aVec.data[7],
@@ -1412,10 +1449,10 @@ struct amdgcn_mma<pk_bf6x16_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int64_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int64_t>(scaleB),
                 false,
                 false)};
@@ -1430,10 +1467,10 @@ struct amdgcn_mma<pk_bf6x16_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int32_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int32_t>(scaleB),
                 false,
                 false)};
@@ -1463,16 +1500,13 @@ struct amdgcn_mma<pk_bf6x16_t, pk_fp4_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Comp
         IsScale16 ? "__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4"
                   : "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
 
-    template <
-        typename ScaleAVecType,
-        typename ScaleBVecType,
-        typename = std::enable_if_t<
-            (IsScale16 && (std::is_same_v<ScaleAVecType, e8m0x8_t>) &&
-             (std::is_same_v<ScaleBVecType, e8m0x8_t> || std::is_same_v<ScaleBVecType, e5m3x8_t> ||
-              std::is_same_v<ScaleBVecType, e4m3x8_t>)) ||
-            (!IsScale16 && (std::is_same_v<ScaleAVecType, e8m0x4_t>) &&
-             (std::is_same_v<ScaleBVecType, e8m0x4_t> || std::is_same_v<ScaleBVecType, e5m3x4_t> ||
-              std::is_same_v<ScaleBVecType, e4m3x4_t>))>>
+    template <typename ScaleAVecType,
+              typename ScaleBVecType,
+              typename = std::enable_if_t<scale::detail::is_legal_combination<pk_bf6x16_t,
+                                                                              pk_fp4_t,
+                                                                              ScaleAVecType,
+                                                                              ScaleBVecType,
+                                                                              IsScale16>>>
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
@@ -1551,14 +1585,8 @@ struct amdgcn_mma<pk_fp4_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTa
         typename ScaleAVecType,
         typename ScaleBVecType,
         typename = std::enable_if_t<
-            (IsScale16 &&
-             (std::is_same_v<ScaleAVecType, e8m0x8_t> || std::is_same_v<ScaleAVecType, e5m3x8_t> ||
-              std::is_same_v<ScaleAVecType, e4m3x8_t>) &&
-             (std::is_same_v<ScaleBVecType, e8m0x8_t>)) ||
-            (!IsScale16 &&
-             (std::is_same_v<ScaleAVecType, e8m0x4_t> || std::is_same_v<ScaleAVecType, e5m3x4_t> ||
-              std::is_same_v<ScaleAVecType, e4m3x4_t>) &&
-             (std::is_same_v<ScaleBVecType, e8m0x4_t>))>>
+            scale::detail::
+                is_legal_combination<pk_fp4_t, fp8_t, ScaleAVecType, ScaleBVecType, IsScale16>>>
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
@@ -1633,14 +1661,8 @@ struct amdgcn_mma<pk_fp4_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTa
         typename ScaleAVecType,
         typename ScaleBVecType,
         typename = std::enable_if_t<
-            (IsScale16 &&
-             (std::is_same_v<ScaleAVecType, e8m0x8_t> || std::is_same_v<ScaleAVecType, e5m3x8_t> ||
-              std::is_same_v<ScaleAVecType, e4m3x8_t>) &&
-             (std::is_same_v<ScaleBVecType, e8m0x8_t>)) ||
-            (!IsScale16 &&
-             (std::is_same_v<ScaleAVecType, e8m0x4_t> || std::is_same_v<ScaleAVecType, e5m3x4_t> ||
-              std::is_same_v<ScaleAVecType, e4m3x4_t>) &&
-             (std::is_same_v<ScaleBVecType, e8m0x4_t>))>>
+            scale::detail::
+                is_legal_combination<pk_fp4_t, bf8_t, ScaleAVecType, ScaleBVecType, IsScale16>>>
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
@@ -1711,18 +1733,13 @@ struct amdgcn_mma<pk_fp4_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Comp
         IsScale16 ? "__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4"
                   : "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
 
-    template <
-        typename ScaleAVecType,
-        typename ScaleBVecType,
-        typename = std::enable_if_t<
-            (IsScale16 &&
-             (std::is_same_v<ScaleAVecType, e8m0x8_t> || std::is_same_v<ScaleAVecType, e5m3x8_t> ||
-              std::is_same_v<ScaleAVecType, e4m3x8_t>) &&
-             (std::is_same_v<ScaleBVecType, e8m0x8_t>)) ||
-            (!IsScale16 &&
-             (std::is_same_v<ScaleAVecType, e8m0x4_t> || std::is_same_v<ScaleAVecType, e5m3x4_t> ||
-              std::is_same_v<ScaleAVecType, e4m3x4_t>) &&
-             (std::is_same_v<ScaleBVecType, e8m0x4_t>))>>
+    template <typename ScaleAVecType,
+              typename ScaleBVecType,
+              typename = std::enable_if_t<scale::detail::is_legal_combination<pk_fp4_t,
+                                                                              pk_fp6x16_t,
+                                                                              ScaleAVecType,
+                                                                              ScaleBVecType,
+                                                                              IsScale16>>>
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
@@ -1797,18 +1814,13 @@ struct amdgcn_mma<pk_fp4_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Comp
         IsScale16 ? "__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4"
                   : "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
 
-    template <
-        typename ScaleAVecType,
-        typename ScaleBVecType,
-        typename = std::enable_if_t<
-            (IsScale16 &&
-             (std::is_same_v<ScaleAVecType, e8m0x8_t> || std::is_same_v<ScaleAVecType, e5m3x8_t> ||
-              std::is_same_v<ScaleAVecType, e4m3x8_t>) &&
-             (std::is_same_v<ScaleBVecType, e8m0x8_t>)) ||
-            (!IsScale16 &&
-             (std::is_same_v<ScaleAVecType, e8m0x4_t> || std::is_same_v<ScaleAVecType, e5m3x4_t> ||
-              std::is_same_v<ScaleAVecType, e4m3x4_t>) &&
-             (std::is_same_v<ScaleBVecType, e8m0x4_t>))>>
+    template <typename ScaleAVecType,
+              typename ScaleBVecType,
+              typename = std::enable_if_t<scale::detail::is_legal_combination<pk_fp4_t,
+                                                                              pk_bf6x16_t,
+                                                                              ScaleAVecType,
+                                                                              ScaleBVecType,
+                                                                              IsScale16>>>
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
@@ -1883,18 +1895,17 @@ struct amdgcn_mma<pk_fp4_t, pk_fp4_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
         IsScale16 ? "__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4"
                   : "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
 
-    template <typename ScaleVecType,
-              typename = std::enable_if_t<(IsScale16 && (std::is_same_v<ScaleVecType, e8m0x8_t> ||
-                                                         std::is_same_v<ScaleVecType, e5m3x8_t> ||
-                                                         std::is_same_v<ScaleVecType, e4m3x8_t>)) ||
-                                          (!IsScale16 && (std::is_same_v<ScaleVecType, e8m0x4_t> ||
-                                                          std::is_same_v<ScaleVecType, e5m3x4_t> ||
-                                                          std::is_same_v<ScaleVecType, e4m3x4_t>))>>
+    template <
+        typename ScaleAVecType,
+        typename ScaleBVecType,
+        typename = std::enable_if_t<
+            scale::detail::
+                is_legal_combination<pk_fp4_t, pk_fp4_t, ScaleAVecType, ScaleBVecType, IsScale16>>>
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleVecType scaleA,
-                                        ScaleVecType scaleB)
+                                        ScaleAVecType scaleA,
+                                        ScaleBVecType scaleB)
     {
         int32x8_t a8        = bit_cast<int32x8_t>(aVec);
         int32x8_t b8        = bit_cast<int32x8_t>(bVec);
@@ -1912,10 +1923,10 @@ struct amdgcn_mma<pk_fp4_t, pk_fp4_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int64_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int64_t>(scaleB),
                 false,
                 false)};
@@ -1930,10 +1941,10 @@ struct amdgcn_mma<pk_fp4_t, pk_fp4_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
                 0,
                 cVec,
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleAVecType::value_type>,
                 bit_cast<int32_t>(scaleA),
                 0,
-                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleBVecType::value_type>,
                 bit_cast<int32_t>(scaleB),
                 false,
                 false)};

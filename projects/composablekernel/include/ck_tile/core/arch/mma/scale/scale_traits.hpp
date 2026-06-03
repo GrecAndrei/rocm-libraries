@@ -4,13 +4,16 @@
 #pragma once
 
 #include "ck_tile/core/arch/arch.hpp"
+#include "ck_tile/core/arch/mma/mma_data_format.hpp"
 #include "ck_tile/core/config.hpp"
 #include "ck_tile/core/numeric/e4m3.hpp"
 #include "ck_tile/core/numeric/e5m3.hpp"
 #include "ck_tile/core/numeric/e8m0.hpp"
 #include "ck_tile/core/numeric/integer.hpp"
+#include "ck_tile/core/numeric/pk_fp4.hpp"
 
 #include <stdio.h>
+#include <type_traits>
 #if CK_TILE_CONCEPTS && CK_TILE_CONCEPTS_HEADER
 #include <concepts>
 #endif // CK_TILE_CONCEPTS && CK_TILE_CONCEPTS_HEADER
@@ -101,6 +104,46 @@ struct ScaleTypeToFlag<e4m3_t>
 
 template <typename T>
 inline constexpr int32_t ScaleTypeToFlag_v = ScaleTypeToFlag<T>::value;
+
+template <typename DataType, typename ScaleVecType, bool IsScale16, typename = void>
+inline constexpr bool is_valid_ScaleVecType = false;
+
+template <typename ScaleVecType>
+inline constexpr bool is_valid_ScaleVecType<pk_fp4_t, ScaleVecType, true, void> =
+    std::is_same_v<ScaleVecType, e8m0x8_t> || std::is_same_v<ScaleVecType, e5m3x8_t> ||
+    std::is_same_v<ScaleVecType, e4m3x8_t>;
+
+template <typename ScaleVecType>
+inline constexpr bool is_valid_ScaleVecType<pk_fp4_t, ScaleVecType, false, void> =
+    std::is_same_v<ScaleVecType, e8m0x4_t> || std::is_same_v<ScaleVecType, e5m3x4_t> ||
+    std::is_same_v<ScaleVecType, e4m3x4_t>;
+
+template <typename DataType, typename ScaleVecType>
+inline constexpr bool
+    is_valid_ScaleVecType<DataType,
+                          ScaleVecType,
+                          true,
+                          std::void_t<decltype(PackedDataTypeToFlag<DataType>::value)>> =
+        std::is_same_v<ScaleVecType, e8m0x8_t>;
+
+template <typename DataType, typename ScaleVecType>
+inline constexpr bool
+    is_valid_ScaleVecType<DataType,
+                          ScaleVecType,
+                          false,
+                          std::void_t<decltype(PackedDataTypeToFlag<DataType>::value)>> =
+        std::is_same_v<ScaleVecType, e8m0x4_t>;
+
+template <typename ADataType,
+          typename BDataType,
+          typename ScaleAVecType,
+          typename ScaleBVecType,
+          bool IsScale16>
+inline constexpr bool is_legal_combination =
+    is_valid_ScaleVecType<ADataType, ScaleAVecType, IsScale16> &&
+    is_valid_ScaleVecType<BDataType, ScaleBVecType, IsScale16> &&
+    (!(std::is_same_v<ADataType, pk_fp4_t> && std::is_same_v<BDataType, pk_fp4_t>) ||
+     std::is_same_v<ScaleAVecType, ScaleBVecType>);
 
 } // namespace scale::detail
 
