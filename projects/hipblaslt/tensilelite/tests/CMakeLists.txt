@@ -460,48 +460,9 @@ if(NOT WIN32)
     set_tests_properties("CPUGemm.slow_f32_MX32_Rejected" PROPERTIES WILL_FAIL TRUE)
 endif()
 
-#################################################
-#        FP8 tests (slow path only)             #
-#################################################
-if(NOT WIN32)
-    foreach(TYPE f8 bf8 f8fnuz bf8fnuz)
-        # Transpose combos
-        foreach(TRANS NN TN NT TT)
-            get_trans_flags(${TRANS} TFLAGS)
-            add_cpu_gemm_test(slow_${TYPE}_${TRANS}
-                ARGS ${F16_SIZES} ${TFLAGS} --type ${TYPE} --validate
-            )
-        endforeach()
-
-        # Feature tests
-        add_cpu_gemm_test(slow_${TYPE}_Beta
-            ARGS ${F16_SIZES} --type ${TYPE} --beta 1.0 --validate
-        )
-        add_cpu_gemm_test(slow_${TYPE}_Beta_Half
-            ARGS ${F16_SIZES} --type ${TYPE} --beta 0.5 --validate
-        )
-        add_cpu_gemm_test(slow_${TYPE}_Bias
-            ARGS ${F16_SIZES} --type ${TYPE} --validate --bias
-        )
-        add_cpu_gemm_test(slow_${TYPE}_AllFeatures
-            ARGS ${F16_SIZES} --type ${TYPE} --validate --bias --activation relu --scaleAlphaVec
-        )
-        add_cpu_gemm_test(slow_${TYPE}_TN_AllFeatures
-            ARGS ${F16_SIZES} --transA --type ${TYPE} --validate --bias --activation relu --scaleAlphaVec
-        )
-
-        # ScaleAB tests
-        foreach(MODE Scalar Vector)
-            add_cpu_gemm_test(slow_${TYPE}_ScaleAB_${MODE}
-                ARGS ${F16_SIZES} --type ${TYPE} --validate --useScaleAB ${MODE}
-            )
-        endforeach()
-    endforeach()
-
-    # Negative test: --tryFastPath must fail for FP8 (fast path doesn't support it)
-    add_test(
-        NAME "CPUGemm.fast_f8_Rejected"
-        COMMAND cpu-gemm-driver -M 16 -N 16 -K 16 --type f8 --tryFastPath --validate
-    )
-    set_tests_properties("CPUGemm.fast_f8_Rejected" PROPERTIES WILL_FAIL TRUE)
-endif()
+# NOTE: An older "FP8 tests (slow path only)" block was removed during the
+# develop-rebase as redundant. The "FP8 tests (fast & slow)" section above
+# already produces slow_f8_* / slow_bf8_* / etc. via its PATH loop.
+# The "fast_f8_Rejected" negative test was also removed because the FP8 fast
+# path is now supported (added by commit 8ca66a659aa, "initial fast path
+# support") and the matching positive tests fast_f8_* are already emitted.
