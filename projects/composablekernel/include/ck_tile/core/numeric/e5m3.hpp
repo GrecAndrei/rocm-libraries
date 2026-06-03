@@ -4,6 +4,7 @@
 #pragma once
 
 #include "ck_tile/core/config.hpp"
+#include "ck_tile/core/container/array.hpp"
 #include "ck_tile/core/numeric/integer.hpp"
 #include "ck_tile/core/numeric/mxfp_convert.hpp"
 #include "ck_tile/core/numeric/numeric.hpp"
@@ -89,5 +90,8 @@ CK_TILE_HOST_DEVICE e5m3_bexp_t::operator float() const
     return ScaleUtils<5, 3>::decode(this->data);
 #endif
 }
+
+using e5m3x4_t = array<e5m3_t, 4>;
+using e5m3x8_t = array<e5m3_t, 8>;
 
 } // namespace ck_tile

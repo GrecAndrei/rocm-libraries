@@ -7,6 +7,7 @@
 #include "ck_tile/core/arch/mma/amdgcn_mma.hpp"
 #include "ck_tile/core/arch/mma/mma_data_format.hpp"
 #include "ck_tile/core/arch/mma/mma_op_family.hpp"
+#include "ck_tile/core/arch/mma/scale/scale_traits.hpp"
 #include "ck_tile/core/arch/mma/wmma/wmma_traits.hpp"
 #include "ck_tile/core/config.hpp"
 #include "ck_tile/core/numeric/float8.hpp"
@@ -53,38 +54,39 @@ struct amdgcn_mma<fp8_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
     {
         if constexpr(IsScale16)
         {
-            return {
-                __builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4(PackedDataTypeToFlag_v<fp8_t>,
-                                                                   bit_cast<int32x16_t>(aVec),
-                                                                   PackedDataTypeToFlag_v<fp8_t>,
-                                                                   bit_cast<int32x16_t>(bVec),
-                                                                   0,
-                                                                   cVec,
-                                                                   0,
-                                                                   0,
-                                                                   bit_cast<int64_t>(scaleA),
-                                                                   0,
-                                                                   0,
-                                                                   bit_cast<int64_t>(scaleB),
-                                                                   false,
-                                                                   false)};
+            return {__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4(
+                PackedDataTypeToFlag_v<fp8_t>,
+                bit_cast<int32x16_t>(aVec),
+                PackedDataTypeToFlag_v<fp8_t>,
+                bit_cast<int32x16_t>(bVec),
+                0,
+                cVec,
+                0,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                bit_cast<int64_t>(scaleA),
+                0,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                bit_cast<int64_t>(scaleB),
+                false,
+                false)};
         }
         else
         {
-            return {__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4(PackedDataTypeToFlag_v<fp8_t>,
-                                                                     bit_cast<int32x16_t>(aVec),
-                                                                     PackedDataTypeToFlag_v<fp8_t>,
-                                                                     bit_cast<int32x16_t>(bVec),
-                                                                     0,
-                                                                     cVec,
-                                                                     0,
-                                                                     0,
-                                                                     bit_cast<int32_t>(scaleA),
-                                                                     0,
-                                                                     0,
-                                                                     bit_cast<int32_t>(scaleB),
-                                                                     false,
-                                                                     false)};
+            return {__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4(
+                PackedDataTypeToFlag_v<fp8_t>,
+                bit_cast<int32x16_t>(aVec),
+                PackedDataTypeToFlag_v<fp8_t>,
+                bit_cast<int32x16_t>(bVec),
+                0,
+                cVec,
+                0,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                bit_cast<int32_t>(scaleA),
+                0,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                bit_cast<int32_t>(scaleB),
+                false,
+                false)};
         }
     }
 };
@@ -122,38 +124,39 @@ struct amdgcn_mma<bf8_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
     {
         if constexpr(IsScale16)
         {
-            return {
-                __builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4(PackedDataTypeToFlag_v<bf8_t>,
-                                                                   bit_cast<int32x16_t>(aVec),
-                                                                   PackedDataTypeToFlag_v<bf8_t>,
-                                                                   bit_cast<int32x16_t>(bVec),
-                                                                   0,
-                                                                   cVec,
-                                                                   0,
-                                                                   0,
-                                                                   bit_cast<int64_t>(scaleA),
-                                                                   0,
-                                                                   0,
-                                                                   bit_cast<int64_t>(scaleB),
-                                                                   false,
-                                                                   false)};
+            return {__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4(
+                PackedDataTypeToFlag_v<bf8_t>,
+                bit_cast<int32x16_t>(aVec),
+                PackedDataTypeToFlag_v<bf8_t>,
+                bit_cast<int32x16_t>(bVec),
+                0,
+                cVec,
+                0,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                bit_cast<int64_t>(scaleA),
+                0,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                bit_cast<int64_t>(scaleB),
+                false,
+                false)};
         }
         else
         {
-            return {__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4(PackedDataTypeToFlag_v<bf8_t>,
-                                                                     bit_cast<int32x16_t>(aVec),
-                                                                     PackedDataTypeToFlag_v<bf8_t>,
-                                                                     bit_cast<int32x16_t>(bVec),
-                                                                     0,
-                                                                     cVec,
-                                                                     0,
-                                                                     0,
-                                                                     bit_cast<int32_t>(scaleA),
-                                                                     0,
-                                                                     0,
-                                                                     bit_cast<int32_t>(scaleB),
-                                                                     false,
-                                                                     false)};
+            return {__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4(
+                PackedDataTypeToFlag_v<bf8_t>,
+                bit_cast<int32x16_t>(aVec),
+                PackedDataTypeToFlag_v<bf8_t>,
+                bit_cast<int32x16_t>(bVec),
+                0,
+                cVec,
+                0,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                bit_cast<int32_t>(scaleA),
+                0,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                bit_cast<int32_t>(scaleB),
+                false,
+                false)};
         }
     }
 };
@@ -205,10 +208,10 @@ struct amdgcn_mma<pk_fp6x16_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
                 0,
                 cVec,
                 0,
-                0,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
                 bit_cast<int64_t>(scaleA),
                 0,
-                0,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
                 bit_cast<int64_t>(scaleB),
                 false,
                 false)};
@@ -223,10 +226,10 @@ struct amdgcn_mma<pk_fp6x16_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
                 0,
                 cVec,
                 0,
-                0,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
                 bit_cast<int32_t>(scaleA),
                 0,
-                0,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
                 bit_cast<int32_t>(scaleB),
                 false,
                 false)};
@@ -281,10 +284,10 @@ struct amdgcn_mma<pk_bf6x16_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
                 0,
                 cVec,
                 0,
-                0,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
                 bit_cast<int64_t>(scaleA),
                 0,
-                0,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
                 bit_cast<int64_t>(scaleB),
                 false,
                 false)};
@@ -299,10 +302,10 @@ struct amdgcn_mma<pk_bf6x16_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
                 0,
                 cVec,
                 0,
-                0,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
                 bit_cast<int32_t>(scaleA),
                 0,
-                0,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
                 bit_cast<int32_t>(scaleB),
                 false,
                 false)};
@@ -333,8 +336,12 @@ struct amdgcn_mma<pk_fp4_t, pk_fp4_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
                   : "__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4";
 
     template <typename ScaleVecType,
-              typename = std::enable_if_t<(IsScale16 && (std::is_same_v<ScaleVecType, e8m0x8_t>)) ||
-                                          (!IsScale16 && (std::is_same_v<ScaleVecType, e8m0x4_t>))>>
+              typename = std::enable_if_t<(IsScale16 && (std::is_same_v<ScaleVecType, e8m0x8_t> ||
+                                                         std::is_same_v<ScaleVecType, e5m3x8_t> ||
+                                                         std::is_same_v<ScaleVecType, e4m3x8_t>)) ||
+                                          (!IsScale16 && (std::is_same_v<ScaleVecType, e8m0x4_t> ||
+                                                          std::is_same_v<ScaleVecType, e5m3x4_t> ||
+                                                          std::is_same_v<ScaleVecType, e4m3x4_t>))>>
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
@@ -349,39 +356,39 @@ struct amdgcn_mma<pk_fp4_t, pk_fp4_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
             b8[0], b8[1], b8[2], b8[3], b8[4], b8[5], b8[6], b8[7], 0, 0, 0, 0, 0, 0, 0, 0};
         if constexpr(IsScale16)
         {
-            return {
-                __builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4(PackedDataTypeToFlag_v<pk_fp4_t>,
-                                                                   a_padded,
-                                                                   PackedDataTypeToFlag_v<pk_fp4_t>,
-                                                                   b_padded,
-                                                                   0,
-                                                                   cVec,
-                                                                   0,
-                                                                   0,
-                                                                   bit_cast<int64_t>(scaleA),
-                                                                   0,
-                                                                   0,
-                                                                   bit_cast<int64_t>(scaleB),
-                                                                   false,
-                                                                   false)};
+            return {__builtin_amdgcn_wmma_scale16_f32_16x16x128_f8f6f4(
+                PackedDataTypeToFlag_v<pk_fp4_t>,
+                a_padded,
+                PackedDataTypeToFlag_v<pk_fp4_t>,
+                b_padded,
+                0,
+                cVec,
+                0,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                bit_cast<int64_t>(scaleA),
+                0,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                bit_cast<int64_t>(scaleB),
+                false,
+                false)};
         }
         else
         {
-            return {
-                __builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4(PackedDataTypeToFlag_v<pk_fp4_t>,
-                                                                 a_padded,
-                                                                 PackedDataTypeToFlag_v<pk_fp4_t>,
-                                                                 b_padded,
-                                                                 0,
-                                                                 cVec,
-                                                                 0,
-                                                                 0,
-                                                                 bit_cast<int32_t>(scaleA),
-                                                                 0,
-                                                                 0,
-                                                                 bit_cast<int32_t>(scaleB),
-                                                                 false,
-                                                                 false)};
+            return {__builtin_amdgcn_wmma_scale_f32_16x16x128_f8f6f4(
+                PackedDataTypeToFlag_v<pk_fp4_t>,
+                a_padded,
+                PackedDataTypeToFlag_v<pk_fp4_t>,
+                b_padded,
+                0,
+                cVec,
+                0,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                bit_cast<int32_t>(scaleA),
+                0,
+                scale::detail::ScaleTypeToFlag_v<typename ScaleVecType::value_type>,
+                bit_cast<int32_t>(scaleB),
+                false,
+                false)};
         }
     }
 };

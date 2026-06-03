@@ -5,6 +5,9 @@
 
 #include "ck_tile/core/arch/arch.hpp"
 #include "ck_tile/core/config.hpp"
+#include "ck_tile/core/numeric/e4m3.hpp"
+#include "ck_tile/core/numeric/e5m3.hpp"
+#include "ck_tile/core/numeric/e8m0.hpp"
 #include "ck_tile/core/numeric/integer.hpp"
 
 #include <stdio.h>
@@ -72,5 +75,33 @@ template <typename CtrlFlags>
 concept ScaleWmmaCtrlFlags = requires(CtrlFlags ctrlFlags) { typename CtrlFlags; };
 
 #endif // CK_TILE_CONCEPTS && CK_TILE_CONCEPTS_HEADER
+
+namespace scale::detail {
+
+template <typename T>
+struct ScaleTypeToFlag;
+
+template <>
+struct ScaleTypeToFlag<e8m0_t>
+{
+    static constexpr int32_t value = 0;
+};
+
+template <>
+struct ScaleTypeToFlag<e5m3_t>
+{
+    static constexpr int32_t value = 1;
+};
+
+template <>
+struct ScaleTypeToFlag<e4m3_t>
+{
+    static constexpr int32_t value = 2;
+};
+
+template <typename T>
+inline constexpr int32_t ScaleTypeToFlag_v = ScaleTypeToFlag<T>::value;
+
+} // namespace scale::detail
 
 } // namespace ck_tile::core::arch::mma
