@@ -12,6 +12,7 @@
 #include "ck_tile/core/numeric/integer.hpp"
 #include "ck_tile/core/numeric/pk_fp4.hpp"
 
+#include <cinttypes>
 #include <stdio.h>
 #include <type_traits>
 #if CK_TILE_CONCEPTS && CK_TILE_CONCEPTS_HEADER
@@ -48,25 +49,33 @@ concept ScaleMfmaCtrlFlags = requires(CtrlFlags ctrlFlags) {
 
 #endif // CK_TILE_CONCEPTS && CK_TILE_CONCEPTS_HEADER
 
-// Default Scale control flags
-struct DefaultScaleWmmaCtrlFlags
+namespace scale::detail {
+
+struct ScaleWmmaCtrlFlagsBase
 {
+    static constexpr int16_t c_mod           = 0; // 0: none, 1: neg, 2: abs, 3: neg(abs)
+    static constexpr int32_t scaleA_selector = 0;
+    static constexpr int32_t scaleB_selector = 0;
 };
 
-CK_TILE_HOST_DEVICE void print_flags(DefaultScaleWmmaCtrlFlags const&)
+} // namespace scale::detail
+
+CK_TILE_HOST_DEVICE void print_flags(scale::detail::ScaleWmmaCtrlFlagsBase const& ctrlFlags)
 {
-    printf("CtrlFlags      (ScaleWmma, scale-width=32)\n");
+    printf("CtrlFlags      c_mod                    : %" PRId16 "\n", ctrlFlags.c_mod);
+    printf("               scaleA_selector          : %" PRId32 "\n", ctrlFlags.scaleA_selector);
+    printf("               scaleB_selector          : %" PRId32 "\n", ctrlFlags.scaleB_selector);
 }
+
+// Default Scale control flags
+struct DefaultScaleWmmaCtrlFlags : scale::detail::ScaleWmmaCtrlFlagsBase
+{
+};
 
 // Scale control flags for GFX1250 scale16 WMMA instructions
-struct Scale16WmmaCtrlFlags
+struct Scale16WmmaCtrlFlags : scale::detail::ScaleWmmaCtrlFlagsBase
 {
 };
-
-CK_TILE_HOST_DEVICE void print_flags(Scale16WmmaCtrlFlags const&)
-{
-    printf("CtrlFlags      (ScaleWmma, scale-width=64)\n");
-}
 
 #if CK_TILE_CONCEPTS && CK_TILE_CONCEPTS_HEADER
 
@@ -75,7 +84,12 @@ CK_TILE_HOST_DEVICE void print_flags(Scale16WmmaCtrlFlags const&)
  * @brief Expresses the interface required for scale WMMA control flag types.
  */
 template <typename CtrlFlags>
-concept ScaleWmmaCtrlFlags = requires(CtrlFlags ctrlFlags) { typename CtrlFlags; };
+concept ScaleWmmaCtrlFlags = requires(CtrlFlags ctrlFlags) {
+    // Flag members for scale WMMA instructions
+    { CtrlFlags::c_mod } -> std::convertible_to<int16_t>;
+    { CtrlFlags::scaleA_selector } -> std::convertible_to<int32_t>;
+    { CtrlFlags::scaleB_selector } -> std::convertible_to<int32_t>;
+};
 
 #endif // CK_TILE_CONCEPTS && CK_TILE_CONCEPTS_HEADER
 
