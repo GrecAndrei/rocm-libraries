@@ -1015,7 +1015,7 @@ def _sdpa_fwd_unified_problem_and_knobs(payload: dict):
     return problem, knobs_payload, block_size
 
 
-def _unified_tiled_spec_from_problem(problem, knobs: dict):
+def _unified_tiled_spec_from_problem(problem, knobs: dict, arch: str = "gfx950"):
     """Build a ``UnifiedAttention2DTiledSpec`` from the problem + chosen knobs.
 
     Mirrors the field mapping the runtime dispatcher's
@@ -1029,8 +1029,14 @@ def _unified_tiled_spec_from_problem(problem, knobs: dict):
 
     ``num_seqs`` is carried onto the spec so the binary-search trip count
     specialises to the problem's batch (matching the dispatcher).
+
+    The spec class is resolved through the arch-aware ``_tiled_2d_impl(arch)``
+    seam so a gfx942 request gets the gfx942 variant's spec (which rejects the
+    gfx950-only knobs) rather than the gfx950 spec.
     """
-    from ck_dsl.instances import UnifiedAttention2DTiledSpec
+    from ck_dsl.instances.common.attention_unified import _tiled_2d_impl
+
+    UnifiedAttention2DTiledSpec, _, _ = _tiled_2d_impl(arch)
 
     tile_size = int(knobs.get("tile_size", 0))
     waves_per_eu = int(knobs.get("waves_per_eu", 0))
@@ -1082,13 +1088,15 @@ def _unified_grid(problem, num_warps: int, block_m_per_warp: int):
 def _compile_sdpa_fwd_unified(payload: dict, arch: str) -> dict:
     """Build + compile the unified paged/varlen tiled-2D attention kernel.
 
-    ``arch`` is threaded to BOTH ``build_unified_attention_2d_tiled`` (which
-    rejects non-gfx950 targets before any IR is emitted and resolves the
-    per-arch MFMA atoms) and ``compile_kernel`` (which selects the ISA
-    triple). The arch is the explicit compile target -- this path
-    deliberately does NOT call ``_resolve_attention_arch`` (which
-    device-detects the running GPU); the provider always knows its target
-    arch and a Phase-2 host compile must not depend on a present device.
+    ``arch`` is threaded to the arch-aware ``_tiled_2d_impl(arch)`` seam (so a
+    gfx942 request resolves the gfx942 variant's spec + builder, never the
+    gfx950 builder), to ``build_unified_attention_2d_tiled`` (which resolves the
+    per-arch MFMA atoms and rejects unsupported targets before any IR is
+    emitted), and to ``compile_kernel`` (which selects the ISA triple). The arch
+    is the explicit compile target -- this path deliberately does NOT call
+    ``_resolve_attention_arch`` (which device-detects the running GPU); the
+    provider always knows its target arch and a Phase-2 host compile must not
+    depend on a present device.
 
     The scale / k_scale / v_scale / out_scale / softcap floats and the
     block_table_stride / num_seqs / qq_bias_stride_0 i32s are launch-time
@@ -1097,10 +1105,12 @@ def _compile_sdpa_fwd_unified(payload: dict, arch: str) -> dict:
     they are absent from the payload and never baked into the kernel.
     """
     from ck_dsl.helpers.compile import compile_kernel
-    from ck_dsl.instances import build_unified_attention_2d_tiled
+    from ck_dsl.instances.common.attention_unified import _tiled_2d_impl
+
+    _, build_unified_attention_2d_tiled, _ = _tiled_2d_impl(arch)
 
     problem, knobs, _block_size = _sdpa_fwd_unified_problem_and_knobs(payload)
-    spec = _unified_tiled_spec_from_problem(problem, knobs)
+    spec = _unified_tiled_spec_from_problem(problem, knobs, arch)
 
     kernel = build_unified_attention_2d_tiled(spec, arch=arch)
     artifact = compile_kernel(kernel, arch=arch)
@@ -1446,8 +1456,14 @@ def _is_applicable_sdpa_fwd_unified(payload: dict, arch: str):
     for this arch". The boolean knob combo is validated at spec
     ``__post_init__`` time on the compile path; the provider's enumerator
     only emits valid combos, so it is not re-checked here.
+
+    The gate is resolved through the arch-aware ``_tiled_2d_impl(arch)`` seam so
+    a gfx942 request consults the gfx942 variant's gate (per-arch LDS budget,
+    narrow-atom admission) -- matching the builder the compile path resolves.
     """
-    from ck_dsl.instances.gfx950.attention_tiled_2d import supports_tiled_2d
+    from ck_dsl.instances.common.attention_unified import _tiled_2d_impl
+
+    _, _, supports_tiled_2d = _tiled_2d_impl(arch)
 
     problem, knobs, _block_size = _sdpa_fwd_unified_problem_and_knobs(payload)
     ok, reason = supports_tiled_2d(

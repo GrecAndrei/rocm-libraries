@@ -226,10 +226,32 @@ def _tiled_2d_impl(arch: str):
     Returns ``(UnifiedAttention2DTiledSpec, build_unified_attention_2d_tiled,
     supports_tiled_2d)``. The import is performed here, inside the dispatch
     seam, so the arch-neutral ``instances/common`` package never imports an
-    arch implementation at module top. Today the only tiled-2D backend is
-    gfx950 (MFMA); when the unify phase lands the gfx1151 (WMMA) tiled impl
-    this is the single place that routes on ``arch``.
+    arch implementation at module top. This is the single place that routes the
+    tiled-2D backend on ``arch``:
+
+    * ``gfx942`` (CDNA3) -> the narrow ``16x16x16`` strided-V variant
+      (``instances/gfx942``).
+    * everything else (default ``gfx950`` / CDNA4) -> the wide-K transpose-read
+      variant (``instances/gfx950``).
+
+    Routing gfx942 to its own variant is what keeps a gfx942 request off the
+    gfx950 builder after ``attention_arch.validate_tiled_attention_arch`` was
+    relaxed to admit gfx942 -- otherwise the gfx950 builder would emit
+    gfx950-only ISA on gfx942 and crash comgr.
     """
+    if arch == "gfx942":
+        from ..gfx942.attention_tiled_2d import (
+            UnifiedAttention2DTiledSpec,
+            build_unified_attention_2d_tiled,
+            supports_tiled_2d,
+        )
+
+        return (
+            UnifiedAttention2DTiledSpec,
+            build_unified_attention_2d_tiled,
+            supports_tiled_2d,
+        )
+
     from ..gfx950.attention_tiled_2d import (
         UnifiedAttention2DTiledSpec,
         build_unified_attention_2d_tiled,
