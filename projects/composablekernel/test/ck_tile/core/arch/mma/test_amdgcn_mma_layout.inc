@@ -88,20 +88,15 @@ using TestTarget = Target908;
 // gather back into C matrix. The position of "1" in C is checked against the expected (m, n)
 // location.
 
-template <typename MmaOp, typename = void>
-struct scale_vec_type
-{
-    using type = e8m0x4_t;
-};
-
-template <typename MmaOp>
-struct scale_vec_type<MmaOp, std::enable_if_t<MmaOp::IsScale16>>
-{
-    using type = e8m0x8_t;
-};
-
-template <typename MmaOp>
-using scale_vec_type_t = typename scale_vec_type<MmaOp>::type;
+template <bool IsScale16, typename ValueType = e8m0_t>
+using wmma_scale_vec_type = std::conditional_t<
+    IsScale16,
+    std::conditional_t<std::is_same_v<ValueType, e5m3_t>,
+                       e5m3x8_t,
+                       std::conditional_t<std::is_same_v<ValueType, e4m3_t>, e4m3x8_t, e8m0x8_t>>,
+    std::conditional_t<std::is_same_v<ValueType, e5m3_t>,
+                       e5m3x4_t,
+                       std::conditional_t<std::is_same_v<ValueType, e4m3_t>, e4m3x4_t, e8m0x4_t>>>;
 
 // Helper function to place a single "1" value in any datatype. For packed types, "off"
 // indicates the offset at which the "1" must be placed within the pack. The packed datatypes
@@ -171,7 +166,7 @@ CK_TILE_DEVICE pk_bf6x16_t packed_one(int off)
  * @brief Device kernel that performs C = AB using a given Mma op
  * @tparam MmaOp Intrinsic (amdgcn_mma) to be tested
  */
-template <typename MmaOp> // TODO: C++20 concept for MmaOp
+template <typename MmaOp, typename ScaleAVecT, typename ScaleBVecT> // TODO: C++20 concept for MmaOp
 struct MmaLayoutTestKernel
 {
     static constexpr int kBlockSize = MmaOp::WaveSize;
@@ -269,16 +264,22 @@ struct MmaLayoutTestKernel
             }
             else if constexpr(MmaOpTraits<MmaOp>::IsScale)
             {
-                using ScaleVecT = scale_vec_type_t<MmaOp>;
-
-                ScaleVecT scale_A{};
-                ScaleVecT scale_B{};
-                for(index_t i = 0; i < ScaleVecT::N; ++i)
+                ScaleAVecT scale_A{};
+                ScaleBVecT scale_B{};
+                constexpr uint8_t scale_A_elem_value =
+                    std::is_same_v<typename ScaleAVecT::value_type, e5m3_t> ? 0x68u
+                    : std::is_same_v<typename ScaleAVecT::value_type, e4m3_t>
+                        ? 0x28u
+                        : 0x7Du; // 0.25 in every byte
+                constexpr uint8_t scale_B_elem_value =
+                    std::is_same_v<typename ScaleBVecT::value_type, e5m3_t> ? 0x88u
+                    : std::is_same_v<typename ScaleBVecT::value_type, e4m3_t>
+                        ? 0x48u
+                        : 0x81u; // 4 in every byte
+                for(index_t i = 0; i < ScaleAVecT::N; ++i)
                 {
-                    scale_A[i] =
-                        typename ScaleVecT::value_type{uint8_t{0x7Du}}; // E8M0 = 125 in every byte
-                    scale_B[i] =
-                        typename ScaleVecT::value_type{uint8_t{0x81u}}; // E8M0 = 129 in every byte
+                    scale_A[i] = typename ScaleAVecT::value_type{scale_A_elem_value};
+                    scale_B[i] = typename ScaleBVecT::value_type{scale_B_elem_value};
                 }
                 c_frag = MmaOp::exec(a_frag, b_frag, c_frag, scale_A, scale_B);
             }
@@ -324,8 +325,10 @@ struct MmaLayoutTestKernel
  *
  * @tparam MmaOp Intrinsic (amdgcn_mma) to be tested
  */
-template <typename MmaOp> // TODO: C++20 concept for MmaOp
-void run_mma_layout_test()
+template <typename MmaOp,
+          typename ScaleAVecT = e8m0x4_t,
+          typename ScaleBVecT = e8m0x4_t> // TODO: C++20 concept for MmaOp
+void run_mma_layout_test_impl()
 {
     EXPECT_TRUE(MmaOpTraits<MmaOp>::IsSupported) << "Unsupported MmaOp! Bad MmaOp in list!\n";
 
@@ -351,7 +354,7 @@ void run_mma_layout_test()
 
     (void)hipGetLastError();
 
-    using Kernel = MmaLayoutTestKernel<MmaOp>;
+    using Kernel = MmaLayoutTestKernel<MmaOp, ScaleAVecT, ScaleBVecT>;
 
     ck_tile::launch_kernel(
         ck_tile::stream_config{nullptr, false, 0, 0, 1},
@@ -368,6 +371,53 @@ void run_mma_layout_test()
         const uint32_t n = case_idx % MmaOp::kN;
 
         EXPECT_EQ(h_errors[case_idx], 0u) << "Mismatch for m=" << m << " k=" << k << " n=" << n;
+    }
+}
+
+template <typename MmaOp>
+void run_mma_layout_test()
+{
+    if constexpr(MmaOpTraits<MmaOp>::IsScale && is_mma_op_wmma_v<MmaOp>)
+    {
+        constexpr bool IsScale16 = MmaOp::IsScale16;
+        using e8m0VecT           = wmma_scale_vec_type<IsScale16>;
+        using e5m3VecT           = wmma_scale_vec_type<IsScale16, e5m3_t>;
+        using e4m3VecT           = wmma_scale_vec_type<IsScale16, e4m3_t>;
+        using ADataType          = typename MmaOp::ADataType;
+        using BDataType          = typename MmaOp::BDataType;
+        using scale::detail::is_legal_combination;
+        if constexpr(is_legal_combination<ADataType, BDataType, e8m0VecT, e8m0VecT, IsScale16>)
+        {
+            run_mma_layout_test_impl<MmaOp, e8m0VecT, e8m0VecT>();
+        }
+        if constexpr(is_legal_combination<ADataType, BDataType, e8m0VecT, e5m3VecT, IsScale16>)
+        {
+            run_mma_layout_test_impl<MmaOp, e8m0VecT, e5m3VecT>();
+        }
+        if constexpr(is_legal_combination<ADataType, BDataType, e8m0VecT, e4m3VecT, IsScale16>)
+        {
+            run_mma_layout_test_impl<MmaOp, e8m0VecT, e4m3VecT>();
+        }
+        if constexpr(is_legal_combination<ADataType, BDataType, e5m3VecT, e8m0VecT, IsScale16>)
+        {
+            run_mma_layout_test_impl<MmaOp, e5m3VecT, e8m0VecT>();
+        }
+        if constexpr(is_legal_combination<ADataType, BDataType, e4m3VecT, e8m0VecT, IsScale16>)
+        {
+            run_mma_layout_test_impl<MmaOp, e4m3VecT, e8m0VecT>();
+        }
+        if constexpr(is_legal_combination<ADataType, BDataType, e5m3VecT, e5m3VecT, IsScale16>)
+        {
+            run_mma_layout_test_impl<MmaOp, e5m3VecT, e5m3VecT>();
+        }
+        if constexpr(is_legal_combination<ADataType, BDataType, e4m3VecT, e4m3VecT, IsScale16>)
+        {
+            run_mma_layout_test_impl<MmaOp, e4m3VecT, e4m3VecT>();
+        }
+    }
+    else
+    {
+        run_mma_layout_test_impl<MmaOp>();
     }
 }
 
