@@ -51,8 +51,8 @@ struct amdgcn_mma<fp8_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleAVecType scaleA,
-                                        ScaleBVecType scaleB)
+                                        ScaleAVecType const& scaleA,
+                                        ScaleBVecType const& scaleB)
     {
         if constexpr(IsScale16)
         {
@@ -123,8 +123,8 @@ struct amdgcn_mma<fp8_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleAVecType scaleA,
-                                        ScaleBVecType scaleB)
+                                        ScaleAVecType const& scaleA,
+                                        ScaleBVecType const& scaleB)
     {
         if constexpr(IsScale16)
         {
@@ -196,8 +196,8 @@ struct amdgcn_mma<fp8_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleAVecType scaleA,
-                                        ScaleBVecType scaleB)
+                                        ScaleAVecType const& scaleA,
+                                        ScaleBVecType const& scaleB)
     {
         // clang-format off
         int32x16_t b_padded = {bVec.data[0], bVec.data[1], bVec.data[2],  bVec.data[3],  bVec.data[4], bVec.data[5], bVec.data[6], bVec.data[7],
@@ -273,8 +273,8 @@ struct amdgcn_mma<fp8_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleAVecType scaleA,
-                                        ScaleBVecType scaleB)
+                                        ScaleAVecType const& scaleA,
+                                        ScaleBVecType const& scaleB)
     {
         // clang-format off
         int32x16_t b_padded = {bVec.data[0], bVec.data[1], bVec.data[2],  bVec.data[3],  bVec.data[4], bVec.data[5], bVec.data[6], bVec.data[7],
@@ -350,8 +350,8 @@ struct amdgcn_mma<fp8_t, pk_fp4_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTa
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleAVecType scaleA,
-                                        ScaleBVecType scaleB)
+                                        ScaleAVecType const& scaleA,
+                                        ScaleBVecType const& scaleB)
     {
         int32x8_t b8        = bit_cast<int32x8_t>(bVec);
         int32x16_t b_padded = {
@@ -425,8 +425,8 @@ struct amdgcn_mma<bf8_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleAVecType scaleA,
-                                        ScaleBVecType scaleB)
+                                        ScaleAVecType const& scaleA,
+                                        ScaleBVecType const& scaleB)
     {
         if constexpr(IsScale16)
         {
@@ -497,8 +497,8 @@ struct amdgcn_mma<bf8_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleAVecType scaleA,
-                                        ScaleBVecType scaleB)
+                                        ScaleAVecType const& scaleA,
+                                        ScaleBVecType const& scaleB)
     {
         if constexpr(IsScale16)
         {
@@ -570,8 +570,8 @@ struct amdgcn_mma<bf8_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleAVecType scaleA,
-                                        ScaleBVecType scaleB)
+                                        ScaleAVecType const& scaleA,
+                                        ScaleBVecType const& scaleB)
     {
         // clang-format off
         int32x16_t b_padded = {bVec.data[0], bVec.data[1], bVec.data[2],  bVec.data[3],  bVec.data[4], bVec.data[5], bVec.data[6], bVec.data[7],
@@ -647,8 +647,8 @@ struct amdgcn_mma<bf8_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleAVecType scaleA,
-                                        ScaleBVecType scaleB)
+                                        ScaleAVecType const& scaleA,
+                                        ScaleBVecType const& scaleB)
     {
         // clang-format off
         int32x16_t b_padded = {bVec.data[0], bVec.data[1], bVec.data[2],  bVec.data[3],  bVec.data[4], bVec.data[5], bVec.data[6], bVec.data[7],
@@ -724,8 +724,8 @@ struct amdgcn_mma<bf8_t, pk_fp4_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTa
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleAVecType scaleA,
-                                        ScaleBVecType scaleB)
+                                        ScaleAVecType const& scaleA,
+                                        ScaleBVecType const& scaleB)
     {
         int32x8_t b8        = bit_cast<int32x8_t>(bVec);
         int32x16_t b_padded = {
@@ -800,8 +800,8 @@ struct amdgcn_mma<pk_fp6x16_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleAVecType scaleA,
-                                        ScaleBVecType scaleB)
+                                        ScaleAVecType const& scaleA,
+                                        ScaleBVecType const& scaleB)
     {
         // clang-format off
         int32x16_t a_padded = {aVec.data[0], aVec.data[1], aVec.data[2],  aVec.data[3],  aVec.data[4], aVec.data[5], aVec.data[6], aVec.data[7],
@@ -877,8 +877,8 @@ struct amdgcn_mma<pk_fp6x16_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleAVecType scaleA,
-                                        ScaleBVecType scaleB)
+                                        ScaleAVecType const& scaleA,
+                                        ScaleBVecType const& scaleB)
     {
         // clang-format off
         int32x16_t a_padded = {aVec.data[0], aVec.data[1], aVec.data[2],  aVec.data[3],  aVec.data[4], aVec.data[5], aVec.data[6], aVec.data[7],
@@ -955,8 +955,8 @@ struct amdgcn_mma<pk_fp6x16_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleAVecType scaleA,
-                                        ScaleBVecType scaleB)
+                                        ScaleAVecType const& scaleA,
+                                        ScaleBVecType const& scaleB)
     {
         // clang-format off
         int32x16_t a_padded = {aVec.data[0], aVec.data[1], aVec.data[2],  aVec.data[3],  aVec.data[4], aVec.data[5], aVec.data[6], aVec.data[7],
@@ -1035,8 +1035,8 @@ struct amdgcn_mma<pk_fp6x16_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleAVecType scaleA,
-                                        ScaleBVecType scaleB)
+                                        ScaleAVecType const& scaleA,
+                                        ScaleBVecType const& scaleB)
     {
         // clang-format off
         int32x16_t a_padded = {aVec.data[0], aVec.data[1], aVec.data[2],  aVec.data[3],  aVec.data[4], aVec.data[5], aVec.data[6], aVec.data[7],
@@ -1115,8 +1115,8 @@ struct amdgcn_mma<pk_fp6x16_t, pk_fp4_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Comp
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleAVecType scaleA,
-                                        ScaleBVecType scaleB)
+                                        ScaleAVecType const& scaleA,
+                                        ScaleBVecType const& scaleB)
     {
         // clang-format off
         int32x16_t a_padded = {aVec.data[0], aVec.data[1], aVec.data[2],  aVec.data[3],  aVec.data[4], aVec.data[5], aVec.data[6], aVec.data[7],
@@ -1195,8 +1195,8 @@ struct amdgcn_mma<pk_bf6x16_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleAVecType scaleA,
-                                        ScaleBVecType scaleB)
+                                        ScaleAVecType const& scaleA,
+                                        ScaleBVecType const& scaleB)
     {
         // clang-format off
         int32x16_t a_padded = {aVec.data[0], aVec.data[1], aVec.data[2],  aVec.data[3],  aVec.data[4], aVec.data[5], aVec.data[6], aVec.data[7],
@@ -1272,8 +1272,8 @@ struct amdgcn_mma<pk_bf6x16_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleAVecType scaleA,
-                                        ScaleBVecType scaleB)
+                                        ScaleAVecType const& scaleA,
+                                        ScaleBVecType const& scaleB)
     {
         // clang-format off
         int32x16_t a_padded = {aVec.data[0], aVec.data[1], aVec.data[2],  aVec.data[3],  aVec.data[4], aVec.data[5], aVec.data[6], aVec.data[7],
@@ -1350,8 +1350,8 @@ struct amdgcn_mma<pk_bf6x16_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleAVecType scaleA,
-                                        ScaleBVecType scaleB)
+                                        ScaleAVecType const& scaleA,
+                                        ScaleBVecType const& scaleB)
     {
         // clang-format off
         int32x16_t a_padded = {aVec.data[0], aVec.data[1], aVec.data[2],  aVec.data[3],  aVec.data[4], aVec.data[5], aVec.data[6], aVec.data[7],
@@ -1430,8 +1430,8 @@ struct amdgcn_mma<pk_bf6x16_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleAVecType scaleA,
-                                        ScaleBVecType scaleB)
+                                        ScaleAVecType const& scaleA,
+                                        ScaleBVecType const& scaleB)
     {
         // clang-format off
         int32x16_t a_padded = {aVec.data[0], aVec.data[1], aVec.data[2],  aVec.data[3],  aVec.data[4], aVec.data[5], aVec.data[6], aVec.data[7],
@@ -1510,8 +1510,8 @@ struct amdgcn_mma<pk_bf6x16_t, pk_fp4_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Comp
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleAVecType scaleA,
-                                        ScaleBVecType scaleB)
+                                        ScaleAVecType const& scaleA,
+                                        ScaleBVecType const& scaleB)
     {
         // clang-format off
         int32x16_t a_padded = {aVec.data[0], aVec.data[1], aVec.data[2],  aVec.data[3],  aVec.data[4], aVec.data[5], aVec.data[6], aVec.data[7],
@@ -1590,8 +1590,8 @@ struct amdgcn_mma<pk_fp4_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTa
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleAVecType scaleA,
-                                        ScaleBVecType scaleB)
+                                        ScaleAVecType const& scaleA,
+                                        ScaleBVecType const& scaleB)
     {
         int32x8_t a8        = bit_cast<int32x8_t>(aVec);
         int32x16_t a_padded = {
@@ -1666,8 +1666,8 @@ struct amdgcn_mma<pk_fp4_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTa
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleAVecType scaleA,
-                                        ScaleBVecType scaleB)
+                                        ScaleAVecType const& scaleA,
+                                        ScaleBVecType const& scaleB)
     {
         int32x8_t a8        = bit_cast<int32x8_t>(aVec);
         int32x16_t a_padded = {
@@ -1743,8 +1743,8 @@ struct amdgcn_mma<pk_fp4_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Comp
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleAVecType scaleA,
-                                        ScaleBVecType scaleB)
+                                        ScaleAVecType const& scaleA,
+                                        ScaleBVecType const& scaleB)
     {
         int32x8_t a8        = bit_cast<int32x8_t>(aVec);
         int32x16_t a_padded = {
@@ -1824,8 +1824,8 @@ struct amdgcn_mma<pk_fp4_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Comp
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleAVecType scaleA,
-                                        ScaleBVecType scaleB)
+                                        ScaleAVecType const& scaleA,
+                                        ScaleBVecType const& scaleB)
     {
         int32x8_t a8        = bit_cast<int32x8_t>(aVec);
         int32x16_t a_padded = {
@@ -1904,8 +1904,8 @@ struct amdgcn_mma<pk_fp4_t, pk_fp4_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        ScaleAVecType scaleA,
-                                        ScaleBVecType scaleB)
+                                        ScaleAVecType const& scaleA,
+                                        ScaleBVecType const& scaleB)
     {
         int32x8_t a8        = bit_cast<int32x8_t>(aVec);
         int32x8_t b8        = bit_cast<int32x8_t>(bVec);

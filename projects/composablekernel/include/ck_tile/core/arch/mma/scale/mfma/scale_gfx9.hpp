@@ -44,8 +44,8 @@ struct amdgcn_mma<fp8_t, fp8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        e8m0x4_t scale_A,
-                                        e8m0x4_t scale_B)
+                                        e8m0x4_t const& scale_A,
+                                        e8m0x4_t const& scale_B)
     {
         return {
             __builtin_amdgcn_mfma_scale_f32_16x16x128_f8f6f4(bit_cast<int32x8_t>(aVec),
@@ -85,8 +85,8 @@ struct amdgcn_mma<bf8_t, bf8_t, fp32_t, 16u, 16u, 128u, CtrlFlags, CompilerTarge
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        e8m0x4_t scale_A,
-                                        e8m0x4_t scale_B)
+                                        e8m0x4_t const& scale_A,
+                                        e8m0x4_t const& scale_B)
     {
         return {
             __builtin_amdgcn_mfma_scale_f32_16x16x128_f8f6f4(bit_cast<int32x8_t>(aVec),
@@ -126,8 +126,8 @@ struct amdgcn_mma<pk_fp4_t, pk_fp4_t, fp32_t, 16u, 16u, 128u, CtrlFlags, Compile
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        e8m0x4_t scale_A,
-                                        e8m0x4_t scale_B)
+                                        e8m0x4_t const& scale_A,
+                                        e8m0x4_t const& scale_B)
     {
         int32x4_t arg_a = bit_cast<int32x4_t>(aVec);
         int32x4_t arg_b = bit_cast<int32x4_t>(bVec);
@@ -169,8 +169,8 @@ struct amdgcn_mma<pk_fp6x16_t, pk_fp6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        e8m0x4_t scale_A,
-                                        e8m0x4_t scale_B)
+                                        e8m0x4_t const& scale_A,
+                                        e8m0x4_t const& scale_B)
     {
         return {__builtin_amdgcn_mfma_scale_f32_16x16x128_f8f6f4(
             int32x8_t{aVec.data[0], aVec.data[1], aVec.data[2], aVec.data[3], aVec.data[4], aVec.data[5], 0, 0},
@@ -210,8 +210,8 @@ struct amdgcn_mma<pk_bf6x16_t, pk_bf6x16_t, fp32_t, 16u, 16u, 128u, CtrlFlags, C
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        e8m0x4_t scale_A,
-                                        e8m0x4_t scale_B)
+                                        e8m0x4_t const& scale_A,
+                                        e8m0x4_t const& scale_B)
     {
         return {__builtin_amdgcn_mfma_scale_f32_16x16x128_f8f6f4(
             int32x8_t{aVec.data[0], aVec.data[1], aVec.data[2], aVec.data[3], aVec.data[4], aVec.data[5], 0, 0},
@@ -252,8 +252,8 @@ struct amdgcn_mma<fp8_t, fp8_t, fp32_t, 32u, 32u, 64u, CtrlFlags, CompilerTarget
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        e8m0x4_t scale_A,
-                                        e8m0x4_t scale_B)
+                                        e8m0x4_t const& scale_A,
+                                        e8m0x4_t const& scale_B)
     {
         return {
             __builtin_amdgcn_mfma_scale_f32_32x32x64_f8f6f4(bit_cast<int32x8_t>(aVec),
@@ -293,8 +293,8 @@ struct amdgcn_mma<bf8_t, bf8_t, fp32_t, 32u, 32u, 64u, CtrlFlags, CompilerTarget
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        e8m0x4_t scale_A,
-                                        e8m0x4_t scale_B)
+                                        e8m0x4_t const& scale_A,
+                                        e8m0x4_t const& scale_B)
     {
         return {
             __builtin_amdgcn_mfma_scale_f32_32x32x64_f8f6f4(bit_cast<int32x8_t>(aVec),
@@ -334,8 +334,8 @@ struct amdgcn_mma<pk_fp4_t, pk_fp4_t, fp32_t, 32u, 32u, 64u, CtrlFlags, Compiler
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        e8m0x4_t scale_A,
-                                        e8m0x4_t scale_B)
+                                        e8m0x4_t const& scale_A,
+                                        e8m0x4_t const& scale_B)
     {
         int32x4_t arg_a = bit_cast<int32x4_t>(aVec);
         int32x4_t arg_b = bit_cast<int32x4_t>(bVec);
@@ -377,8 +377,8 @@ struct amdgcn_mma<pk_fp6x16_t, pk_fp6x16_t, fp32_t, 32u, 32u, 64u, CtrlFlags, Co
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        e8m0x4_t scale_A,
-                                        e8m0x4_t scale_B)
+                                        e8m0x4_t const& scale_A,
+                                        e8m0x4_t const& scale_B)
     {
         return {__builtin_amdgcn_mfma_scale_f32_32x32x64_f8f6f4(
             int32x8_t{aVec.data[0], aVec.data[1], aVec.data[2], aVec.data[3], aVec.data[4], aVec.data[5], 0, 0},
@@ -418,8 +418,8 @@ struct amdgcn_mma<pk_bf6x16_t, pk_bf6x16_t, fp32_t, 32u, 32u, 64u, CtrlFlags, Co
     CK_TILE_DEVICE static CVecType exec(AVecType const& aVec,
                                         BVecType const& bVec,
                                         CVecType const& cVec,
-                                        e8m0x4_t scale_A,
-                                        e8m0x4_t scale_B)
+                                        e8m0x4_t const& scale_A,
+                                        e8m0x4_t const& scale_B)
     {
         return {__builtin_amdgcn_mfma_scale_f32_32x32x64_f8f6f4(
             int32x8_t{aVec.data[0], aVec.data[1], aVec.data[2], aVec.data[3], aVec.data[4], aVec.data[5], 0, 0},
