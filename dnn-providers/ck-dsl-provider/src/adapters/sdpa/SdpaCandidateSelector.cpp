@@ -139,9 +139,10 @@ SupportsResult supportsTiled2d(const SdpaSelectionProblem& problem, const SdpaPe
     }
     // LDS-budget gate (AHEAD-OF-TIME compilability). The unified kernel stages
     // its tiles in LDS; comgr CODEGEN (CODEGEN_BC_TO_RELOCATABLE) rejects a
-    // kernel whose static group segment exceeds the gfx950 LDS capacity
-    // (163840 B / 160 KB; arch_specs.json gfx950 lds_capacity_bytes). This
-    // mirrors the kernel's actual smem_alloc footprint (the smem_alloc calls
+    // kernel whose static group segment exceeds the target arch's LDS capacity
+    // (arch_specs.json lds_capacity_bytes: gfx950 163840 B / 160 KB, gfx942
+    // 65536 B / 64 KB). This mirrors the kernel's actual smem_alloc footprint
+    // (the smem_alloc calls
     // in attention_tiled_2d.py build_unified_attention_2d_tiled; kept in
     // lockstep with that file's supports_tiled_2d LDS gate, bpe=2 fp16/bf16):
     //   K_lds  = 2*T*hd*bpe   (double-buffered async load)
@@ -159,8 +160,15 @@ SupportsResult supportsTiled2d(const SdpaSelectionProblem& problem, const SdpaPe
     // (attention_tiled_2d.py supports_tiled_2d); this is the C++ enumerator
     // mirror, kept in lockstep.
     {
-        constexpr std::int64_t kLdsCapacityBytes = 163840;  // gfx950, 160 KB
-        constexpr std::int64_t kBytesPerElem = 2;           // fp16/bf16
+        // Per-arch LDS capacity (arch_specs.json lds_capacity_bytes),
+        // mirrored byte-for-byte against the DSL per-arch tiled-2D gate so
+        // C++ and Python admit/reject the same configs:
+        //   gfx950 -> 163840 B (160 KB)
+        //   gfx942 -> 65536 B  (64 KB)
+        // Any other arch is never admitted by the applicability gate on
+        // this path, so the gfx950 budget is the safe default.
+        const std::int64_t kLdsCapacityBytes = (problem.arch == "gfx942") ? 65536 : 163840;
+        constexpr std::int64_t kBytesPerElem = 2;  // fp16/bf16
         const std::int64_t tEff = knobs.tile_size != 0 ? knobs.tile_size : bs;
         const std::int64_t blockM =
             static_cast<std::int64_t>(knobs.num_warps) * knobs.block_m_per_warp;
@@ -173,7 +181,9 @@ SupportsResult supportsTiled2d(const SdpaSelectionProblem& problem, const SdpaPe
         const std::int64_t ldsBytes = kLds + vLds + pLds + qLds + accLds;
         if (ldsBytes > kLdsCapacityBytes) {
             return {false, "tiled 2D kernel: estimated LDS " + std::to_string(ldsBytes) +
-                               " B exceeds the gfx950 160 KB budget; comgr CODEGEN would fail"};
+                               " B exceeds the " + problem.arch + " " +
+                               std::to_string(kLdsCapacityBytes) +
+                               " B budget; comgr CODEGEN would fail"};
         }
     }
     return {true, ""};
@@ -476,8 +486,13 @@ SdpaPerfKnobs selectPerfKnobs(const SdpaSelectionProblem& problem,
                               const SdpaScorer& scorer) {
     // Model-load failure (or no model in the tree) degrades to the
     // analytic production policy over the SAME candidate set -- never a
-    // trivial first-fit.
-    if (!scorer.isLoaded()) {
+    // trivial first-fit. The fwd lgbm model is gfx950-trained, so any
+    // other arch (gfx942) also takes the analytic path: its scorer key
+    // would be out-of-distribution. This short-circuits BEFORE any
+    // scorer-key construction (problemToFmhaProblem / knobsToKernelKey),
+    // so the gfx950-hardcoded gfx_arch in those mappings is dead on the
+    // gfx942 path.
+    if (!scorer.isLoaded() || problem.arch != "gfx950") {
         return selectAnalyticFallback(problem, candidates);
     }
 

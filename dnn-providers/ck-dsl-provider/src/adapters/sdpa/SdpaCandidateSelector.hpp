@@ -34,6 +34,14 @@ struct SdpaSelectionProblem {
     std::int32_t block_size{0};       // paged KV block size {16,32,64}
     std::string dtype{"fp16"};        // "fp16" | "bf16"
 
+    // Target GPU architecture as a bare gfx token ("gfx950" | "gfx942").
+    // Drives the per-arch LDS-capacity gate and the analytic-vs-ML knob
+    // fork (the fwd lgbm model is gfx950-trained, so only gfx950 uses it).
+    // Populated by the plan builder from the detected device arch;
+    // defaults to "gfx950" so the existing tests that construct this
+    // struct directly keep the gfx950 budget without churn.
+    std::string arch{"gfx950"};
+
     // Variant flags that the kernel-key signature mirrors and the
     // analytic policy reads. Set by Phase 2 from the graph.
     bool use_sinks{false};
