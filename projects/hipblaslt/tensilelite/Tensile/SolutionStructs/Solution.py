@@ -931,7 +931,7 @@ class Solution(collections.abc.Mapping):
     if grvw not in [1,2,4,8,16,32] and not state["UseSubtileImpl"]:
       validDepthU = False
     if totalVectors % state["NumThreads"] != 0:
-      reject(None, printRejectionReason, "totalVectors%s %u %% NumThreads %u != 0" \
+      reject(state, printRejectionReason, "totalVectors%s %u %% NumThreads %u != 0" \
           % (tc, totalVectors, state["NumThreads"]))
       validDepthU = False
 
@@ -2579,6 +2579,7 @@ class Solution(collections.abc.Mapping):
     resetLocalReadVectorWidthB = state["LocalReadVectorWidthB"]
     resetGlobalReadVectorWidthA = state["GlobalReadVectorWidthA"]
     resetGlobalReadVectorWidthB = state["GlobalReadVectorWidthB"]
+    tuning = (state.get("SolutionIndex", -1) == -1)
 
     while True:
       userDepthU = depthuList[index[0]]
@@ -3573,7 +3574,7 @@ class Solution(collections.abc.Mapping):
 
           tvm = totalElementsM // grvw
 
-          if not Solution.setGlobalReadVectorWidth(state, "Metadata", tvm, grvw, printRejectionReason):
+          if tuning and (not Solution.setGlobalReadVectorWidth(state, "Metadata", tvm, grvw, printRejectionReason)):
             validDepthU = False
 
           if state["EnableMatrixInstruction"] and state["GlobalReadVectorWidthMetadata"]:
@@ -3594,7 +3595,7 @@ class Solution(collections.abc.Mapping):
                   glvwMlimit  = state["MIOutputVectorWidth"] * (state["WavefrontSize"] // matrixInstN)
 
               # reduce GLVMetadata if GLVMetadata larger than MIOVW
-              if state["GlobalReadVectorWidthMetadata"] > glvwMlimit:
+              if tuning and (state["GlobalReadVectorWidthMetadata"] > glvwMlimit):
                 tvm = totalElementsM // glvwMlimit
                 if not Solution.setGlobalReadVectorWidth(state, "Metadata", tvm, glvwMlimit, printRejectionReason):
                   validDepthU = False
@@ -3826,34 +3827,28 @@ class Solution(collections.abc.Mapping):
       # Try to enlarge GLVW for metadata
       bGlobalReadVectorWidthMetadata = state["GlobalReadVectorWidthMetadata"]
       glvwMlimit = 16
-      if state["GlobalReadVectorWidthMetadata"] < glvwMlimit:
-        if state["ProblemType"]["Sparse"] == 2:
-          GlobalReadVectorWidth = min(state["GlobalReadVectorWidthMetadata"] * state["NumLoadsPerpendicularB"], depthUM, glvwMlimit) #sum all need read
-          tvm = totalElementsM // GlobalReadVectorWidth
-          if not Solution.setGlobalReadVectorWidth(state, "Metadata", tvm, GlobalReadVectorWidth, printRejectionReason):
-            #fallback
-            tvm = totalElementsM // bGlobalReadVectorWidthMetadata
-            Solution.setGlobalReadVectorWidth(state, "Metadata", tvm, bGlobalReadVectorWidthMetadata, printRejectionReason)
+      if tuning:
+        if state["GlobalReadVectorWidthMetadata"] < glvwMlimit:
+          if state["ProblemType"]["Sparse"] == 2:
+            GlobalReadVectorWidth = min(state["GlobalReadVectorWidthMetadata"] * state["NumLoadsPerpendicularB"], depthUM, glvwMlimit) #sum all need read
+            tvm = totalElementsM // GlobalReadVectorWidth
+            if not Solution.setGlobalReadVectorWidth(state, "Metadata", tvm, GlobalReadVectorWidth, printRejectionReason):
+              #fallback
+              tvm = totalElementsM // bGlobalReadVectorWidthMetadata
+              Solution.setGlobalReadVectorWidth(state, "Metadata", tvm, bGlobalReadVectorWidthMetadata, printRejectionReason)            
+          else:
+            GlobalReadVectorWidth = min(state["GlobalReadVectorWidthMetadata"] * state["NumLoadsPerpendicularA"], depthUM, glvwMlimit) #sum all need read
+            tvm = totalElementsM // GlobalReadVectorWidth
+            if not Solution.setGlobalReadVectorWidth(state, "Metadata", tvm, GlobalReadVectorWidth, printRejectionReason):
+              #fallback
+              tvm = totalElementsM // bGlobalReadVectorWidthMetadata
+              Solution.setGlobalReadVectorWidth(state, "Metadata", tvm, bGlobalReadVectorWidthMetadata, printRejectionReason)
 
-          GlobalReadVectorWidthMetadata = state["GlobalReadVectorWidthMetadata"]
-          if GlobalReadVectorWidthMetadata == 0:
-            GlobalReadVectorWidthMetadata = 1
-          totalVectorsCoalescedM = totalElementsCoalescedM // GlobalReadVectorWidthMetadata
-          totalVectorsM = totalElementsM // GlobalReadVectorWidthMetadata
-        else:
-          GlobalReadVectorWidth = min(state["GlobalReadVectorWidthMetadata"] * state["NumLoadsPerpendicularA"], depthUM, glvwMlimit) #sum all need read
-          tvm = totalElementsM // GlobalReadVectorWidth
-          if not Solution.setGlobalReadVectorWidth(state, "Metadata", tvm, GlobalReadVectorWidth, printRejectionReason):
-            #fallback
-            tvm = totalElementsM // bGlobalReadVectorWidthMetadata
-            Solution.setGlobalReadVectorWidth(state, "Metadata", tvm, bGlobalReadVectorWidthMetadata, printRejectionReason)
-
-          GlobalReadVectorWidthMetadata = state["GlobalReadVectorWidthMetadata"]
-          if GlobalReadVectorWidthMetadata == 0:
-            GlobalReadVectorWidthMetadata = 1
-          totalVectorsCoalescedM = totalElementsCoalescedM // GlobalReadVectorWidthMetadata
-          totalVectorsM = totalElementsM // GlobalReadVectorWidthMetadata
-
+      GlobalReadVectorWidthMetadata = state["GlobalReadVectorWidthMetadata"]
+      if GlobalReadVectorWidthMetadata == 0:
+        GlobalReadVectorWidthMetadata = 1
+      totalVectorsCoalescedM = totalElementsCoalescedM // GlobalReadVectorWidthMetadata
+            
       if not Solution.setGlobalLoadTileDimClassic(state, "Metadata", state["NumLoadsMetadata"], \
           totalVectorsCoalescedM, totalElementsPerpM, depthUM, printRejectionReason):
         return
