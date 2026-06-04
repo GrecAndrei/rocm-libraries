@@ -1044,20 +1044,27 @@ def _unified_tiled_spec_from_problem(problem, knobs: dict, arch: str = "gfx950")
     num_warps = int(knobs.get("num_warps", 1))
     block_m_per_warp = int(knobs.get("block_m_per_warp", 16))
     use_mfma_32x32x8 = False
+    use_transposed_qk_32x32_ovr = False
 
-    # gfx942 flash pipeline (Stream A): flag-gated D128 fp16 32x32x8 wide-atom
-    # variant. ``HIPDNN_GFX942_FLASH_PIPELINE`` (default OFF, mirroring
-    # ``HIPDNN_GFX942_SWIZZLE_VLDS``) routes the D128 fp16 SDPA-fwd path to the
-    # ``mfma_f32_32x32x8_f16`` atom (the gfx942-legal wide fragment) instead of
-    # the narrow 16x16x16 default. The override forces ``block_m_per_warp=32``
-    # (one M=32 atom per warp) and a 32-aligned ``tile_size``; the grid
-    # recompute below reads the final ``spec.block_m_per_warp``, so the launch
-    # config stays coherent with the bumped BLOCK_M. Strictly gated on
+    # gfx942 flash pipeline: LEVELED flag-gated D128 fp16 wide-atom variant.
+    # ``HIPDNN_GFX942_FLASH_PIPELINE`` (default 0 / OFF) selects which gfx942
+    # 32x32 path the D128 fp16 SDPA-fwd kernel takes, so A/B/C contributions
+    # can be measured in isolation against the same baseline:
+    #   0 (or unset) -> narrow 16x16x16 baseline (byte-identical shipped path).
+    #   1 -> plain  x8 (Stream A): mfma_f32_32x32x8_f16, S = Q @ K^T, P_lds
+    #        bridge, naive strided V. (use_mfma_32x32x8=True)
+    #   2 -> transposed x8 (Stream C): ALSO compute S^T = K @ Q^T and consume
+    #        P^T directly from registers as the PV B-operand -- DROPS the P_lds
+    #        round-trip. (use_mfma_32x32x8=True AND use_transposed_qk_32x32=True)
+    # Both 1 and 2 force ``block_m_per_warp=32`` (one M=32 atom per warp) and a
+    # 32-aligned ``tile_size``; the grid recompute below reads the final
+    # ``spec.block_m_per_warp`` so the launch stays coherent. Strictly gated on
     # arch==gfx942 + D128 + fp16, so gfx950 and every other shape are
     # byte-identical to the flag-off path.
+    _flash_level = os.environ.get("HIPDNN_GFX942_FLASH_PIPELINE", "0")
     if (
         arch == "gfx942"
-        and os.environ.get("HIPDNN_GFX942_FLASH_PIPELINE", "0") == "1"
+        and _flash_level in ("1", "2")
         and problem.head_size == 128
         and problem.dtype == "fp16"
         and not knobs.get("use_mfma_32x32", False)
@@ -1066,6 +1073,7 @@ def _unified_tiled_spec_from_problem(problem, knobs: dict, arch: str = "gfx950")
         and not problem.use_sinks
     ):
         use_mfma_32x32x8 = True
+        use_transposed_qk_32x32_ovr = _flash_level == "2"
         block_m_per_warp = 32  # one M=32 atom per warp
         hd = int(problem.head_size)
         bs = int(problem.block_size)
@@ -1134,7 +1142,10 @@ def _unified_tiled_spec_from_problem(problem, knobs: dict, arch: str = "gfx950")
         tile_size=tile_size if tile_size > 0 else None,
         waves_per_eu=waves_per_eu if waves_per_eu > 0 else None,
         use_mfma_32x32=bool(knobs.get("use_mfma_32x32", False)),
-        use_transposed_qk_32x32=bool(knobs.get("use_transposed_qk_32x32", False)),
+        use_transposed_qk_32x32=(
+            bool(knobs.get("use_transposed_qk_32x32", False))
+            or use_transposed_qk_32x32_ovr
+        ),
         use_register_pv=bool(knobs.get("use_register_pv", False)),
         use_early_v_schedule=bool(knobs.get("use_early_v_schedule", False)),
         use_fast_paged_kv_desc=bool(knobs.get("use_fast_paged_kv_desc", False)),

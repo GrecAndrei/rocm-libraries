@@ -341,11 +341,19 @@ class UnifiedAttention2DTiledSpec:
         # ``ds_read_*_tr_*``) that does not exist on gfx942; reject them up front
         # rather than emit IR that comgr cannot select. The fp8 K/V cache path
         # uses ``ds_read_tr_b8`` for PV and is likewise gfx950-only here.
+        # ``use_transposed_qk_32x32`` is NO LONGER unconditionally gfx942-
+        # unsupported: paired with the gfx942-legal 32x32x8 atom
+        # (``use_mfma_32x32x8``) it computes S^T = K @ Q^T and consumes P^T
+        # directly from registers as the PV B-operand -- dropping the P_lds
+        # round-trip (Stream C). It is still rejected when paired with the
+        # gfx950-only 32x32x16 atom (``use_mfma_32x32``), and the dependent
+        # transposed-softmax VALU knobs (scalar_state/mask_once/...) remain
+        # gfx950-only here. So gate the transposed flag below (allow only the
+        # x8 pairing) rather than blanket-rejecting it.
         _unsupported = [
             name
             for name, on in (
                 ("use_mfma_32x32", self.use_mfma_32x32),
-                ("use_transposed_qk_32x32", self.use_transposed_qk_32x32),
                 ("use_transposed_scalar_state", self.use_transposed_scalar_state),
                 ("use_transposed_invariant_hoist", self.use_transposed_invariant_hoist),
                 ("use_transposed_mask_once", self.use_transposed_mask_once),
@@ -364,6 +372,17 @@ class UnifiedAttention2DTiledSpec:
                 "gfx942 tiled-2D attention supports only the narrow 16x16x16 "
                 "default path; these gfx950-only knobs are not available on "
                 f"gfx942: {', '.join(_unsupported)}"
+            )
+        # gfx942 transposed orientation is legal ONLY in the x8 pairing
+        # (S^T = K @ Q^T via the 32x32x8 atom + register P^T -> PV). The
+        # x16 pairing needs ds_read_tr16_b64, a gfx950-only transpose read,
+        # so it stays rejected. Mask/softmax VALU sub-knobs and the bf16
+        # path are likewise excluded on gfx942 (see the x8-transposed gate
+        # further below).
+        if self.use_transposed_qk_32x32 and not self.use_mfma_32x32x8:
+            raise ValueError(
+                "gfx942: use_transposed_qk_32x32 requires use_mfma_32x32x8 "
+                "(the x16 transposed path uses gfx950-only transpose reads)"
             )
         if self.kv_storage_dtype is not None:
             raise ValueError(
@@ -428,8 +447,56 @@ class UnifiedAttention2DTiledSpec:
                 raise ValueError(
                     "use_mfma_32x32x8 requires head_size to be a multiple of 32"
                 )
-        if self.use_transposed_qk_32x32 and not self.use_mfma_32x32:
-            raise ValueError("use_transposed_qk_32x32 requires use_mfma_32x32")
+            if self.use_transposed_qk_32x32:
+                # x8-transposed (Stream C): S^T = K @ Q^T, P^T consumed from
+                # registers as the PV B-operand (no P_lds bridge). Same C
+                # distribution / mask / softmax / epilogue as the x8 plain
+                # path; only the QK/PV MFMA orientation differs. The gfx950
+                # transposed-softmax VALU sub-knobs are NOT wired here, so
+                # reject them in this pairing (they need ds_read_*_tr_*).
+                if self.dtype != "fp16":
+                    raise ValueError(
+                        "x8-transposed (use_transposed_qk_32x32 + "
+                        "use_mfma_32x32x8) is fp16-only"
+                    )
+                if self.head_size % 32 != 0:
+                    raise ValueError(
+                        "x8-transposed requires head_size to be a multiple of 32"
+                    )
+                if self.block_m_per_warp != 32:
+                    raise ValueError(
+                        "x8-transposed requires block_m_per_warp=32"
+                    )
+                if self.tile_size_eff % 32 != 0:
+                    raise ValueError(
+                        "x8-transposed requires tile_size to be a multiple of 32"
+                    )
+                _x8t_unsupported = [
+                    name
+                    for name, on in (
+                        ("use_transposed_scalar_state", self.use_transposed_scalar_state),
+                        (
+                            "use_transposed_invariant_hoist",
+                            self.use_transposed_invariant_hoist,
+                        ),
+                        ("use_transposed_mask_once", self.use_transposed_mask_once),
+                        ("use_transposed_half_local_pv", self.use_transposed_half_local_pv),
+                        ("use_transposed_mask_limit", self.use_transposed_mask_limit),
+                    )
+                    if on
+                ]
+                if _x8t_unsupported:
+                    raise ValueError(
+                        "gfx942 x8-transposed does not support the gfx950-only "
+                        "transposed-softmax VALU sub-knobs: "
+                        f"{', '.join(_x8t_unsupported)}"
+                    )
+        if self.use_transposed_qk_32x32 and not (
+            self.use_mfma_32x32 or self.use_mfma_32x32x8
+        ):
+            raise ValueError(
+                "use_transposed_qk_32x32 requires use_mfma_32x32 or use_mfma_32x32x8"
+            )
         if self.use_transposed_scalar_state and not self.use_transposed_qk_32x32:
             raise ValueError(
                 "use_transposed_scalar_state requires use_transposed_qk_32x32"
@@ -1337,7 +1404,13 @@ def build_unified_attention_2d_tiled(
         )
         return b.smem_load_vN(V_lds, v_buf, slot, dtype=dtype, n=1)
 
-    if not REGISTER_PV:
+    # The x8-transposed path (Stream C) keeps P^T in registers and consumes it
+    # directly as the PV B-operand -- the P_lds bridge is never written or read,
+    # so skip its allocation entirely. That is the whole point: dropping the
+    # P_lds round-trip is the LDS-traffic / L2-pressure win this orientation
+    # buys. (REGISTER_PV is the bf16 16x16 register-P path; orthogonal.)
+    TRANSPOSED_X8 = USE_MFMA_32X32X8 and TRANSPOSED_QK_32X32
+    if not REGISTER_PV and not TRANSPOSED_X8:
         # P_lds row stride padding (16 bytes = 8 halves) to eliminate 4-way
         # LDS bank conflict on the softmax `ds_write_b16` stores. With row
         # stride T*2 = 128 bytes = exactly 32 banks, lanes 0, 16, 32, 48
@@ -2566,25 +2639,32 @@ def build_unified_attention_2d_tiled(
         else:
             _issue_v_load_runtime(tile_idx, buf_idx)
 
-    def _read_k8_mfma_operand(buf_idx: Value, k_row: Value, k_off: Value) -> Value:
-        """Read 8 K elements from K_lds as the bf16 MFMA operand.
+    def _read_k8_mfma_operand(
+        buf_idx: Value, k_row: Value, k_off: Value, frag: int = 8
+    ) -> Value:
+        """Read ``frag`` K elements from K_lds as the bf16 MFMA operand.
 
-        For the fp8-in-LDS path (``K_FP8_MFMA``) K_lds holds raw fp8 bytes
+        ``frag`` is 8 for the K=16 (32x32x16) atom and 4 for the K=8
+        (32x32x8) atom -- each lane owns half of K per MFMA. For the
+        fp8-in-LDS path (``K_FP8_MFMA``) K_lds holds raw fp8 bytes
         (half the LDS of bf16 -> higher occupancy). Dequant in register --
-        ``cvt_pk_f32_fp8`` + ``* k_scale`` + cast -- to the exact 8 bf16 the
+        ``cvt_pk_f32_fp8`` + ``* k_scale`` + cast -- to the exact bf16 the
         bf16 K_lds path would have held (bit-identical), then feed the
         standard bf16 MFMA. (Unfused cvt + explicit f32 multiply: the fused
         ``cvt_scalef32`` truncates non-pow2 scales; see the 16x16 path.)
         Otherwise read bf16 directly. Shared by the 16x16 and 32x32 QK
-        paths so both get the fp8 LDS-footprint win.
+        paths so both get the fp8 LDS-footprint win. (fp8 is rejected on
+        gfx942, so the x8-transposed path always takes the plain bf16 read.)
         """
         if not K_FP8_MFMA:
-            return b.smem_load_vN(K_lds, buf_idx, k_row, k_off, dtype=dtype, n=8)
+            return b.smem_load_vN(K_lds, buf_idx, k_row, k_off, dtype=dtype, n=frag)
         if FP8_NATIVE_QK:
             # Native fp8 QK: hand the raw fp8 K straight to the fp8 MFMA --
             # no dequant. (k_scale is folded into qk_scale post-MFMA.)
-            return b.smem_load_vN(K_lds, buf_idx, k_row, k_off, dtype=FP8E4M3, n=8)
-        k_fp8 = b.smem_load_vN(K_lds, buf_idx, k_row, k_off, dtype=FP8E4M3, n=8)
+            return b.smem_load_vN(
+                K_lds, buf_idx, k_row, k_off, dtype=FP8E4M3, n=frag
+            )
+        k_fp8 = b.smem_load_vN(K_lds, buf_idx, k_row, k_off, dtype=FP8E4M3, n=frag)
         return dequant_fp8x8_to_dtype(b, k_fp8, k_scale_p, dtype)
 
     # ---- Per-lane Q → VGPR gather (eliminates per-iter Q LDS reads) ----
@@ -2975,6 +3055,15 @@ def build_unified_attention_2d_tiled(
                 # already overwritten Q_lds with K data. Reading Q_lds
                 # would silently feed K values into the B operand and
                 # silently corrupt every transposed S^T.
+                # K-step parameterization for the transposed QK MFMA. For
+                # the gfx942-legal 32x32x8 atom each lane owns K = k*8 +
+                # (lane/32)*4 + [0..3] (<4 x half>); for the gfx950-only
+                # 32x32x16 atom it owns K = k*16 + (lane/32)*8 + [0..7]
+                # (<8 x half>). The A (K^T) and B (Q^T) operands share the
+                # SAME K distribution, so ``Q32_reg`` (gathered with the
+                # parameterized ``Q32_HALF_STRIDE`` above) is reused verbatim.
+                TQK_FRAG = 4 if USE_MFMA_32X32X8 else 8
+                TQK_HALF_STRIDE = 4 if USE_MFMA_32X32X8 else 8
                 ST32_n = [None] * QK_N_TILES
                 for n in range(QK_N_TILES):
                     acc32 = b.zero_vec_f32(16)
@@ -2983,11 +3072,17 @@ def build_unified_attention_2d_tiled(
                     k_row_t = b.add(b.const_i32(n * 32), lane_col32)
                     for k in range(QK_K_ITERS):
                         k_off_t = b.add(
-                            b.const_i32(k * 16), b.mul(lane_half32, b.const_i32(8))
+                            b.const_i32(k * QK_K_STEP),
+                            b.mul(lane_half32, b.const_i32(TQK_HALF_STRIDE)),
                         )
-                        A_k_t = _read_k8_mfma_operand(cur_buf, k_row_t, k_off_t)
+                        A_k_t = _read_k8_mfma_operand(
+                            cur_buf, k_row_t, k_off_t, frag=TQK_FRAG
+                        )
                         B_q_t = Q32_reg[k]
-                        acc32 = _mfma_32x32x16(b, dtype, A_k_t, B_q_t, acc32)
+                        if USE_MFMA_32X32X8:
+                            acc32 = _mfma_32x32x8(b, dtype, A_k_t, B_q_t, acc32)
+                        else:
+                            acc32 = _mfma_32x32x16(b, dtype, A_k_t, B_q_t, acc32)
                     ST32_n[n] = acc32
                 if GROUPED_KV2:
                     # Second score tile for the opt-in grouped online-softmax
@@ -3002,11 +3097,17 @@ def build_unified_attention_2d_tiled(
                         k_row_t = b.add(b.const_i32(n * 32), lane_col32)
                         for k in range(QK_K_ITERS):
                             k_off_t = b.add(
-                                b.const_i32(k * 16), b.mul(lane_half32, b.const_i32(8))
+                                b.const_i32(k * QK_K_STEP),
+                                b.mul(lane_half32, b.const_i32(TQK_HALF_STRIDE)),
                             )
-                            A_k_t = _read_k8_mfma_operand(nxt_buf, k_row_t, k_off_t)
+                            A_k_t = _read_k8_mfma_operand(
+                                nxt_buf, k_row_t, k_off_t, frag=TQK_FRAG
+                            )
                             B_q_t = Q32_reg[k]
-                            acc32 = _mfma_32x32x16(b, dtype, A_k_t, B_q_t, acc32)
+                            if USE_MFMA_32X32X8:
+                                acc32 = _mfma_32x32x8(b, dtype, A_k_t, B_q_t, acc32)
+                            else:
+                                acc32 = _mfma_32x32x16(b, dtype, A_k_t, B_q_t, acc32)
                         ST32_n_g1[n] = acc32
 
                 # Transposed softmax scaffold. ST32_n[n][reg] holds
@@ -3563,6 +3664,59 @@ def build_unified_attention_2d_tiled(
 
                 def _apply_transposed_pv_regs(acc32: Value, n: int, p_regs) -> Value:
                     v_dim32 = b.add(b.const_i32(n * 32), lane_col32)
+                    if USE_MFMA_32X32X8:
+                        # gfx942-legal K=8 transposed PV: O^T = V^T @ P^T,
+                        # P^T consumed DIRECTLY from registers (NO P_lds).
+                        #   A = V^T[M=d, K=kv-token] per lane (<4 x half>):
+                        #     M=d  = n*32 + lane%32 (== v_dim32)
+                        #     K    = k*8 + (lane/32)*4 + [0..3]
+                        #     V_lds is row-major [T, HD]; 4 distinct strided
+                        #     single-element reads (naive V -- Stream B's job
+                        #     to make conflict-free).
+                        #   B = P^T[K=kv-token, N=query] per lane (<4 x half>):
+                        #     K    = k*8 + (lane/32)*4 + [0..3]
+                        #     The probability for K-row r lives in
+                        #     ``p_regs[r//32][reg]`` of the lane whose 32-half
+                        #     owns row (r%32); cross-half rows are fetched with
+                        #     a single ``lane ^ 32`` exchange (the cheap reshape
+                        #     that beats the plain orientation's serializing
+                        #     C->A cross-lane reduction).
+                        for k in range(T // 8):
+                            a_v_elems = []
+                            for kk in range(4):
+                                v_row = b.add(
+                                    b.const_i32(k * 8 + kk),
+                                    b.mul(lane_half32, b.const_i32(4)),
+                                )
+                                v1 = b.smem_load_vN(
+                                    V_lds, v_buf, v_row, v_dim32, dtype=dtype, n=1
+                                )
+                                a_v_elems.append(b.vec_extract(v1, 0))
+                            b_p_elems = []
+                            for kk in range(4):
+                                # Low half wants K-row k0; high half wants k1.
+                                k0 = k * 8 + kk
+                                k1 = k * 8 + 4 + kk
+                                p_tile0 = k0 // 32
+                                p_tile1 = k1 // 32
+                                row0 = k0 % 32
+                                row1 = k1 % 32
+                                owner_half0 = (row0 % 8) // 4
+                                owner_half1 = (row1 % 8) // 4
+                                reg0 = (row0 // 8) * 4 + (row0 % 4)
+                                reg1 = (row1 // 8) * 4 + (row1 % 4)
+                                p0 = p_regs[p_tile0][reg0]
+                                p1 = p_regs[p_tile1][reg1]
+                                if owner_half0 == 1:
+                                    p0 = b.warp_shuffle_xor(p0, 32)
+                                if owner_half1 == 0:
+                                    p1 = b.warp_shuffle_xor(p1, 32)
+                                p_val = b.select(use_hi, p1, p0)
+                                b_p_elems.append(b.cast_f32_to(p_val, dtype))
+                            A_v_t = b.vec_pack(a_v_elems, dtype)
+                            B_p_t = b.vec_pack(b_p_elems, dtype)
+                            acc32 = _mfma_32x32x8(b, dtype, A_v_t, B_p_t, acc32)
+                        return acc32
                     for k in range(T // 16):
                         if TRANSPOSED_HALF_LOCAL_PV:
                             # Half-local K orientation. Each 32-lane half
