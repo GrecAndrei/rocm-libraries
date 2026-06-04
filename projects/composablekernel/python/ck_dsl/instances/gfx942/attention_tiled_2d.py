@@ -333,6 +333,18 @@ class UnifiedAttention2DTiledSpec:
     # request zero AGPR allocation so LLVM selects VGPR-form MFMA and avoids
     # AGPR<->VGPR copies around the online-softmax/PV accumulator scaling.
     use_agpr_alloc_zero: bool = False
+    # Conflict-free transposed V feed (Stream B). On the transposed-x8 PV path the
+    # naive A-operand (V^T) read issues 4 strided ``ds_read_u16`` over 4 distinct
+    # V_lds rows at one head-dim column -> 32 wave-half lanes collapse onto the
+    # same LDS bank set (the rocprof bank-conflict bound, ~7.25 conflicts/LDS).
+    # When True, V is stored TRANSPOSED ``[HD, T + pad]`` (head-dim outer, token
+    # contiguous, kKPack-padded) so the 4 tokens a lane needs are CONTIGUOUS ->
+    # one wide ``ds_read_b64`` (bank-spread). The transpose is paid once on the
+    # LDS store (sync ``global_load + shaped smem_store``). f16-only, requires the
+    # transposed-x8 orientation (use_mfma_32x32x8 + use_transposed_qk_32x32). This
+    # is a KERNEL-SIGNATURE field (tagged "cfv" in kernel_name) so it produces a
+    # distinct compiled/cached kernel -- a bare env var would alias the cache.
+    use_conflict_free_v: bool = False
 
     def __post_init__(self):
         # gfx942 (CDNA3) variant: the narrow ``16x16x16`` default path only.
@@ -512,6 +524,13 @@ class UnifiedAttention2DTiledSpec:
         if self.use_transposed_half_local_pv and not self.use_transposed_qk_32x32:
             raise ValueError(
                 "use_transposed_half_local_pv requires use_transposed_qk_32x32"
+            )
+        if self.use_conflict_free_v and not (
+            self.use_mfma_32x32x8 and self.use_transposed_qk_32x32
+        ):
+            raise ValueError(
+                "use_conflict_free_v requires the transposed-x8 PV orientation "
+                "(use_mfma_32x32x8 + use_transposed_qk_32x32)"
             )
         if self.use_mfma32_skip_legacy_qreg and not self.use_mfma_32x32:
             raise ValueError("use_mfma32_skip_legacy_qreg requires use_mfma_32x32")
@@ -713,6 +732,7 @@ class UnifiedAttention2DTiledSpec:
             "fp8mfma" if self.use_fp8_mfma_qk else "",
             "fp8pv" if self.use_fp8_mfma_pv else "",
             "regpv" if self.use_register_pv else "",
+            "cfv" if self.use_conflict_free_v else "",
         )
 
 
@@ -985,6 +1005,7 @@ def build_unified_attention_2d_tiled(
     FP8_NATIVE_QK = False
     REGISTER_PV = spec.use_register_pv
     TRANSPOSED_QK_32X32 = spec.use_transposed_qk_32x32
+    CONFLICT_FREE_V = spec.use_conflict_free_v
     KV_BYTES = 1 if KV_FP8 else 2
     kv_io_dtype = FP8E4M3 if KV_FP8 else dtype
 
@@ -1324,12 +1345,45 @@ def build_unified_attention_2d_tiled(
         + BLOCK_M * _out_stripe_b * 2
     )
     _swz_fits = (_lds_natural + _swz_extra_bytes) <= _LDS_CAP
+    # ---- Stream B: conflict-free transposed V LDS (flash level 3) ----
+    # On the transposed-x8 PV path (TRANSPOSED_X8) the A operand is V^T. The
+    # naive feed reads it from a row-major ``V_lds[T, HD]`` tile with 4 strided
+    # ``ds_read_u16`` over 4 distinct token rows at one head-dim column -> the 32
+    # wave-half lanes (varying head-dim) collapse onto the same LDS bank set (the
+    # rocprof bank-conflict bound, ~7.25 conflicts/LDS-inst). CK-Tile's gfx942
+    # ``qr_ks_vs`` recipe lays V K-contiguous so the 4 tokens a lane needs are
+    # CONTIGUOUS -> ONE wide ``ds_read_b64``, bank-spread by a kKPack pad. We
+    # adopt that: store V TRANSPOSED ``[HD, T + V_T_PAD]`` (head-dim outer, token
+    # contiguous). gfx942 async DMA cannot transpose HBM->LDS, so the transpose
+    # is paid ONCE on the LDS store via a sync ``global_load + shaped
+    # smem_store`` pass (CK technique #3, mirroring ``_issue_v_fp8_mfma_stripe``
+    # which already fills a non-natural V_lds). f16-only, requires the
+    # transposed-x8 orientation; signature-gated so it caches distinctly.
+    _v_t_pad = 8
+    _v_t_extra_bytes = HD * _v_t_pad * 2
+    _v_t_fits = (_lds_natural + _v_t_extra_bytes) <= _LDS_CAP
+    TRANSPOSED_V = (
+        CONFLICT_FREE_V
+        and USE_MFMA_32X32X8
+        and TRANSPOSED_QK_32X32
+        and not FP8_MFMA_PV
+        and not FP8_MFMA_QK
+        and not KV_FP8
+        and not FAST_PAGED_KV_DESC
+        and V_LDS_DTYPE == dtype
+        and dtype == F16
+        and HD in (64, 128)
+        and (HD % 8 == 0)
+        and (T * HD) % THREADS == 0
+        and _v_t_fits
+    )
     SWIZZLE_VLDS = (
         os.environ.get("HIPDNN_GFX942_SWIZZLE_VLDS", "1") == "1"
         and not FP8_MFMA_PV
         and not FP8_MFMA_QK
         and not USE_MFMA_32X32
         and not REGISTER_PV
+        and not TRANSPOSED_V
         and V_LDS_DTYPE == dtype
         and _V_ROW_PER_WAVE_CALL
         and NUM_WARPS in (1, 2)
@@ -1349,7 +1403,22 @@ def build_unified_attention_2d_tiled(
     V_LDS_STRIDE = HD + V_LDS_PAD
     V_GROUP_STRIDE = V_ROWS_PER_CALL * V_LDS_STRIDE
     V_GROUP_SHIFT = V_ROWS_PER_CALL.bit_length() - 1 if SWIZZLE_VLDS else 0
-    if FP8_MFMA_PV:
+    # Transposed-V column stride (in halves): the K=token axis is padded by
+    # ``V_T_PAD`` so consecutive head-dim rows land on a rotated bank base (CK's
+    # ``+kKPack``). T=64 f16 = 128 B = 32 banks * 4 -> one full bank sweep; the
+    # pad rotates each head-dim row's bank base by (8>>1)=4 banks.
+    V_T_PAD = _v_t_pad if TRANSPOSED_V else 0
+    V_T_STRIDE = T + V_T_PAD
+    if TRANSPOSED_V:
+        # Conflict-free transposed V LDS: ``[V_BUFS, HD, T + V_T_PAD]``. Logical
+        # ``V[token, dim]`` lives at ``V_lds[0, dim, token]`` (K=token contiguous
+        # along the fast/inner axis, padded by ``V_T_PAD``). The transposed-x8 PV
+        # A-operand read for a fixed head-dim row is a contiguous ``ds_read_b64``
+        # over consecutive tokens.
+        V_lds = b.smem_alloc(
+            V_LDS_DTYPE, [V_BUFS, HD, V_T_STRIDE], name_hint="VldsT"
+        )
+    elif FP8_MFMA_PV:
         # Native-fp8 PV uses ds_read_b64_tr_b8. The validated lane mapping
         # (HIP probe in /tmp/probe_tr_b8_stripe.hip) is:
         #   for lane L in 16-lane group G = L/16, position l = L%16:
@@ -2152,6 +2221,62 @@ def build_unified_attention_2d_tiled(
                 coherency=CACHE_STREAM,
             )
 
+    # ---- Stream B: transposed-V sync loader (conflict-free PV feed) ----
+    # gfx942 async DMA is lane-contiguous (HBM->LDS, no transpose), so the
+    # transposed ``[HD, T+V_T_PAD]`` V LDS is filled by a sync ``global_load +
+    # shaped smem_store`` pass (mirrors ``_issue_v_fp8_mfma_stripe``): each thread
+    # loads 8 CONTIGUOUS head-dim halves ``V[token, dim..dim+7]`` from HBM (HBM is
+    # ``[token, dim]`` row-major, so the load coalesces to one
+    # ``global_load_dwordx4``), then scatters them to the 8 transposed slots
+    # ``V_lds[0, dim+i, token]``. The transpose cost is paid ONCE per tile on the
+    # store; the PV read is then a wide conflict-free contiguous ``ds_read`` over
+    # consecutive tokens. ``voff`` from ``paged_kv_desc.offset`` is an ELEMENT
+    # offset (``global_load_vN`` folds the element size); using it directly is the
+    # validated recovery-ref recipe (the prior buggy variant doubled it to bytes
+    # and fed a buffer-rsrc load -> 2x-wrong address -> inf). 8-half chunks keep
+    # VGPR low (4-half chunks need 2x the unrolled address temps).
+    V_T_ELEMS_PER_CHUNK = 8
+    if TRANSPOSED_V:
+        assert (T * HD) % V_T_ELEMS_PER_CHUNK == 0
+        _v_t_total_chunks = (T * HD) // V_T_ELEMS_PER_CHUNK
+        assert _v_t_total_chunks % THREADS == 0, (
+            f"transposed-V loader: total chunks {_v_t_total_chunks} must be "
+            f"divisible by THREADS={THREADS} (T={T}, HD={HD})"
+        )
+        V_T_CHUNKS_PER_THREAD = _v_t_total_chunks // THREADS
+        _V_T_COLS_PER_CHUNK = HD // V_T_ELEMS_PER_CHUNK  # chunks across one token
+
+    def _issue_v_transposed(kv_tile_idx: Value) -> None:
+        """Sync transpose-store of V into ``V_lds[0, dim, token]`` (f16)."""
+        for call in range(V_T_CHUNKS_PER_THREAD):
+            chunk_id = b.add(
+                b.mul(b.const_i32(call), b.const_i32(THREADS)),
+                tid,
+            )
+            token = b.div(chunk_id, b.const_i32(_V_T_COLS_PER_CHUNK))
+            col = b.mul(
+                b.mod(chunk_id, b.const_i32(_V_T_COLS_PER_CHUNK)),
+                b.const_i32(V_T_ELEMS_PER_CHUNK),
+            )
+            linear_first = b.add(b.mul(token, b.const_i32(HD)), col)
+            voff, _ = paged_kv_desc.offset(
+                b,
+                tile_idx=kv_tile_idx,
+                linear_half=linear_first,
+                kv_head=kv_head_idx,
+            )
+            v_vec = b.global_load_vN(
+                value, voff, dtype, n=V_T_ELEMS_PER_CHUNK, align=V_T_ELEMS_PER_CHUNK
+            )
+            for i in range(V_T_ELEMS_PER_CHUNK):
+                # Transposed slot: head-dim row ``col+i``, token along fast axis.
+                b.smem_store_vN(
+                    V_lds,
+                    [b.const_i32(0), b.add(col, b.const_i32(i)), token],
+                    b.vec_extract(v_vec, i),
+                    1,
+                )
+
     # ---------------- FP8 K/V cache: async DMA loader (round 2) ----------------
     # Two-phase split that mirrors the bf16 path's HW DMA pipeline:
     #   1. `_issue_kv_fp8_async_load` issues `raw.ptr.buffer.load.lds`
@@ -2636,6 +2761,8 @@ def build_unified_attention_2d_tiled(
             _issue_v_fp8_mfma_stripe(tile_idx)
         elif KV_FP8:
             _issue_fp8_dequant_loads(tile_idx, b.const_i32(0), "V")
+        elif TRANSPOSED_V:
+            _issue_v_transposed(tile_idx)
         else:
             _issue_v_load_runtime(tile_idx, buf_idx)
 
@@ -3621,6 +3748,15 @@ def build_unified_attention_2d_tiled(
             # below ensures PV's V_lds reads see the just-loaded V bytes.
             b.s_waitcnt(vmcnt=0, lgkmcnt=0)
             b.sync()
+        elif TRANSPOSED_V:
+            # Transposed-V sync loader: ``global_load`` (vmcnt) followed by
+            # ``smem_store`` (lgkmcnt). The next-K async DMA is still pending on
+            # its own counters, but the partial-count trick below assumes an
+            # async-V deposit; the transpose fill uses a different instruction
+            # mix, so drain BOTH fully + barrier to publish the transposed V_lds
+            # before any PV A-operand read.
+            b.s_waitcnt(vmcnt=0, lgkmcnt=0)
+            b.sync()
         else:
             # Wait for current V while leaving next K pending. Current V was
             # issued before next K, so `kv_calls_per_tile` pending operations are
@@ -3682,16 +3818,46 @@ def build_unified_attention_2d_tiled(
                         #     that beats the plain orientation's serializing
                         #     C->A cross-lane reduction).
                         for k in range(T // 8):
-                            a_v_elems = []
-                            for kk in range(4):
-                                v_row = b.add(
-                                    b.const_i32(k * 8 + kk),
+                            # A = V^T[M=d, K=token], 4 tokens per lane:
+                            #   token = k*8 + (lane/32)*4 + [0..3]
+                            #   head-dim row = v_dim32 (n*32 + lane%32)
+                            if TRANSPOSED_V:
+                                # CK technique #1: V is stored K-contiguous in
+                                # ``V_lds[HD, T+pad]``, so those 4 tokens are
+                                # CONTIGUOUS along the inner (token) axis at the
+                                # lane's head-dim row ``v_dim32`` -> ONE wide
+                                # ``ds_read_b64`` (<4 x half>) replaces the 4
+                                # strided ``ds_read_u16``. Bank-spread because
+                                # adjacent lanes (varying ``v_dim32``) land in
+                                # ``V_T_PAD``-rotated rows. The token base is the
+                                # SAME ``k*8 + lane_half32*4`` the naive feed used,
+                                # and the n=4 contiguous read covers tokens
+                                # base..base+3 -> element-for-element identical to
+                                # the naive A operand (same MFMA K mapping).
+                                tok_base = b.add(
+                                    b.const_i32(k * 8),
                                     b.mul(lane_half32, b.const_i32(4)),
                                 )
-                                v1 = b.smem_load_vN(
-                                    V_lds, v_buf, v_row, v_dim32, dtype=dtype, n=1
+                                A_v_t = b.smem_load_vN(
+                                    V_lds,
+                                    v_buf,
+                                    v_dim32,
+                                    tok_base,
+                                    dtype=dtype,
+                                    n=4,
                                 )
-                                a_v_elems.append(b.vec_extract(v1, 0))
+                            else:
+                                a_v_elems = []
+                                for kk in range(4):
+                                    v_row = b.add(
+                                        b.const_i32(k * 8 + kk),
+                                        b.mul(lane_half32, b.const_i32(4)),
+                                    )
+                                    v1 = b.smem_load_vN(
+                                        V_lds, v_buf, v_row, v_dim32, dtype=dtype, n=1
+                                    )
+                                    a_v_elems.append(b.vec_extract(v1, 0))
+                                A_v_t = b.vec_pack(a_v_elems, dtype)
                             b_p_elems = []
                             for kk in range(4):
                                 # Low half wants K-row k0; high half wants k1.
@@ -3713,7 +3879,6 @@ def build_unified_attention_2d_tiled(
                                     p1 = b.warp_shuffle_xor(p1, 32)
                                 p_val = b.select(use_hi, p1, p0)
                                 b_p_elems.append(b.cast_f32_to(p_val, dtype))
-                            A_v_t = b.vec_pack(a_v_elems, dtype)
                             B_p_t = b.vec_pack(b_p_elems, dtype)
                             acc32 = _mfma_32x32x8(b, dtype, A_v_t, B_p_t, acc32)
                         return acc32

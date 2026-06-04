@@ -1045,6 +1045,7 @@ def _unified_tiled_spec_from_problem(problem, knobs: dict, arch: str = "gfx950")
     block_m_per_warp = int(knobs.get("block_m_per_warp", 16))
     use_mfma_32x32x8 = False
     use_transposed_qk_32x32_ovr = False
+    use_conflict_free_v_ovr = False
 
     # gfx942 flash pipeline: LEVELED flag-gated D128 fp16 wide-atom variant.
     # ``HIPDNN_GFX942_FLASH_PIPELINE`` (default 0 / OFF) selects which gfx942
@@ -1056,7 +1057,15 @@ def _unified_tiled_spec_from_problem(problem, knobs: dict, arch: str = "gfx950")
     #   2 -> transposed x8 (Stream C): ALSO compute S^T = K @ Q^T and consume
     #        P^T directly from registers as the PV B-operand -- DROPS the P_lds
     #        round-trip. (use_mfma_32x32x8=True AND use_transposed_qk_32x32=True)
-    # Both 1 and 2 force ``block_m_per_warp=32`` (one M=32 atom per warp) and a
+    #   3 -> transposed x8 + conflict-free V (Stream B): level 2 PLUS the
+    #        transposed ``[HD, T+pad]`` V LDS so the PV A-operand (V^T) read is a
+    #        wide bank-spread ``ds_read_b64`` instead of 4 strided ``ds_read_u16``
+    #        (use_mfma_32x32x8 AND use_transposed_qk_32x32 AND use_conflict_free_v).
+    #        ``use_conflict_free_v`` is a KERNEL-SIGNATURE field (tagged "cfv" in
+    #        kernel_name) so level 3 compiles/caches a kernel DISTINCT from level
+    #        2 -- a bare env var inside the builder would alias the JIT cache and
+    #        silently serve the level-2 kernel (the prior measurement bug).
+    # Levels 1-3 force ``block_m_per_warp=32`` (one M=32 atom per warp) and a
     # 32-aligned ``tile_size``; the grid recompute below reads the final
     # ``spec.block_m_per_warp`` so the launch stays coherent. Strictly gated on
     # arch==gfx942 + D128 + fp16, so gfx950 and every other shape are
@@ -1064,7 +1073,7 @@ def _unified_tiled_spec_from_problem(problem, knobs: dict, arch: str = "gfx950")
     _flash_level = os.environ.get("HIPDNN_GFX942_FLASH_PIPELINE", "0")
     if (
         arch == "gfx942"
-        and _flash_level in ("1", "2")
+        and _flash_level in ("1", "2", "3")
         and problem.head_size == 128
         and problem.dtype == "fp16"
         and not knobs.get("use_mfma_32x32", False)
@@ -1073,7 +1082,8 @@ def _unified_tiled_spec_from_problem(problem, knobs: dict, arch: str = "gfx950")
         and not problem.use_sinks
     ):
         use_mfma_32x32x8 = True
-        use_transposed_qk_32x32_ovr = _flash_level == "2"
+        use_transposed_qk_32x32_ovr = _flash_level in ("2", "3")
+        use_conflict_free_v_ovr = _flash_level == "3"
         block_m_per_warp = 32  # one M=32 atom per warp
         hd = int(problem.head_size)
         bs = int(problem.block_size)
@@ -1155,6 +1165,10 @@ def _unified_tiled_spec_from_problem(problem, knobs: dict, arch: str = "gfx950")
     # flash pipeline), keeping the gfx950 construction byte-identical.
     if use_mfma_32x32x8:
         spec_kwargs["use_mfma_32x32x8"] = True
+    # ``use_conflict_free_v`` is likewise a gfx942-only spec field (flash level
+    # 3). Only pass it when requested, keeping gfx950 construction unchanged.
+    if use_conflict_free_v_ovr:
+        spec_kwargs["use_conflict_free_v"] = True
     return UnifiedAttention2DTiledSpec(**spec_kwargs)
 
 
