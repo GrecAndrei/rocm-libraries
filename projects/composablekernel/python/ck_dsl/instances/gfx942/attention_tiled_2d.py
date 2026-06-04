@@ -2221,61 +2221,88 @@ def build_unified_attention_2d_tiled(
                 coherency=CACHE_STREAM,
             )
 
-    # ---- Stream B: transposed-V sync loader (conflict-free PV feed) ----
-    # gfx942 async DMA is lane-contiguous (HBM->LDS, no transpose), so the
-    # transposed ``[HD, T+V_T_PAD]`` V LDS is filled by a sync ``global_load +
-    # shaped smem_store`` pass (mirrors ``_issue_v_fp8_mfma_stripe``): each thread
-    # loads 8 CONTIGUOUS head-dim halves ``V[token, dim..dim+7]`` from HBM (HBM is
-    # ``[token, dim]`` row-major, so the load coalesces to one
-    # ``global_load_dwordx4``), then scatters them to the 8 transposed slots
-    # ``V_lds[0, dim+i, token]``. The transpose cost is paid ONCE per tile on the
-    # store; the PV read is then a wide conflict-free contiguous ``ds_read`` over
-    # consecutive tokens. ``voff`` from ``paged_kv_desc.offset`` is an ELEMENT
-    # offset (``global_load_vN`` folds the element size); using it directly is the
-    # validated recovery-ref recipe (the prior buggy variant doubled it to bytes
-    # and fed a buffer-rsrc load -> 2x-wrong address -> inf). 8-half chunks keep
-    # VGPR low (4-half chunks need 2x the unrolled address temps).
-    V_T_ELEMS_PER_CHUNK = 8
+    # ---- Stream B (DECISIVE pivot): transposed-V VECTOR-store loader ----
+    # The transposed ``V_lds[HD, T+V_T_PAD]`` (head-dim outer, token inner) is the
+    # conflict-free PV feed (the PV A-operand read is then ONE wide contiguous
+    # ``ds_read_b64`` over consecutive tokens). gfx942 async DMA cannot transpose
+    # HBM->LDS, so the transpose is paid on the LDS store side.
+    #
+    # PROVEN DEAD VEHICLE (do NOT restore): the prior fill loaded 8 contiguous
+    # head-dims ``V[token, col..col+7]`` and SCATTERED them to 8 strided rows
+    # ``V_lds[col+i, token]`` with 8 scalar ``smem_store_vN(..., n=1)`` =
+    # sub-dword ``ds_write_b16``. That corrupts head-dims >=8 (12/5/9; d>=8
+    # garbage/inf, non-deterministic) on the transposed-x8 path -- two independent
+    # implementations failed identically. The ds_write_b16 scatter is the hazard.
+    #
+    # THE VECTOR-STORE FILL (this implementation): invert the per-thread tiling so
+    # the LDS STORE is contiguous. Each thread owns one head-dim row ``col`` and a
+    # group of ``V_T_VEC`` CONSECUTIVE tokens ``token_base..token_base+V_T_VEC-1``;
+    # it reads those tokens' value at head-dim ``col`` from HBM (token-strided
+    # global loads -- gathers in HBM are fine, no LDS hazard), packs them into one
+    # ``<V_T_VEC x half>`` and writes them with ONE vector ``smem_store_vN(V_lds,
+    # [0, col, token_base], vec, n=V_T_VEC)``. Because token is the INNER/fast
+    # axis of ``V_lds[HD, T+pad]``, those V_T_VEC slots are CONTIGUOUS in LDS ->
+    # the store lowers to a single ``ds_write_b{32,64,128}`` (NO sub-dword
+    # ds_write_b16). This is the brief's mandated pivot: vector ds_write, not
+    # scatter. ``voff`` from ``paged_kv_desc.offset`` is an ELEMENT offset.
+    V_T_VEC = 4 if (T % 4 == 0) else (2 if (T % 2 == 0) else 1)
     if TRANSPOSED_V:
-        assert (T * HD) % V_T_ELEMS_PER_CHUNK == 0
-        _v_t_total_chunks = (T * HD) // V_T_ELEMS_PER_CHUNK
-        assert _v_t_total_chunks % THREADS == 0, (
-            f"transposed-V loader: total chunks {_v_t_total_chunks} must be "
-            f"divisible by THREADS={THREADS} (T={T}, HD={HD})"
-        )
-        V_T_CHUNKS_PER_THREAD = _v_t_total_chunks // THREADS
-        _V_T_COLS_PER_CHUNK = HD // V_T_ELEMS_PER_CHUNK  # chunks across one token
+        # token-groups along the inner axis: V_T_VEC consecutive tokens per group.
+        _v_t_token_groups = T // V_T_VEC
+        # Total (col, token-group) work items spread across the workgroup.
+        _v_t_total_items = HD * _v_t_token_groups
+        # Items each thread fills (loop trip count). May not divide evenly when
+        # THREADS > items; guard the tail with item < total below.
+        V_T_ITEMS_PER_THREAD = (_v_t_total_items + THREADS - 1) // THREADS
+        _v_t_need_item_guard = (_v_t_total_items % THREADS) != 0
 
     def _issue_v_transposed(kv_tile_idx: Value) -> None:
-        """Sync transpose-store of V into ``V_lds[0, dim, token]`` (f16)."""
-        for call in range(V_T_CHUNKS_PER_THREAD):
-            chunk_id = b.add(
-                b.mul(b.const_i32(call), b.const_i32(THREADS)),
-                tid,
-            )
-            token = b.div(chunk_id, b.const_i32(_V_T_COLS_PER_CHUNK))
-            col = b.mul(
-                b.mod(chunk_id, b.const_i32(_V_T_COLS_PER_CHUNK)),
-                b.const_i32(V_T_ELEMS_PER_CHUNK),
-            )
-            linear_first = b.add(b.mul(token, b.const_i32(HD)), col)
-            voff, _ = paged_kv_desc.offset(
-                b,
-                tile_idx=kv_tile_idx,
-                linear_half=linear_first,
-                kv_head=kv_head_idx,
-            )
-            v_vec = b.global_load_vN(
-                value, voff, dtype, n=V_T_ELEMS_PER_CHUNK, align=V_T_ELEMS_PER_CHUNK
-            )
-            for i in range(V_T_ELEMS_PER_CHUNK):
-                # Transposed slot: head-dim row ``col+i``, token along fast axis.
-                b.smem_store_vN(
-                    V_lds,
-                    [b.const_i32(0), b.add(col, b.const_i32(i)), token],
-                    b.vec_extract(v_vec, i),
-                    1,
+        """VECTOR-store transpose of V into ``V_lds[0, col, token]`` (f16).
+
+        Per work item: ``item = call*THREADS + tid`` maps to head-dim row
+        ``col = item // token_groups`` and token group ``g = item % token_groups``
+        (token_base = g*V_T_VEC). Reads V_T_VEC consecutive tokens at head-dim
+        ``col`` from HBM and writes them as ONE contiguous vector ds_write.
+        """
+        _tg = b.const_i32(_v_t_token_groups)
+        for call in range(V_T_ITEMS_PER_THREAD):
+            item = b.add(b.mul(b.const_i32(call), b.const_i32(THREADS)), tid)
+            if _v_t_need_item_guard:
+                # Tail items past the work set must not store (would scatter OOB
+                # of V_lds). Clamp to item 0 (a redundant valid write).
+                item = b.select(
+                    b.cmp_lt(item, b.const_i32(_v_t_total_items)),
+                    item,
+                    b.const_i32(0),
                 )
+            col = b.div(item, _tg)
+            g = b.mod(item, _tg)
+            token_base = b.mul(g, b.const_i32(V_T_VEC))
+            # Gather V_T_VEC consecutive tokens at head-dim ``col`` from HBM.
+            # HBM is [token, dim] row-major, so token t at dim col lives at
+            # linear (token_base + j) * HD + col -- stride HD between the j's.
+            elems = []
+            for j in range(V_T_VEC):
+                token_j = b.add(token_base, b.const_i32(j))
+                linear_j = b.add(b.mul(token_j, b.const_i32(HD)), col)
+                voff_j, _ = paged_kv_desc.offset(
+                    b,
+                    tile_idx=kv_tile_idx,
+                    linear_half=linear_j,
+                    kv_head=kv_head_idx,
+                )
+                v1 = b.global_load(value, voff_j, dtype, align=2)
+                elems.append(v1)
+            v_vec = b.vec_pack(elems, dtype)
+            # ONE contiguous vector store: token is the inner axis, so
+            # [0, col, token_base] + n=V_T_VEC writes V_T_VEC adjacent LDS slots
+            # -> a single ds_write_b{32,64,128} (no sub-dword scatter).
+            b.smem_store_vN(
+                V_lds,
+                [b.const_i32(0), col, token_base],
+                v_vec,
+                V_T_VEC,
+            )
 
     # ---------------- FP8 K/V cache: async DMA loader (round 2) ----------------
     # Two-phase split that mirrors the bf16 path's HW DMA pipeline:
