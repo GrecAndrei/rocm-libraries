@@ -345,6 +345,24 @@ class UnifiedAttention2DTiledSpec:
     # is a KERNEL-SIGNATURE field (tagged "cfv" in kernel_name) so it produces a
     # distinct compiled/cached kernel -- a bare env var would alias the cache.
     use_conflict_free_v: bool = False
+    # K single-buffer (OCCUPANCY lever, gfx942). The default path double-buffers
+    # K_lds (``[2, T, HD]``) so the next-tile async-DMA K[i+1] overlaps softmax+PV
+    # of tile i. On the transposed-x8 D128 fp16 path that double buffer is the LDS
+    # peak: K_lds(2*T*HD*2=32KB) + V_lds(T*HD*2=16KB) = 48KB > the 32KB
+    # 2-wg/CU threshold (STEP-0 evidence: Acc_lds is already backend-aliased into
+    # the loop region, so dropping it / acc->AGPR does NOT cross the threshold;
+    # only cutting LOOP LDS does). When True, K_lds is single-buffered
+    # (``[1, T, HD]`` = 16KB) so loop LDS = 16+16 = 32KB -> 2 wg/CU on gfx942.
+    # Correctness: the next-K async DMA into the shared slot races the tail of
+    # QK[i]'s LDS reads via raw_ptr_buffer_load_lds lgkmcnt accounting; we close
+    # the race by issuing next-K only AFTER a full post-QK ``s_waitcnt(lgkmcnt=0)
+    # + sync()`` (all QK K-reads retired before the shared-slot DMA write). The
+    # lost per-CTA prefetch overlap is compensated by cross-CTA latency hiding
+    # from 2 wg/CU. KERNEL-SIGNATURE field (tagged "k1buf" in kernel_name) so it
+    # produces a distinct compiled/cached kernel. f16-only, requires the
+    # transposed-x8 orientation + BLOCK_M <= T (so Q still aliases the single K
+    # slot). DEFAULT OFF -> gfx950 and every existing kernel are byte-identical.
+    use_k_single_buffer: bool = False
 
     def __post_init__(self):
         # gfx942 (CDNA3) variant: the narrow ``16x16x16`` default path only.
@@ -532,6 +550,22 @@ class UnifiedAttention2DTiledSpec:
                 "use_conflict_free_v requires the transposed-x8 PV orientation "
                 "(use_mfma_32x32x8 + use_transposed_qk_32x32)"
             )
+        if self.use_k_single_buffer:
+            if not (self.use_mfma_32x32x8 and self.use_transposed_qk_32x32):
+                raise ValueError(
+                    "use_k_single_buffer requires the transposed-x8 PV orientation "
+                    "(use_mfma_32x32x8 + use_transposed_qk_32x32)"
+                )
+            if self.dtype != "fp16":
+                raise ValueError("use_k_single_buffer is fp16-only")
+            _block_m = self.num_warps * self.block_m_per_warp
+            _t = self.tile_size if self.tile_size is not None else self.block_size
+            if _block_m > _t:
+                raise ValueError(
+                    "use_k_single_buffer requires BLOCK_M <= tile_size so Q still "
+                    "aliases the single K slot (BLOCK_M="
+                    f"{_block_m}, tile_size={_t})"
+                )
         if self.use_mfma32_skip_legacy_qreg and not self.use_mfma_32x32:
             raise ValueError("use_mfma32_skip_legacy_qreg requires use_mfma_32x32")
         if self.use_transposed_mask_limit:
@@ -733,6 +767,7 @@ class UnifiedAttention2DTiledSpec:
             "fp8pv" if self.use_fp8_mfma_pv else "",
             "regpv" if self.use_register_pv else "",
             "cfv" if self.use_conflict_free_v else "",
+            "k1buf" if self.use_k_single_buffer else "",
         )
 
 
@@ -1006,6 +1041,7 @@ def build_unified_attention_2d_tiled(
     REGISTER_PV = spec.use_register_pv
     TRANSPOSED_QK_32X32 = spec.use_transposed_qk_32x32
     CONFLICT_FREE_V = spec.use_conflict_free_v
+    K_SINGLE_BUF = spec.use_k_single_buffer
     KV_BYTES = 1 if KV_FP8 else 2
     kv_io_dtype = FP8E4M3 if KV_FP8 else dtype
 
@@ -1272,7 +1308,12 @@ def build_unified_attention_2d_tiled(
     # K_BUF_BYTES depends on the K_LDS_DTYPE (1 byte for fp8, 2 for bf16).
     K_LDS_ELEM_BYTES = 1 if K_LDS_DTYPE == FP8E4M3 else 2
     K_BUF_BYTES = T * HD * K_LDS_ELEM_BYTES
-    K_TOTAL_BYTES = 2 * K_BUF_BYTES  # K_lds has 2 double-buffer slots
+    # Number of K_lds double-buffer slots. Default 2 (next-tile prefetch overlaps
+    # softmax+PV). The OCCUPANCY lever single-buffers K (1 slot) to cut loop LDS
+    # from 48KB -> 32KB and reach 2 wg/CU; the next-K issue is then ordered after
+    # a post-QK LDS-read drain to close the shared-slot DMA race.
+    K_BUFS = 1 if K_SINGLE_BUF else 2
+    K_TOTAL_BYTES = K_BUFS * K_BUF_BYTES
     # Q can alias K_lds when (a) the dtypes match and (b) it fits in the
     # full K_lds region (both slots). When ``BLOCK_M <= T`` Q fits in one
     # slot (rows 0..BLOCK_M of K_lds[0]); when ``BLOCK_M > T`` Q spills
@@ -1282,7 +1323,7 @@ def build_unified_attention_2d_tiled(
     # for the fp8-MFMA path K_lds is fp8 so a dedicated Q_lds slab is needed.
     Q_ALIAS_K = (K_LDS_DTYPE == dtype) and Q_BYTES <= K_TOTAL_BYTES
     Q_USES_DUAL_SLOT = Q_ALIAS_K and BLOCK_M > T
-    K_lds = b.smem_alloc(K_LDS_DTYPE, [2, T, HD], name_hint="Klds")
+    K_lds = b.smem_alloc(K_LDS_DTYPE, [K_BUFS, T, HD], name_hint="Klds")
     V_BUFS = 1  # single-buffer V (race-free: see comment above)
     # ---- V_lds bank-deconflict swizzle (HIPDNN_GFX942_SWIZZLE_VLDS) ----
     # The plain-atom PV B-operand is read with 4 strided ``ds_read_u16`` loads
@@ -3086,7 +3127,10 @@ def build_unified_attention_2d_tiled(
             return acc_vals[n * ACC_M_ATOMS + atom]
 
         cur_buf = carry[ml_count + ACC_N_TILES * ACC_M_ATOMS]
-        nxt_buf = b.sub(b.const_i32(1), cur_buf)
+        # Single-buffered K: there is only slot 0, so the "next" buffer IS the
+        # current one. (cur_buf is also pinned to 0 by the const-0 carry init +
+        # the const-0 yield below.) Double-buffered K alternates 0<->1.
+        nxt_buf = cur_buf if K_SINGLE_BUF else b.sub(b.const_i32(1), cur_buf)
         tile_off = b.mul(kv_tile_iv, b.const_i32(T))
         if GROUPED_KV2:
             tile1_iv_raw = b.add(kv_tile_iv, b.const_i32(1))
@@ -3548,7 +3592,24 @@ def build_unified_attention_2d_tiled(
         # Now that QK no longer needs VMEM, start current V first and next K
         # second. This ordering is what lets the partial wait before PV leave
         # only next K pending.
-        if GROUPED_KV2:
+        if K_SINGLE_BUF:
+            # OCCUPANCY lever: K is single-buffered, so next-K reuses the SAME
+            # slot QK just read. The next-K async DMA would race the tail of
+            # this iteration's QK K-reads (lgkmcnt accounting on
+            # raw_ptr_buffer_load_lds) and silently corrupt the tile. Drain ALL
+            # outstanding LDS reads + barrier BEFORE issuing the next-K DMA into
+            # the shared slot; the DMA then overlaps softmax + PV + epilogue, and
+            # the next iter's start-of-loop ``s_waitcnt(vmcnt=0,lgkmcnt=0); sync``
+            # waits for it before QK. V is also single-buffered: issue it after
+            # the same drain so its store does not race the K-read drain.
+            b.s_waitcnt(lgkmcnt=0)
+            b.sync()
+            if not EARLY_V_SCHEDULE:
+                # When EARLY_V is set, V was already issued at iter start; do not
+                # re-issue (it would double-load and race the in-flight V).
+                _issue_v(kv_tile_iv, cur_buf)
+            _issue_k(safe_next_tile, nxt_buf)
+        elif GROUPED_KV2:
             _issue_v(kv_tile_iv, cur_buf)
             # Both K buffers have been consumed by QK0/QK1. Refill cur_buf
             # with the next group's first K tile and carry cur_buf forward.
