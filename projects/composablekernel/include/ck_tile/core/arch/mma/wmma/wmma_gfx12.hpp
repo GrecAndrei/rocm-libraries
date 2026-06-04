@@ -5,7 +5,6 @@
 
 #include "wmma_traits.hpp"
 
-#include "ck_tile/core/config.hpp"
 #include "ck_tile/core/arch/arch.hpp"
 #include "ck_tile/core/arch/mma/amdgcn_mma.hpp"
 #include "ck_tile/core/arch/mma/mma_op_family.hpp"
@@ -15,6 +14,7 @@
 #include "ck_tile/core/numeric/half.hpp"
 #include "ck_tile/core/numeric/int8.hpp"
 #include "ck_tile/core/numeric/integer.hpp"
+#include "ck_tile/core/numeric/pk_int4.hpp"
 #include "ck_tile/core/numeric/vector_type.hpp"
 #include "ck_tile/core/utility/bit_cast.hpp"
 
@@ -75,7 +75,8 @@ struct amdgcn_mma<bf16_t, bf16_t, fp32_t, 16u, 16u, 16u, CtrlFlags, CompilerTarg
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec)
     {
-        return {__builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12(aVec, bVec, cVec)};
+        return {__builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12(
+            bit_cast<int16x8_t>(aVec), bit_cast<int16x8_t>(bVec), cVec)};
     }
 };
 
@@ -127,7 +128,8 @@ struct amdgcn_mma<bf16_t, bf16_t, bf16_t, 16u, 16u, 16u, CtrlFlags, CompilerTarg
     CK_TILE_DEVICE static CVecType
     exec(AVecType const& aVec, BVecType const& bVec, CVecType const& cVec)
     {
-        return {__builtin_amdgcn_wmma_bf16_16x16x16_bf16_w32_gfx12(aVec, bVec, cVec)};
+        return bit_cast<CVecType>(__builtin_amdgcn_wmma_bf16_16x16x16_bf16_w32_gfx12(
+            bit_cast<int16x8_t>(aVec), bit_cast<int16x8_t>(bVec), bit_cast<int16x8_t>(cVec)));
     }
 };
 

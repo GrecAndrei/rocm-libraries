@@ -7,18 +7,32 @@
 
 #if CK_TILE_USE_BUFFER_ADDRESSING_BUILTIN
 
+#include "ck_tile/core/arch/amd_buffer_coherence.hpp"
 #include "ck_tile/core/arch/amd_tdm_descriptor.hpp"
 #include "ck_tile/core/arch/amd_wave_read_first_lane.hpp"
+#include "ck_tile/core/container/array.hpp"
+#include "ck_tile/core/container/thread_buffer.hpp"
+#include "ck_tile/core/container/tuple.hpp"
+#include "ck_tile/core/numeric/bfloat16.hpp"
+#include "ck_tile/core/numeric/e8m0.hpp"
+#include "ck_tile/core/numeric/ext_vector_base.hpp"
+#include "ck_tile/core/numeric/float8.hpp"
+#include "ck_tile/core/numeric/half.hpp"
+#include "ck_tile/core/numeric/int8.hpp"
 #include "ck_tile/core/numeric/integer.hpp"
 #include "ck_tile/core/numeric/integral_constant.hpp"
+#include "ck_tile/core/numeric/pk_f6.hpp"
+#include "ck_tile/core/numeric/pk_fp4.hpp"
+#include "ck_tile/core/numeric/pk_int4.hpp"
 #include "ck_tile/core/numeric/vector_type.hpp"
-#include "ck_tile/core/container/container_helper.hpp"
-#include "ck_tile/core/container/thread_buffer.hpp"
-#include "ck_tile/core/utility/type_traits.hpp"
 #include "ck_tile/core/utility/bit_cast.hpp"
 #include "ck_tile/core/utility/functional.hpp"
 #include "ck_tile/core/utility/ignore.hpp"
-#include "ck_tile/core/arch/amd_buffer_coherence.hpp"
+#include "ck_tile/core/utility/type_traits.hpp"
+
+#include <cstdint>
+#include <cstring>
+#include <type_traits>
 
 #define HAS_GLOBAL_ATOMIC_PK_ADD_BUILTIN                        \
     __has_builtin(__builtin_amdgcn_global_atomic_fadd_v2f16) && \
@@ -3286,7 +3300,6 @@ __device__ auto amd_transpose_load_to_vgpr(const T* __restrict__ in_ptr)
         auto lds_ptr = reinterpret_cast<__LDS_ADDR llvm_fp16x4_t*>(in_ptr_);
         return bit_cast<thread_buffer<T, N>>(__builtin_amdgcn_ds_read_tr16_b64_v4f16(lds_ptr));
 #elif defined(__gfx125__)
-        typedef __attribute__((__vector_size__(8 * sizeof(__fp16)))) __fp16 llvm_fp16x8_t;
         auto lds_ptr = reinterpret_cast<__LDS_ADDR llvm_fp16x8_t*>(in_ptr_);
         return bit_cast<thread_buffer<T, N>>(__builtin_amdgcn_ds_load_tr16_b128_v8f16(lds_ptr));
 #else
