@@ -1079,10 +1079,17 @@ def _unified_tiled_spec_from_problem(problem, knobs: dict, arch: str = "gfx950")
     # ``spec.block_m_per_warp`` so the launch stays coherent. Strictly gated on
     # arch==gfx942 + D128 + fp16, so gfx950 and every other shape are
     # byte-identical to the flag-off path.
+    #   5 -> transposed x8 + K single-buffer + conflict-free V (the FULL stack,
+    #        prong3): level 4 PLUS ``use_conflict_free_v`` so the loop carries
+    #        BOTH the 2-wg/CU K single-buffer AND the bank-spread wide V read.
+    #        LDS = K(16)+cfv-V(~18KB)+epilogue ~= 34KB (static probe) -> 1 wg/CU
+    #        at the current cfv pad (just over the 32KB 2-wg threshold). Distinct
+    #        kernel_name (both "cfv" and "k1buf" tags) so it caches separately
+    #        from levels 3 and 4.
     _flash_level = os.environ.get("HIPDNN_GFX942_FLASH_PIPELINE", "0")
     if (
         arch == "gfx942"
-        and _flash_level in ("1", "2", "3", "4")
+        and _flash_level in ("1", "2", "3", "4", "5")
         and problem.head_size == 128
         and problem.dtype == "fp16"
         and not knobs.get("use_mfma_32x32", False)
@@ -1091,9 +1098,9 @@ def _unified_tiled_spec_from_problem(problem, knobs: dict, arch: str = "gfx950")
         and not problem.use_sinks
     ):
         use_mfma_32x32x8 = True
-        use_transposed_qk_32x32_ovr = _flash_level in ("2", "3", "4")
-        use_conflict_free_v_ovr = _flash_level == "3"
-        use_k_single_buffer_ovr = _flash_level == "4"
+        use_transposed_qk_32x32_ovr = _flash_level in ("2", "3", "4", "5")
+        use_conflict_free_v_ovr = _flash_level in ("3", "5")
+        use_k_single_buffer_ovr = _flash_level in ("4", "5")
         block_m_per_warp = 32  # one M=32 atom per warp
         hd = int(problem.head_size)
         bs = int(problem.block_size)

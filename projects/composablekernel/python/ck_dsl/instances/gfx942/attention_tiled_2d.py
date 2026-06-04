@@ -2306,6 +2306,8 @@ def build_unified_attention_2d_tiled(
         ``col`` from HBM and writes them as ONE contiguous vector ds_write.
         """
         _tg = b.const_i32(_v_t_token_groups)
+        # Zero of the working dtype for masked (out-of-range) V tokens.
+        zero_h = b.cast_f32_to(b.const_f32(0.0), dtype)
         for call in range(V_T_ITEMS_PER_THREAD):
             item = b.add(b.mul(b.const_i32(call), b.const_i32(THREADS)), tid)
             if _v_t_need_item_guard:
@@ -2322,17 +2324,43 @@ def build_unified_attention_2d_tiled(
             # Gather V_T_VEC consecutive tokens at head-dim ``col`` from HBM.
             # HBM is [token, dim] row-major, so token t at dim col lives at
             # linear (token_base + j) * HD + col -- stride HD between the j's.
+            # THE FIX (root cause of the L3 12/9/5 garbage + perf MEMORY FAULT):
+            # tokens past the valid KV length of the LAST (partial) tile are NOT
+            # real V. The naive async feed reads them through a BOUNDED
+            # ``buffer_rsrc`` (size ``kv_block_bytes_c``) so out-of-range lanes
+            # HARDWARE-mask to 0; this manual scalar gather had NO such bound, so
+            # the invalid V_lds slots held garbage (often inf/nan from
+            # unmapped/stale memory). Softmax correctly sets P=0 for those masked
+            # tokens, BUT the PV MFMA then computes ``P(0) * V(inf) = nan`` -> the
+            # whole O^T row goes nan/inf (observed: first mismatch at index 1,
+            # worst diff inf, ~70% wrong), and on large multi-tile shapes the
+            # unbounded load FAULTS (faulting addr ...c000 in the _cfv kernel).
+            # The descriptor carries NO validity predicate for this geometry
+            # (``valid_j`` is None), so reproduce the buffer-size bound EXPLICITLY:
+            # the tile-global KV position is ``kv_tile_idx*T + token_j``; it is a
+            # real token iff it is < ``max_seq_prefix_len`` (this CTA's valid KV
+            # length). Out-of-range -> clamp the offset to 0 (no fault) AND select
+            # 0 for the value (no nan) -- exactly the zeroing the bounded async
+            # DMA gave us for free.
+            tile_tok_base = b.mul(kv_tile_idx, b.const_i32(T))
             elems = []
             for j in range(V_T_VEC):
                 token_j = b.add(token_base, b.const_i32(j))
                 linear_j = b.add(b.mul(token_j, b.const_i32(HD)), col)
-                voff_j, _ = paged_kv_desc.offset(
+                voff_j, valid_j = paged_kv_desc.offset(
                     b,
                     tile_idx=kv_tile_idx,
                     linear_half=linear_j,
                     kv_head=kv_head_idx,
                 )
-                v1 = b.global_load(value, voff_j, dtype, align=2)
+                in_range = b.cmp_lt(
+                    b.add(tile_tok_base, token_j), max_seq_prefix_len
+                )
+                if valid_j is not None:
+                    in_range = b.land(in_range, valid_j)
+                safe_voff_j = b.select(in_range, voff_j, b.const_i32(0))
+                v1 = b.global_load(value, safe_voff_j, dtype, align=2)
+                v1 = b.select(in_range, v1, zero_h)
                 elems.append(v1)
             v_vec = b.vec_pack(elems, dtype)
             # ONE contiguous vector store: token is the inner axis, so
