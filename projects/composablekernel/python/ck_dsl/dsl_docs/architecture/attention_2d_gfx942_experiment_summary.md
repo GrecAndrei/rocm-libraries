@@ -316,3 +316,19 @@ removes the V LDS read entirely (no transpose, no store conflict). Favorable: we
 CTA/CU with VGPR headroom (~176/512), and dropping V_lds also frees LDS. Risk: VGPR pressure could wall
 it. **Next: feasibility-check L2's VGPR budget before committing to the rewrite** (same discipline that
 caught L1). L3 (32x32x8 atom) and L4 (prefetch) remain second-order until V is off the LDS-stall path.
+
+**L2 register-V + in-register shuffle transpose [REVERTED — flat, lgkmcnt serialization].** Feasibility
+passed (VGPR *lower* 240→176, V is the whole bound, partial-rewrite scope). Prototype (D128, flag
+`HIPDNN_GFX942_REGISTER_V`) made the V read conflict-free (1 `ds_read_b64` at the floor, `ds_read` −73%)
+and is correct (16/2/0 on the expanded net). BUT the in-register transpose's **+256 `ds_swizzle` are
+LDS-port ops that serialize on `lgkmcnt` (18→234)** — on-device D128 = **flat to −1.4% vs the committed
+padding.** The static red flag was correct: the swizzle serialization costs what the conflict-removal
+saves. (Strategy-2 — half the swizzle moved to VALU `v_perm` — is the only untried refinement; bounded
+upside.)
+
+**Conclusion: the V-read bound is extracted to its gfx942 ceiling.** With no `ds_read_tr_b16`, every
+transpose approach hits *either* bank conflict (strided) *or* `lgkmcnt` serialization (swizzle); the
+committed V_lds padding (+2–5%) is the Pareto frontier. The remaining gap to flash (2.5×) is **structural
+pipelining** (deep K/V prefetch + full QK·softmax·PV overlap, flash's regime), not a V-read lever — a
+larger rewrite. **Ledger: 3 wins shipped (D64 sel, D128 early-V, V padding → analytic 35%→41% of PT);
+6 levers killed with proof (X, A, R, L1, L2, occupancy branch).**
