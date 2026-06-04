@@ -60,6 +60,7 @@ from ...helpers.attention import (
     dequant_fp8x8_to_dtype,
     mfma_16x16x16_for_dtype,
     mfma_16x16x32_for_dtype,
+    mfma_32x32x8_for_dtype,
     mfma_32x32x16_for_dtype,
     pv32_v_load_paired,
     warp_xor_reduce_max,
@@ -136,6 +137,7 @@ _apply_softcap = apply_softcap_log2
 _binary_search_seq_idx = binary_search_seq_idx
 _mfma_16x16x16 = mfma_16x16x16_for_dtype
 _mfma_16x16x32 = mfma_16x16x32_for_dtype
+_mfma_32x32x8 = mfma_32x32x8_for_dtype
 _mfma_32x32x16 = mfma_32x32x16_for_dtype
 _warp_xor_reduce_max = warp_xor_reduce_max
 _warp_xor_reduce_max_32lane = warp_xor_reduce_max_32lane
@@ -260,6 +262,18 @@ class UnifiedAttention2DTiledSpec:
     # the narrow 16x16x16 path is built. The field is retained so the spec
     # stays a structural superset of the gfx950 spec.
     use_mfma_32x32: bool = False
+    # gfx942 (CDNA3) wide-fragment 32x32 path using the **32x32x8** f16 MFMA
+    # atom (``mfma_f32_32x32x8_f16``), which -- unlike the gfx950-only
+    # 32x32x16 atom -- IS legal on gfx942. It uses the SAME 32x32 C-output
+    # distribution (``_C32_DIST``), mask, softmax, P_lds bridge, and epilogue
+    # as the 32x32x16 path; only the K-step (8 vs 16) and the per-lane A/B
+    # operand widths (<4 x half> vs <8 x half>) differ. The PV V B-operand is
+    # built from NAIVE strided LDS reads (no ds_read_tr16_b64 -- gfx950-only),
+    # accepting today's bank conflicts (a conflict-free V feed is a follow-on).
+    # This is the correctness-first foundation for the gfx942 flash pipeline,
+    # gated behind ``HIPDNN_GFX942_FLASH_PIPELINE`` for D128 fp16. fp16-only
+    # (gfx942 has no bf16 32x32x8 atom catalog entry).
+    use_mfma_32x32x8: bool = False
     # Experimental orientation for the 32x32 migration. The first 32x32
     # prototype computed ``S = Q @ K^T`` and therefore still needed a
     # cross-lane reduction over K columns. Triton/CK Tile's efficient
@@ -387,6 +401,32 @@ class UnifiedAttention2DTiledSpec:
             if self.head_size % 16 != 0:
                 raise ValueError(
                     "use_mfma_32x32 requires head_size to be a multiple of 16"
+                )
+        if self.use_mfma_32x32x8:
+            # gfx942-legal 32x32x8 wide-fragment path. Same 32x32 C layout as
+            # the (gfx950-only) 32x32x16 path, but K=8 per atom -- the atom IS
+            # present on gfx942. fp16-only; bf16 stays on 16x16x16.
+            if self.use_mfma_32x32:
+                raise ValueError(
+                    "use_mfma_32x32x8 and use_mfma_32x32 are mutually exclusive "
+                    "(K=8 gfx942 atom vs K=16 gfx950-only atom)"
+                )
+            if self.dtype != "fp16":
+                raise ValueError(
+                    "use_mfma_32x32x8 is fp16-only (gfx942 has no bf16 32x32x8 atom)"
+                )
+            if self.block_m_per_warp != 32:
+                raise ValueError(
+                    "use_mfma_32x32x8 requires block_m_per_warp=32: "
+                    "one 32-row MFMA atom per warp"
+                )
+            if self.tile_size_eff % 32 != 0:
+                raise ValueError(
+                    "use_mfma_32x32x8 requires tile_size to be a multiple of 32"
+                )
+            if self.head_size % 32 != 0:
+                raise ValueError(
+                    "use_mfma_32x32x8 requires head_size to be a multiple of 32"
                 )
         if self.use_transposed_qk_32x32 and not self.use_mfma_32x32:
             raise ValueError("use_transposed_qk_32x32 requires use_mfma_32x32")
@@ -535,7 +575,7 @@ class UnifiedAttention2DTiledSpec:
         CK Tile's C distribution. Those 16 row slots are the state we
         need for ``m``/``l``/``P`` while we remove the old P_lds roundtrip.
         """
-        if self.use_mfma_32x32:
+        if self.use_mfma_32x32 or self.use_mfma_32x32x8:
             return 16
         return self.block_m_per_warp // 4  # 4 for M=16, 8 for M=32
 
@@ -591,6 +631,7 @@ class UnifiedAttention2DTiledSpec:
             f"w{self.num_warps}" if self.num_warps != 1 else "",
             f"mw{self.block_m_per_warp}" if self.block_m_per_warp != 16 else "",
             "mfma32" if self.use_mfma_32x32 else "",
+            "mfma32x8" if self.use_mfma_32x32x8 else "",
             "stqk" if self.use_transposed_qk_32x32 else "",
             "s1" if self.use_transposed_scalar_state else "",
             "mask1" if self.use_transposed_mask_once else "",
@@ -880,20 +921,42 @@ def build_unified_attention_2d_tiled(
     KV_BYTES = 1 if KV_FP8 else 2
     kv_io_dtype = FP8E4M3 if KV_FP8 else dtype
 
-    USE_MFMA_32X32 = spec.use_mfma_32x32  # always False on gfx942 (rejected in spec)
-    # gfx942 QK/PV geometry: narrow 16x16x16 atoms only.
-    #   - per-lane C: <4 x f32>
-    #   - N tile: 16 columns
-    #   - K step: 16 head-dim elements (no wide-K atom on gfx942)
-    # So ``QK_K_ITERS = HD // 16`` and ``PV_K_ITERS = T // 16``; the PV V
-    # B-operand is built from strided LDS loads (no ds_read_tr16_b64).
-    QK_MFMA_N = MFMA_N
-    QK_K_STEP = 16
-    PV_K_STEP = 16
-    QK_K_ITERS = HD // QK_K_STEP
-    QK_N_TILES = T // QK_MFMA_N
-    PV_K_ITERS = T // PV_K_STEP
-    PV_N_TILES = HD // MFMA_N
+    # gfx942 32x32x8 wide-fragment path (correctness-first flash foundation).
+    # ``use_mfma_32x32`` (K=16) stays rejected in the spec; ``use_mfma_32x32x8``
+    # (K=8) is the gfx942-legal wide atom. ``USE_MFMA_32X32`` is the *umbrella*
+    # predicate driving all K-INDEPENDENT 32x32 branches (acc storage, mask,
+    # softmax, alpha/L, P_lds bridge, epilogue, Q32 gather control flow). The
+    # 32x32 C-output distribution is identical for K=8 and K=16. ``USE_MFMA_32X32X8``
+    # drives the K-SPECIFIC geometry (K-step 8, <4 x half> operands, atom select,
+    # naive strided V B-operand).
+    USE_MFMA_32X32X8 = spec.use_mfma_32x32x8
+    USE_MFMA_32X32 = spec.use_mfma_32x32 or USE_MFMA_32X32X8
+    if USE_MFMA_32X32:
+        # 32x32 score/output geometry: 32-column N-tiles, one M=32 atom/warp.
+        #   - per-lane C: <16 x f32>
+        #   - N tile: 32 columns
+        #   - K step: 8 (32x32x8) head-dim elements per atom
+        QK_MFMA_N = 32
+        QK_K_STEP = 8 if USE_MFMA_32X32X8 else 16
+        PV_K_STEP = QK_K_STEP
+        QK_K_ITERS = HD // QK_K_STEP
+        QK_N_TILES = T // QK_MFMA_N
+        PV_K_ITERS = T // PV_K_STEP
+        PV_N_TILES = HD // 32
+    else:
+        # gfx942 QK/PV geometry: narrow 16x16x16 atoms only.
+        #   - per-lane C: <4 x f32>
+        #   - N tile: 16 columns
+        #   - K step: 16 head-dim elements (no wide-K atom on gfx942)
+        # So ``QK_K_ITERS = HD // 16`` and ``PV_K_ITERS = T // 16``; the PV V
+        # B-operand is built from strided LDS loads (no ds_read_tr16_b64).
+        QK_MFMA_N = MFMA_N
+        QK_K_STEP = 16
+        PV_K_STEP = 16
+        QK_K_ITERS = HD // QK_K_STEP
+        QK_N_TILES = T // QK_MFMA_N
+        PV_K_ITERS = T // PV_K_STEP
+        PV_N_TILES = HD // MFMA_N
 
     NUM_WARPS = spec.num_warps
     WAVE = 64
@@ -2611,12 +2674,19 @@ def build_unified_attention_2d_tiled(
             else:
                 q32_buf = b.const_i32(0)
                 q32_row_in_buf = q32_row
+        # 32x32x8 A (Q) per lane: <4 x half>, row = lane%32,
+        #   K = k*8 + (lane//32)*4 + [0..3]  (k_blk = lane//32).
+        # 32x32x16 A (Q) per lane: <8 x half>, K = k*16 + (lane//32)*8 + [0..7].
+        Q32_FRAG = 4 if USE_MFMA_32X32X8 else 8
+        Q32_HALF_STRIDE = 4 if USE_MFMA_32X32X8 else 8
         for k in range(QK_K_ITERS):
-            q32_col = b.add(b.const_i32(k * 16), b.mul(lane_half, b.const_i32(8)))
+            q32_col = b.add(
+                b.const_i32(k * QK_K_STEP), b.mul(lane_half, b.const_i32(Q32_HALF_STRIDE))
+            )
             q32_idx_args = (
                 (q32_buf, q32_row_in_buf, q32_col) if Q_ALIAS_K else (q32_row, q32_col)
             )
-            q32 = b.smem_load_vN(Q_lds, *q32_idx_args, dtype=dtype, n=8)
+            q32 = b.smem_load_vN(Q_lds, *q32_idx_args, dtype=dtype, n=Q32_FRAG)
             if FP8_NATIVE_QK:
                 # Quantize the Q operand to fp8 once so the QK MFMA can run
                 # native fp8xfp8 (no per-tile K dequant). Q values are unit-
@@ -3172,21 +3242,32 @@ def build_unified_attention_2d_tiled(
                 # and the running L per query column.
                 S32_n = None
             else:
-                # Non-transposed 32x32 QK: ``S32_n[n] = vec_f32(16)``,
-                # one 32x32x16 C tile per warp. Downstream softmax/PV
-                # consume this via the non-transposed mask block below.
+                # Non-transposed 32x32 QK (S = Q @ K^T): ``S32_n[n] =
+                # vec_f32(16)``, one 32x32 C tile per warp.  Downstream
+                # softmax/PV consume this via the non-transposed mask block.
+                #
+                # B (K^T) per lane:
+                #   32x32x8 : <4 x half>, col = n*32 + lane%32,
+                #             K = k*8  + (lane//32)*4 + [0..3]
+                #   32x32x16: <8 x half>, K = k*16 + (lane//32)*8 + [0..7]
+                B32_FRAG = 4 if USE_MFMA_32X32X8 else 8
+                B32_HALF_STRIDE = 4 if USE_MFMA_32X32X8 else 8
                 S32_n = [None] * QK_N_TILES
                 for n in range(QK_N_TILES):
                     acc32 = b.zero_vec_f32(16)
                     k_row32 = b.add(b.const_i32(n * 32), lane_col32)
                     for k in range(QK_K_ITERS):
                         kc_off32 = b.add(
-                            b.const_i32(k * 16), b.mul(lane_half, b.const_i32(8))
+                            b.const_i32(k * QK_K_STEP),
+                            b.mul(lane_half, b.const_i32(B32_HALF_STRIDE)),
                         )
                         B32_v = b.smem_load_vN(
-                            K_lds, cur_buf, k_row32, kc_off32, dtype=dtype, n=8
+                            K_lds, cur_buf, k_row32, kc_off32, dtype=dtype, n=B32_FRAG
                         )
-                        acc32 = _mfma_32x32x16(b, dtype, Q32_reg[k], B32_v, acc32)
+                        if USE_MFMA_32X32X8:
+                            acc32 = _mfma_32x32x8(b, dtype, Q32_reg[k], B32_v, acc32)
+                        else:
+                            acc32 = _mfma_32x32x16(b, dtype, Q32_reg[k], B32_v, acc32)
                     S32_n[n] = acc32
         else:
             S_n = [[None] * QK_N_TILES for _ in range(M_ATOMS_PER_WARP)]
@@ -3588,10 +3669,55 @@ def build_unified_attention_2d_tiled(
                     b.sync()
                     for n in range(ACC_N_TILES):
                         new_acc[n] = _apply_transposed_pv_regs(new_acc[n], n, PT32_n_g1)
+            elif USE_MFMA_32X32X8:
+                # gfx942 32x32x8 PV (O = P @ V), P_lds bridge + NAIVE strided V.
+                #
+                # A = P[M,K] per lane (<4 x half>):
+                #   row = wave_row_base + lane%32
+                #   k   = k_iter*8 + (lane/32)*4 + [0..3]
+                #   P_lds is row-major [BLOCK_M, T] -> one contiguous <4 x half>.
+                # B = V[K,N] per lane (<4 x half>):
+                #   col = n_tile*32 + lane%32
+                #   k   = k_iter*8 + (lane/32)*4 + [0..3]
+                #   V_lds is row-major [T, HD]. Each of the 4 K rows is a
+                #   DISTINCT V_lds row at the SAME column -> 4 strided single-
+                #   element reads (``_v_load1``). This reproduces the 32x32x8 B
+                #   distribution without a transpose read; it carries today's
+                #   bank conflicts (a conflict-free V feed is Stream B's job).
+                v_buf = b.const_i32(0)
+                p_row32 = b.add(wave_row_base, lane_col32)
+                for n in range(ACC_N_TILES):
+                    scaled = []
+                    old_acc = _acc_get(n, 0)
+                    for reg in range(REGS_PER_LANE):
+                        e = b.vec_extract(old_acc, reg)
+                        scaled.append(b.fmul(e, alpha_regs[reg]))
+                    acc32 = b.vec_pack(scaled, F32)
+                    v_col32 = b.add(b.const_i32(n * 32), lane_col32)
+                    for k in range(PV_K_ITERS):  # T // 8
+                        p_off32 = b.add(
+                            b.const_i32(k * 8), b.mul(lane_half32, b.const_i32(4))
+                        )
+                        A_p32 = b.smem_load_vN(
+                            P_lds, p_row32, p_off32, dtype=dtype, n=4
+                        )
+                        # Naive strided V B-operand: 4 distinct K rows.
+                        k_row_base = b.add(
+                            b.const_i32(k * 8), b.mul(lane_half32, b.const_i32(4))
+                        )
+                        B_v32 = b.zero_vec(dtype, 4)
+                        for j in range(4):
+                            v_row = b.add(k_row_base, b.const_i32(j))
+                            elem = b.vec_extract(
+                                _v_load1(v_buf, v_row, v_col32), 0
+                            )
+                            B_v32 = b.vec_insert(B_v32, elem, j)
+                        acc32 = _mfma_32x32x8(b, dtype, A_p32, B_v32, acc32)
+                    new_acc[n] = acc32
             else:
-                # Transitional 32x32 PV consumer. This still reads P from the
-                # logical P_lds bridge written above, but it consumes and produces
-                # the new vec_f32(16) accumulator state with M32N32K16 MFMA.
+                # Transitional 32x32x16 PV consumer (gfx950-only ds_read_tr16
+                # transpose read; unreachable on gfx942 -- use_mfma_32x32 is
+                # rejected in the spec). Kept for structural parity with gfx950.
                 #
                 # PV32 operand layouts:
                 #   A = P[M,K] per lane:
@@ -3600,11 +3726,6 @@ def build_unified_attention_2d_tiled(
                 #   B = V[K,N] per lane:
                 #       k   = k_iter*16 + (lane/32)*8 + [0..7]
                 #       col = n_tile*32 + lane%32
-                #
-                # V is intentionally loaded with scalar strided LDS loads for this
-                # milestone. Once parity is clean, replace with CK Tile's 32x32
-                # swizzled/transposed LDS access so this path is fast as well as
-                # structurally correct.
                 v_buf = b.const_i32(0)
                 for n in range(ACC_N_TILES):
                     scaled = []
@@ -3621,13 +3742,6 @@ def build_unified_attention_2d_tiled(
                         A_p32 = b.smem_load_vN(
                             P_lds, p_row32, p_off32, dtype=dtype, n=8
                         )
-                        # M32N32K16 B operand from row-major V_lds[T, HD].
-                        # One 32-column MFMA tile is two 16-column transpose-read
-                        # groups. For each lane:
-                        #   - lane_col32 % 32 is the output column
-                        #   - lane_half32 selects K rows 0..7 or 8..15
-                        #   - ds_read_tr16 gives 4 consecutive K rows, so two
-                        #     reads compose the required <8 x dtype> B operand.
                         col_group16 = b.mul(
                             b.div(lane_col32, b.const_i32(16)), b.const_i32(16)
                         )

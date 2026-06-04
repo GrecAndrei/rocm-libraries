@@ -29,6 +29,7 @@ returns the artifact plus the launch metadata derived from the spec
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List
 
 
@@ -1040,7 +1041,85 @@ def _unified_tiled_spec_from_problem(problem, knobs: dict, arch: str = "gfx950")
 
     tile_size = int(knobs.get("tile_size", 0))
     waves_per_eu = int(knobs.get("waves_per_eu", 0))
-    return UnifiedAttention2DTiledSpec(
+    num_warps = int(knobs.get("num_warps", 1))
+    block_m_per_warp = int(knobs.get("block_m_per_warp", 16))
+    use_mfma_32x32x8 = False
+
+    # gfx942 flash pipeline (Stream A): flag-gated D128 fp16 32x32x8 wide-atom
+    # variant. ``HIPDNN_GFX942_FLASH_PIPELINE`` (default OFF, mirroring
+    # ``HIPDNN_GFX942_SWIZZLE_VLDS``) routes the D128 fp16 SDPA-fwd path to the
+    # ``mfma_f32_32x32x8_f16`` atom (the gfx942-legal wide fragment) instead of
+    # the narrow 16x16x16 default. The override forces ``block_m_per_warp=32``
+    # (one M=32 atom per warp) and a 32-aligned ``tile_size``; the grid
+    # recompute below reads the final ``spec.block_m_per_warp``, so the launch
+    # config stays coherent with the bumped BLOCK_M. Strictly gated on
+    # arch==gfx942 + D128 + fp16, so gfx950 and every other shape are
+    # byte-identical to the flag-off path.
+    if (
+        arch == "gfx942"
+        and os.environ.get("HIPDNN_GFX942_FLASH_PIPELINE", "0") == "1"
+        and problem.head_size == 128
+        and problem.dtype == "fp16"
+        and not knobs.get("use_mfma_32x32", False)
+        and not knobs.get("use_register_pv", False)
+        and problem.sliding_window == 0
+        and not problem.use_sinks
+    ):
+        use_mfma_32x32x8 = True
+        block_m_per_warp = 32  # one M=32 atom per warp
+        hd = int(problem.head_size)
+        bs = int(problem.block_size)
+        nqk = int(problem.num_queries_per_kv)
+
+        def _lds_bytes(nw: int, t: int) -> int:
+            # Mirror supports_tiled_2d's fp16 LDS footprint (bpe=2):
+            #   K_lds = 2*T*HD*2 ; V_lds = T*HD*2 ; P_lds = BLOCK_M*(T+8)*2
+            #   Q_lds = 0 if BLOCK_M<=2*T else BLOCK_M*HD*2
+            #   Acc_lds = BLOCK_M*OUT_STRIPE*2 (OUT_STRIPE = 32 if HD<=64 else HD)
+            bm = nw * 32
+            out_stripe = 32 if hd <= 64 else hd
+            q_lds = 0 if bm <= 2 * t else bm * hd * 2
+            return (
+                2 * t * hd * 2
+                + t * hd * 2
+                + bm * (t + 8) * 2
+                + q_lds
+                + bm * out_stripe * 2
+            )
+
+        # Pick the largest-parallelism (num_warps, tile) the 32x32x8 D128 path
+        # can run within gfx942's 64 KB LDS. The 32x32 atom doubles BLOCK_M and
+        # HD=128 makes Acc_lds large, so the narrow-path geometry (nw=4 / T=64)
+        # overflows; enumerate fitting candidates and prefer more KV-tile work
+        # then more warps. Tile must be a multiple of 32 (tile_size_eff%32==0)
+        # and of block_size; BLOCK_M must be divisible by num_queries_per_kv.
+        _LDS_CAP = 65536
+        chosen = None
+        for nw in (4, 2, 1):
+            bm = nw * 32
+            if bm % max(1, nqk) != 0:
+                continue
+            for mult in (4, 2, 1):
+                t = mult * bs
+                if t % 32 != 0:
+                    continue
+                # per-wave token uniformity / DMA payload floor (mirror gate).
+                if t * hd < nw * 64 * 8:
+                    continue
+                if (64 * 8) // hd > bs:
+                    continue
+                if _lds_bytes(nw, t) <= _LDS_CAP:
+                    chosen = (nw, t)
+                    break
+            if chosen:
+                break
+        if chosen is None:
+            # Fall back to the safest geometry (nw=1, T=32) and let the spec
+            # gate reject if even that overflows (it will not for HD<=128).
+            chosen = (1, 32 if bs <= 32 else ((bs + 31) // 32) * 32)
+        num_warps, tile_size = chosen
+
+    spec_kwargs = dict(
         head_size=problem.head_size,
         block_size=problem.block_size,
         num_query_heads=problem.num_query_heads,
@@ -1050,8 +1129,8 @@ def _unified_tiled_spec_from_problem(problem, knobs: dict, arch: str = "gfx950")
         sliding_window=problem.sliding_window,
         has_softcap=problem.softcap > 0.0,
         num_seqs=problem.num_seqs,
-        num_warps=int(knobs.get("num_warps", 1)),
-        block_m_per_warp=int(knobs.get("block_m_per_warp", 16)),
+        num_warps=num_warps,
+        block_m_per_warp=block_m_per_warp,
         tile_size=tile_size if tile_size > 0 else None,
         waves_per_eu=waves_per_eu if waves_per_eu > 0 else None,
         use_mfma_32x32=bool(knobs.get("use_mfma_32x32", False)),
@@ -1060,6 +1139,12 @@ def _unified_tiled_spec_from_problem(problem, knobs: dict, arch: str = "gfx950")
         use_early_v_schedule=bool(knobs.get("use_early_v_schedule", False)),
         use_fast_paged_kv_desc=bool(knobs.get("use_fast_paged_kv_desc", False)),
     )
+    # ``use_mfma_32x32x8`` is a gfx942-only spec field; the gfx950 spec class
+    # does not declare it. Only pass it when it is actually requested (gfx942
+    # flash pipeline), keeping the gfx950 construction byte-identical.
+    if use_mfma_32x32x8:
+        spec_kwargs["use_mfma_32x32x8"] = True
+    return UnifiedAttention2DTiledSpec(**spec_kwargs)
 
 
 def _unified_grid(problem, num_warps: int, block_m_per_warp: int):
