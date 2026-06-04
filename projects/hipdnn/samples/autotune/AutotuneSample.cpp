@@ -320,7 +320,7 @@ static void demonstrateFilteredAutotune(hipdnnHandle_t handle, bool largeMode)
 // ─── Scenario 4: Save Results to Config File ───────────────────────────────
 
 /// Autotunes and saves results to a JSON config file that can be reused via
-/// HIPDNN_ENGINE_OVERRIDE_FILE environment variable.
+/// HIPDNN_HEUR_CONFIG_PATH environment variable.
 static void demonstrateSaveToConfigFile(hipdnnHandle_t handle, bool largeMode)
 {
     std::cout << "\n=== Scenario 4: Save Results to Config File ===\n";
@@ -348,7 +348,7 @@ static void demonstrateSaveToConfigFile(hipdnnHandle_t handle, bool largeMode)
         state.graph->autotune(handle, state.variantPack, workspace.get(), config, storageConfig));
 
     std::cout << "  Results saved to " << configFile << '\n';
-    std::cout << "  To reuse: export HIPDNN_ENGINE_OVERRIDE_FILE=" << configFile << '\n';
+    std::cout << "  To reuse: export HIPDNN_HEUR_CONFIG_PATH=" << configFile << '\n';
 
     // Clean up the demo file
     std::error_code removeEc;

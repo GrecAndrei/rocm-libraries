@@ -3,7 +3,7 @@
 
 // Integration test for autotune config file persistence round-trip.
 // Autotunes to a JSON config file, then verifies the config can be loaded
-// via HIPDNN_ENGINE_OVERRIDE_FILE to rebuild and execute the graph.
+// via HIPDNN_HEUR_CONFIG_PATH to rebuild and execute the graph.
 
 #include <filesystem>
 #include <gtest/gtest.h>
@@ -121,7 +121,7 @@ protected:
         std::filesystem::remove(_configFile, ec);
 
         // Ensure the env var is always cleared
-        hipdnn_data_sdk::utilities::unsetEnv("HIPDNN_ENGINE_OVERRIDE_FILE");
+        hipdnn_data_sdk::utilities::unsetEnv("HIPDNN_HEUR_CONFIG_PATH");
 
         IntegrationTestFixture::TearDown();
     }
@@ -173,8 +173,7 @@ TEST_F(IntegrationAutotunePersistence, ConfigFileRoundTrip)
 
     // Phase 2: Build a new graph using the override config file
     {
-        hipdnn_data_sdk::utilities::setEnv("HIPDNN_ENGINE_OVERRIDE_FILE",
-                                           _configFile.string().c_str());
+        hipdnn_data_sdk::utilities::setEnv("HIPDNN_HEUR_CONFIG_PATH", _configFile.string().c_str());
 
         auto bundle = createConvGraph();
 
@@ -194,7 +193,7 @@ TEST_F(IntegrationAutotunePersistence, ConfigFileRoundTrip)
         result = bundle.graph->execute(_handle, bundle.variantPack, execWorkspace.get());
         ASSERT_EQ(result.code, ErrorCode::OK) << result.err_msg;
 
-        hipdnn_data_sdk::utilities::unsetEnv("HIPDNN_ENGINE_OVERRIDE_FILE");
+        hipdnn_data_sdk::utilities::unsetEnv("HIPDNN_HEUR_CONFIG_PATH");
     }
 }
 

@@ -10,7 +10,6 @@
 #ifndef HIPDNN_FRONTEND_SKIP_JSON_LIB
 #include <hipdnn_data_sdk/utilities/EngineNames.hpp>
 #include <hipdnn_frontend/autotune/AutotuneFileWriter.hpp>
-#include <hipdnn_frontend/detail/EngineOverrideConfig.hpp>
 
 #include <cstdio>
 #include <filesystem>
@@ -22,7 +21,6 @@ using namespace hipdnn_frontend;
 
 #ifndef HIPDNN_FRONTEND_SKIP_JSON_LIB
 using namespace hipdnn_frontend::autotune;
-using namespace hipdnn_frontend::engine_override;
 using namespace hipdnn_data_sdk::utilities;
 
 // ── Test helpers ────────────────────────────────────────────────────────────
@@ -290,7 +288,7 @@ TEST(TestAutotuneFileWriter, ReplaceMatchingEntryWithSameKnobs)
     EXPECT_EQ(json["engine_overrides"][0]["engine_name"], "HIPBLASLT_ENGINE");
 }
 
-TEST(TestAutotuneFileWriter, PreserveEntriesWithDifferentKnobs)
+TEST(TestAutotuneFileWriter, ReplaceEntriesWithDifferentKnobs)
 {
     const TempFile tmpFile;
 
@@ -315,13 +313,12 @@ TEST(TestAutotuneFileWriter, PreserveEntriesWithDifferentKnobs)
         = writeAutotuneResults(tmpFile.path.string(), "conv_fprop", results2, false, dims, {});
     ASSERT_TRUE(err2.is_good());
 
-    // Both entries should be preserved (different knob settings)
+    // The old entry should be replaced (matching by op + tensors only)
     std::ifstream file(tmpFile.path);
     auto json = nlohmann::json::parse(file);
 
-    EXPECT_EQ(json["engine_overrides"].size(), 2u);
-    EXPECT_EQ(json["engine_overrides"][0]["engine_name"], "MIOPEN_ENGINE");
-    EXPECT_EQ(json["engine_overrides"][1]["engine_name"], "HIPBLASLT_ENGINE");
+    EXPECT_EQ(json["engine_overrides"].size(), 1u);
+    EXPECT_EQ(json["engine_overrides"][0]["engine_name"], "HIPBLASLT_ENGINE");
 }
 
 TEST(TestAutotuneFileWriter, DeleteAllExistingContent)
@@ -369,40 +366,39 @@ TEST(TestAutotuneFileWriter, RoundTripWriteThenLoad)
     auto err = writeAutotuneResults(tmpFile.path.string(), "conv_fprop", results, true, dims, {});
     ASSERT_TRUE(err.is_good());
 
-    // Load via EngineOverrideConfig
-    auto config = EngineOverrideConfig::load(tmpFile.path.string());
-    ASSERT_TRUE(config.has_value());
+    // Verify by parsing the JSON directly
+    std::ifstream file(tmpFile.path);
+    auto json = nlohmann::json::parse(file);
 
-    // Match against the same tensors
-    auto makeTensor = [](const std::vector<int64_t>& d) {
-        auto t = std::make_shared<graph::TensorAttributes>();
-        t->set_dim(d);
-        return t;
-    };
+    ASSERT_TRUE(json.contains("engine_overrides"));
+    ASSERT_EQ(json["engine_overrides"].size(), 1u);
 
-    const std::vector<std::shared_ptr<graph::TensorAttributes>> tensors
-        = {makeTensor({1, 3, 224, 224}), makeTensor({64, 3, 7, 7})};
+    const auto& entry = json["engine_overrides"][0];
+    EXPECT_EQ(entry["op"], "conv_fprop");
+    EXPECT_EQ(entry["engine_name"], "MIOPEN_ENGINE");
 
-    auto matchResult = config->matchOperation("conv_fprop", tensors);
-    ASSERT_TRUE(matchResult.has_value());
-    EXPECT_EQ(matchResult->engineId, MIOPEN_ENGINE_ID);
+    // Verify tensors
+    ASSERT_EQ(entry["tensors"].size(), 2u);
+    EXPECT_EQ(entry["tensors"][0]["dim"], std::vector<int64_t>({1, 3, 224, 224}));
+    EXPECT_EQ(entry["tensors"][1]["dim"], std::vector<int64_t>({64, 3, 7, 7}));
 
     // Verify knobs round-tripped correctly
-    ASSERT_EQ(matchResult->knobs.size(), 2u);
+    ASSERT_TRUE(entry.contains("knobs"));
+    ASSERT_EQ(entry["knobs"].size(), 2u);
 
-    // Knobs may be in any order, so find by name
     bool foundTileSize = false;
     bool foundSplitK = false;
-    for(const auto& knob : matchResult->knobs)
+    for(const auto& knob : entry["knobs"])
     {
-        if(knob.knobId() == "TILE_SIZE")
+        const auto knobId = knob["knob_id"].get<std::string>();
+        if(knobId == "TILE_SIZE")
         {
-            EXPECT_EQ(std::get<int64_t>(knob.value()), 128);
+            EXPECT_EQ(knob["value"].get<int64_t>(), 128);
             foundTileSize = true;
         }
-        else if(knob.knobId() == "SPLIT_K")
+        else if(knobId == "SPLIT_K")
         {
-            EXPECT_EQ(std::get<int64_t>(knob.value()), 2);
+            EXPECT_EQ(knob["value"].get<int64_t>(), 2);
             foundSplitK = true;
         }
     }
@@ -422,20 +418,19 @@ TEST(TestAutotuneFileWriter, RoundTripNoKnobs)
     auto err = writeAutotuneResults(tmpFile.path.string(), "conv_fprop", results, true, dims, {});
     ASSERT_TRUE(err.is_good());
 
-    // Load and match
-    auto config = EngineOverrideConfig::load(tmpFile.path.string());
-    ASSERT_TRUE(config.has_value());
+    // Verify by parsing the JSON directly
+    std::ifstream file(tmpFile.path);
+    auto json = nlohmann::json::parse(file);
 
-    auto makeTensor = [](const std::vector<int64_t>& d) {
-        auto t = std::make_shared<graph::TensorAttributes>();
-        t->set_dim(d);
-        return t;
-    };
+    ASSERT_TRUE(json.contains("engine_overrides"));
+    ASSERT_EQ(json["engine_overrides"].size(), 1u);
 
-    auto matchResult = config->matchOperation("conv_fprop", {makeTensor({1, 3, 224, 224})});
-    ASSERT_TRUE(matchResult.has_value());
-    EXPECT_EQ(matchResult->engineId, MIOPEN_ENGINE_ID);
-    EXPECT_TRUE(matchResult->knobs.empty());
+    const auto& entry = json["engine_overrides"][0];
+    EXPECT_EQ(entry["op"], "conv_fprop");
+    EXPECT_EQ(entry["engine_name"], "MIOPEN_ENGINE");
+    ASSERT_EQ(entry["tensors"].size(), 1u);
+    EXPECT_EQ(entry["tensors"][0]["dim"], std::vector<int64_t>({1, 3, 224, 224}));
+    EXPECT_FALSE(entry.contains("knobs"));
 }
 
 // ── Strategy/Mode String Tests ──────────────────────────────────────────────

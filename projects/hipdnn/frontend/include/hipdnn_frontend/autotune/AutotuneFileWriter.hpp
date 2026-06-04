@@ -5,10 +5,10 @@
  * @file AutotuneFileWriter.hpp
  * @brief JSON file writer for persisting autotuning results
  *
- * Writes autotune results in EngineOverrideConfig-compatible JSON format,
- * allowing the results to be loaded on subsequent runs via
- * HIPDNN_ENGINE_OVERRIDE_FILE. Supports append/replace semantics and
- * atomic file writes via temp file + rename.
+ * Writes autotune results in heuristic config JSON format, allowing the
+ * results to be loaded on subsequent runs via HIPDNN_HEUR_CONFIG_PATH.
+ * Supports append/replace semantics and atomic file writes via
+ * temp file + rename.
  */
 
 #pragma once
@@ -207,9 +207,9 @@ inline nlohmann::json buildOverrideEntry(const AutotuneResult& result,
     return entry;
 }
 
-/// Write autotuning results to a JSON file in EngineOverrideConfig format.
+/// Write autotuning results to a JSON file in heuristic config format.
 ///
-/// The file format matches what EngineOverrideConfig::load() expects:
+/// The file format uses the standard engine_overrides JSON schema:
 /// @code{.json}
 /// {
 ///   "engine_overrides": [
@@ -228,7 +228,7 @@ inline nlohmann::json buildOverrideEntry(const AutotuneResult& result,
 /// @param opName The operation name to use in entries
 /// @param results Ranked autotune results (only succeeded entries are written)
 /// @param deleteAllExisting When true, starts with an empty file; when false,
-///        loads existing entries and replaces matching (op, tensors, knobs) entries
+///        loads existing entries and replaces matching (op, tensors) entries
 /// @param tensorDims Tensor dimensions for the entry
 /// @param tensorStrides Tensor strides for the entry
 /// @return Error on I/O failure
@@ -284,113 +284,29 @@ inline Error writeAutotuneResults(const std::string& filePath,
         return {ErrorCode::OK, ""};
     }
 
-    // Remove pre-existing entries that match any new entry's (op, tensors, knobs)
-    // signature, then append all new entries. Entries with different knob
-    // configurations for the same (op, tensors) are preserved.
+    // Remove pre-existing entries that match any new entry's (op, tensors)
+    // signature, then append all new entries. Matching is by operation and
+    // tensor shapes only; knob configurations are unconditionally replaced.
     auto& overrides = root["engine_overrides"];
-
-    // Helper: compare two knob JSON arrays for equivalence (order-independent)
-    auto knobsMatch = [](const nlohmann::json& a, const nlohmann::json& b) -> bool {
-        // Both absent or both empty arrays are equivalent
-        const bool aEmpty = a.is_null() || (a.is_array() && a.empty());
-        const bool bEmpty = b.is_null() || (b.is_array() && b.empty());
-        if(aEmpty && bEmpty)
-        {
-            return true;
-        }
-        if(aEmpty != bEmpty)
-        {
-            return false;
-        }
-        if(a.size() != b.size())
-        {
-            return false;
-        }
-
-        // Build a set of (knob_id, value) pairs from each and compare
-        // For order-independent comparison, sort copies by knob_id
-        auto sortByKnobId = [](nlohmann::json arr) {
-            std::sort(arr.begin(), arr.end(), [](const nlohmann::json& x, const nlohmann::json& y) {
-                // Try knob_id first, fall back to name for backward compatibility
-                auto getId = [](const nlohmann::json& k) -> std::string {
-                    if(k.contains("knob_id"))
-                    {
-                        return k["knob_id"].get<std::string>();
-                    }
-                    if(k.contains("name"))
-                    {
-                        return k["name"].get<std::string>();
-                    }
-                    return "";
-                };
-                return getId(x) < getId(y);
-            });
-            return arr;
-        };
-
-        auto sortedA = sortByKnobId(a);
-        auto sortedB = sortByKnobId(b);
-
-        for(size_t i = 0; i < sortedA.size(); ++i)
-        {
-            auto getId = [](const nlohmann::json& k) -> std::string {
-                if(k.contains("knob_id"))
-                {
-                    return k["knob_id"].get<std::string>();
-                }
-                if(k.contains("name"))
-                {
-                    return k["name"].get<std::string>();
-                }
-                return "";
-            };
-
-            if(getId(sortedA[i]) != getId(sortedB[i]))
-            {
-                return false;
-            }
-            if(sortedA[i].contains("value") && sortedB[i].contains("value"))
-            {
-                if(sortedA[i]["value"] != sortedB[i]["value"])
-                {
-                    return false;
-                }
-            }
-        }
-        return true;
-    };
 
     if(!overrides.empty() && !newEntries.empty())
     {
-        // Erase pre-existing entries matching any new entry's (op, tensors, knobs) key
-        overrides.erase(
-            std::remove_if(overrides.begin(),
-                           overrides.end(),
-                           [&](const nlohmann::json& existing) {
-                               for(const auto& newEntry : newEntries)
-                               {
-                                   if(existing.contains("op") && existing["op"] == newEntry["op"]
-                                      && existing.contains("tensors")
-                                      && existing["tensors"] == newEntry["tensors"])
-                                   {
-                                       // Compare knobs
-                                       const auto& existingKnobs
-                                           = existing.contains("knobs")
-                                                 ? existing["knobs"]
-                                                 : nlohmann::json(nlohmann::json::value_t::null);
-                                       const auto& newKnobs
-                                           = newEntry.contains("knobs")
-                                                 ? newEntry["knobs"]
-                                                 : nlohmann::json(nlohmann::json::value_t::null);
-                                       if(knobsMatch(existingKnobs, newKnobs))
-                                       {
-                                           return true;
-                                       }
-                                   }
-                               }
-                               return false;
-                           }),
-            overrides.end());
+        overrides.erase(std::remove_if(overrides.begin(),
+                                       overrides.end(),
+                                       [&](const nlohmann::json& existing) {
+                                           for(const auto& newEntry : newEntries)
+                                           {
+                                               if(existing.contains("op")
+                                                  && existing["op"] == newEntry["op"]
+                                                  && existing.contains("tensors")
+                                                  && existing["tensors"] == newEntry["tensors"])
+                                               {
+                                                   return true;
+                                               }
+                                           }
+                                           return false;
+                                       }),
+                        overrides.end());
     }
 
     for(auto& newEntry : newEntries)

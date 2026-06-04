@@ -159,8 +159,8 @@ struct AutotuneConfig
  * @brief Config file output parameters for autotune results
  *
  * When filePath is non-empty, autotune() writes the ranked results
- * to a JSON file in EngineOverrideConfig format. The file can be
- * loaded on subsequent runs via HIPDNN_ENGINE_OVERRIDE_FILE.
+ * to a JSON file in heuristic config format. The file can be
+ * loaded on subsequent runs via HIPDNN_HEUR_CONFIG_PATH.
  */
 struct AutotuneStorageConfig
 {

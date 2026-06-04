@@ -98,7 +98,6 @@
 #include <hipdnn_frontend/detail/BackendWrapper.hpp>
 #include <hipdnn_frontend/detail/ConvolutionFpropUnpacker.hpp>
 #include <hipdnn_frontend/detail/CreateBackendDescriptor.hpp>
-#include <hipdnn_frontend/detail/EngineOverrideUtils.hpp>
 #include <hipdnn_frontend/detail/GraphDetail.hpp>
 #include <hipdnn_frontend/detail/GraphOverrideValidation.hpp>
 #include <hipdnn_frontend/detail/GraphPacker.hpp>
@@ -319,11 +318,6 @@ private:
     std::optional<int64_t> _preferredEngineId;
 
     bool _isOverrideShapeEnabled = false;
-
-    /// Knob settings from the engine override config file, forwarded to plan creation.
-    /// Set by lowerGraphToDescriptors() when EngineOverrideConfig returns a MatchResult
-    /// with non-empty knobs.
-    std::optional<std::vector<KnobSetting>> _preferredKnobSettings;
 
     /// Get the active plan's engine config descriptor. Throws if no active plan exists.
     detail::ScopedHipdnnBackendDescriptor& activeEngineConfig()
@@ -791,24 +785,6 @@ private:
             HIPDNN_FE_LOG_INFO("Purging existing graph descriptor before re-lowering");
         }
         resetGraphDesc();
-
-        if(!_preferredEngineId.has_value())
-        {
-            auto overrideResult
-                = hipdnn_frontend::engine_override::getPreferredIdFromOverrideConfig(*this);
-            if(overrideResult.has_value())
-            {
-                _preferredEngineId = overrideResult->engineId;
-                if(!overrideResult->knobs.empty())
-                {
-                    _preferredKnobSettings = std::move(overrideResult->knobs);
-                    HIPDNN_FE_LOG_INFO("Engine override config provided "
-                                       << _preferredKnobSettings->size()
-                                       << " knob setting(s) for engine "
-                                       << _preferredEngineId.value());
-                }
-            }
-        }
 
         std::unordered_map<int64_t, detail::ScopedHipdnnBackendDescriptor> tensorDescs;
         std::vector<detail::ScopedHipdnnBackendDescriptor> operations;
@@ -2339,22 +2315,7 @@ public:
 
         HIPDNN_CHECK_ERROR(build_operation_graph(handle));
 
-        // If the engine override config provided both an engine ID and knob settings,
-        // use the explicit plan creation path to apply them. Otherwise, fall through
-        // to the heuristics path.
-        if(_preferredEngineId.has_value() && _preferredKnobSettings.has_value())
-        {
-            HIPDNN_FE_LOG_INFO("Using preferred engine " << _preferredEngineId.value() << " with "
-                                                         << _preferredKnobSettings->size()
-                                                         << " override knob(s) for graph "
-                                                         << graphName);
-            HIPDNN_CHECK_ERROR(
-                create_execution_plan_ext(_preferredEngineId.value(), *_preferredKnobSettings));
-        }
-        else
-        {
-            HIPDNN_CHECK_ERROR(create_execution_plans(modes));
-        }
+        HIPDNN_CHECK_ERROR(create_execution_plans(modes));
 
         HIPDNN_CHECK_ERROR(check_support());
         HIPDNN_CHECK_ERROR(build_plans(policy));
