@@ -274,3 +274,45 @@ but the hot conflict is the **strided-V B-operand LDS read** — the gfx942 narr
 or layout change on that specific access, with cheap addressing to avoid the VGPR blowup that sank
 the blanket swizzle (X). Validate with the same rocprof counters: `SQ_LDS_BANK_CONFLICT` per LDS
 inst and MFMA-busy should rise on D128.
+
+---
+
+## Batch 3 — the flash target, the first kernel win, and the LDS dead-end
+
+**Flash is the proof there is huge room — and the gap is one design decision.** rocprofv3 on PyTorch
+aotriton `attn_fwd`, D128, same counters as ours:
+
+| D128 | flash `attn_fwd` | ours | 
+|---|---:|---:|
+| bank conflicts / LDS-inst | **0.58** | 11.34 |
+| LDSBankConflict (derived) | **1.0%** | 40.3% |
+| MFMA-util | 14.3% | 4.6% |
+| LDS-wait / busy | 0.12 | 0.57 |
+| MemUnitStalled | 20.9% (HBM-bound — the *right* bound) | ~0% |
+
+Flash is essentially conflict-free and near the HBM roofline; we stall ~57% on self-inflicted V-read
+conflicts. The entire gap is the strided-V emulation. (Attention is softmax-VALU-heavy, so even flash's
+MFMA-util is only 14% — MFMA was never the prize; *not stalling on LDS* is.)
+
+**V_lds padding [KEPT, commit `a7dcd8af487`] — first kernel win.** A read-side XOR is infeasible (async
+DMA writes lane-contiguous; no per-lane dest). Padding the V_lds row stride (+8 halves) — the only
+DMA-compatible lever — drops the D128 read 4-way → 2-way. **+2–5% on every D128 shape** (GQA S2048
++4.6%), VGPR-neutral (226→230), correct 16/2/0 on the expanded net. D64 auto-disabled (can't help:
+8 rows/DMA-call). Env-gated `HIPDNN_GFX942_SWIZZLE_VLDS` (default on); gfx950 byte-identical.
+
+**L1 conflict-free V LDS layout [REVERTED — proven net regression, not shipped].** Goal was a wide
+bank-spread `ds_read_b64` from a re-laid-out V_lds. Conflict-cycle accounting (store+read/kv-iter):
+baseline 256 → committed pad **128** → best wide-layout 192 → reshape 704. **No full design beats the
+committed pad**, because (1) the async DMA can't produce a col-major layout (only the wave-uniform base
+is free — which the pad already uses), and (2) the transpose is symmetric and **gfx942 has no
+`ds_read_tr_b16`** (the fp8 stripe precedent works only because `ds_read_tr_b8` exists). Element-degree-1
+is also mathematically impossible (64 words / 32 banks = 2/bank floor; CK's `MakeVLdsBlockDescriptor`
+pays it too). **The committed padding is the Pareto-optimal LDS-only lever on this ISA.** Analysis:
+`WIP/.../WIP-L1/HANDOFF_FINDINGS.txt`.
+
+**Corrected understanding:** flash's advantage is NOT a clever V *LDS* layout — it's **not round-tripping
+V through LDS at all.** Closing the gap requires **L2: register-resident V for PV** (CK `vr` pipeline) —
+removes the V LDS read entirely (no transpose, no store conflict). Favorable: we're LDS-bound at 1
+CTA/CU with VGPR headroom (~176/512), and dropping V_lds also frees LDS. Risk: VGPR pressure could wall
+it. **Next: feasibility-check L2's VGPR budget before committing to the rewrite** (same discipline that
+caught L1). L3 (32x32x8 atom) and L4 (prefetch) remain second-order until V is off the LDS-stall path.
