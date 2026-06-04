@@ -429,6 +429,11 @@ def _select_2d_tile_size(problem: UnifiedAttentionProblem) -> int:
     # variants were >=258us and often incorrect under hipcc).
     if problem.use_fp8 and problem.sliding_window > 0 and problem.max_seqlen_q > 256:
         return problem.block_size
+    # gfx942 D128 fp16 L4 (shipped): the level-4 fitter fixes T=64 on every
+    # D128 fp16 shape (K single-buffer BLOCK_M<=tile + 64 KB LDS cap). Mirror it
+    # so the standalone DSL grid / cache key / spec stay coherent.
+    if _enable_gfx942_l4(problem):
+        return 64
     # bf16 transposed-combo sliding-window. Paired with the combo's
     # ``num_warps=2`` (BLOCK_M=64) prelude-light geometry, the smaller
     # ``T = block_size`` tile prunes the window finer (less compute on
@@ -518,6 +523,11 @@ def _select_2d_num_warps(problem: UnifiedAttentionProblem) -> int:
     #     CTA count for better latency hiding. Paired with T=block_size
     #     (see _select_2d_tile_size) this takes SW from 0.67x to ~1.04x vs
     #     Triton-2d (bit-exact).
+    # gfx942 D128 fp16 L4 (shipped): the level-4 fitter fixes num_warps=1
+    # (BLOCK_M=32) on every D128 fp16 shape. Mirror it so the standalone DSL
+    # grid / cache key / spec stay coherent with the built L4 kernel.
+    if _enable_gfx942_l4(problem):
+        return 1
     if _enable_combo_2d(problem):
         # bf16 sliding-window is prelude-bound -> nw2 (lighter prelude). But
         # fp8 SW is dequant-bound, not prelude-bound, so it wants nw4 to
@@ -690,6 +700,10 @@ def _tiled_cache_key(problem: UnifiedAttentionProblem) -> Tuple:
         _enable_register_pv(problem),
         _enable_i64_kv_addr(problem),
         _select_2d_compile_backend(problem),
+        # gfx942 D128 fp16 L4 (transposed-x8 + K single-buffer). These knobs are
+        # not derivable from the geometry tuple alone, so fold the gate into the
+        # key to keep it 1:1 with the built kernel.
+        _enable_gfx942_l4(problem),
     )
 
 
@@ -860,6 +874,39 @@ def _enable_transposed_qk_32x32(problem: UnifiedAttentionProblem) -> bool:
     return True
 
 
+def _enable_gfx942_l4(problem: UnifiedAttentionProblem) -> bool:
+    """Gate the shipped gfx942 D128 fp16 "L4" attention kernel.
+
+    L4 = transposed-x8 (``use_mfma_32x32x8`` + ``use_transposed_qk_32x32``) plus
+    the K single-buffer occupancy lever (``use_k_single_buffer``). It is the
+    validated, shipped gfx942 D128 fp16 SDPA-fwd kernel: measured +18-33% over
+    the narrow 16x16x16 baseline (up to 178.9 TF, ~62% of flash), correct, and
+    gfx950 byte-identical (gfx950 never enters this branch).
+
+    Scope is strict so every other path is unchanged: ``use_mfma_32x32x8`` is
+    fp16-only (gfx942 has no bf16 32x32x8 atom), so bf16 D128 falls through to
+    the generic selection; all D64 keeps its own oracle config; the no-sw /
+    no-sinks / no-fp8 guards mirror the C++/provider ship
+    (``compile_service.py`` default-fires the identical level-4 spec) and the
+    spec dataclass's L4 post-init constraints.
+
+    The conflict-free-V lever (``use_conflict_free_v``, FLASH_PIPELINE level
+    3/5) is WIP / not shipped (a parallel track is fixing it); this gate never
+    enables it.
+    """
+    return (
+        _resolve_attention_arch() == "gfx942"
+        and problem.head_size == 128
+        and problem.dtype == "fp16"
+        and not problem.use_fp8
+        and problem.sliding_window == 0
+        and not problem.use_sinks
+        and problem.softcap == 0
+        and not problem.use_alibi
+        and not problem.use_qq_bias
+    )
+
+
 def _enable_transposed_half_local_pv(problem: UnifiedAttentionProblem) -> bool:
     """Enable the half-local PV optimization for the transposed 32x32 path.
 
@@ -989,6 +1036,40 @@ def _tiled_spec_from_problem(
     problem: UnifiedAttentionProblem,
 ):
     UnifiedAttention2DTiledSpec, _, _ = _tiled_2d_impl(_resolve_attention_arch())
+    # gfx942 D128 fp16 ships the L4 kernel (transposed-x8 + K single-buffer).
+    # The level-4 fitter collapses to ONE geometry on every D128 fp16 shape
+    # (block_size / GQA-independent): the K single-buffer BLOCK_M<=tile gate plus
+    # the 64 KB LDS cap force num_warps=1, block_m_per_warp=32 (BLOCK_M=32),
+    # tile_size=64. This mirrors compile_service.py's shipped default and the C++
+    # SdpaCandidateSelector geometry so the DSL standalone path builds the
+    # identical L4 kernel. cfv (use_conflict_free_v) is WIP / never selected.
+    if _enable_gfx942_l4(problem):
+        # Geometry comes from the same _select_2d_* helpers the grid + cache key
+        # read (num_warps=1, block_m_per_warp=32, tile_size=64 on this shape) so
+        # all three stay coherent; the L4 knobs (mfma_32x32x8 + transposed-x8 +
+        # K single-buffer) are not in the generic build, so set them here.
+        return UnifiedAttention2DTiledSpec(
+            head_size=problem.head_size,
+            block_size=problem.block_size,
+            num_query_heads=problem.num_query_heads,
+            num_kv_heads=problem.num_kv_heads,
+            dtype=problem.dtype,
+            use_sinks=problem.use_sinks,
+            sliding_window=problem.sliding_window,
+            has_softcap=problem.softcap > 0,
+            use_alibi=problem.use_alibi,
+            use_qq_bias=problem.use_qq_bias,
+            num_seqs=problem.num_seqs,
+            num_warps=_select_2d_num_warps(problem),
+            waves_per_eu=_select_2d_waves_per_eu(problem),
+            kv_storage_dtype=_kv_storage_dtype(problem),
+            tile_size=_select_2d_tile_size(problem),
+            block_m_per_warp=_select_2d_block_m_per_warp(problem),
+            use_mfma_32x32x8=True,
+            use_transposed_qk_32x32=True,
+            use_k_single_buffer=True,
+            use_i64_kv_addr=_enable_i64_kv_addr(problem),
+        )
     combo = _enable_combo_2d(problem)
     combo_no_sw = combo and problem.sliding_window == 0
     return UnifiedAttention2DTiledSpec(
@@ -1084,6 +1165,9 @@ def _select_2d_block_m_per_warp(problem: UnifiedAttentionProblem) -> int:
     # enters this branch). The C++ SdpaCandidateSelector is the shipping +
     # measured path on gfx942; this mirrors it for DSL-side consistency.
     if _resolve_attention_arch() == "gfx942" and problem.head_size == 64:
+        return 32
+    # gfx942 D128 fp16 L4 (shipped): one M=32 atom per warp (BLOCK_M=32).
+    if _enable_gfx942_l4(problem):
         return 32
     if _enable_transposed_qk_32x32(problem):  # includes _enable_combo_2d
         return 32

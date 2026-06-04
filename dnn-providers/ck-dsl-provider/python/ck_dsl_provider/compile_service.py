@@ -1086,19 +1086,42 @@ def _unified_tiled_spec_from_problem(problem, knobs: dict, arch: str = "gfx950")
     #        at the current cfv pad (just over the 32KB 2-wg threshold). Distinct
     #        kernel_name (both "cfv" and "k1buf" tags) so it caches separately
     #        from levels 3 and 4.
-    _flash_level = os.environ.get("HIPDNN_GFX942_FLASH_PIPELINE", "0")
-    if (
+    # gfx942 D128 fp16 SHIPS level 4 (transposed-x8 + K single-buffer): the
+    # validated L4 kernel runs +18-33% over the narrow baseline (up to 178.9 TF,
+    # ~62% of flash), correct, gfx950 byte-identical. The analytic selector
+    # (SdpaCandidateSelector.analyticTarget) is the production path on gfx942
+    # (the fwd ML model is gfx950-trained), and it now picks the L4 geometry
+    # (num_warps=1 / block_m_per_warp=32 / tile_size=64) + use_transposed_qk_32x32
+    # for this shape; here we add the two L4 knobs that do NOT travel on the wire
+    # (use_mfma_32x32x8 + use_k_single_buffer) so the default (no-env) build is
+    # the full L4 kernel. ``HIPDNN_GFX942_FLASH_PIPELINE`` REMAINS a testing
+    # override: an explicit 1-5 selects that level instead of the shipped L4;
+    # 0 / unset means "use the shipped default" (= level 4 on this shape).
+    _flash_level_env = os.environ.get("HIPDNN_GFX942_FLASH_PIPELINE", "0")
+    _ships_l4 = (
         arch == "gfx942"
-        and _flash_level in ("1", "2", "3", "4", "5")
         and problem.head_size == 128
         and problem.dtype == "fp16"
         and not knobs.get("use_mfma_32x32", False)
         and not knobs.get("use_register_pv", False)
         and problem.sliding_window == 0
         and not problem.use_sinks
-    ):
+    )
+    # Resolve the effective flash level: an explicit env override wins; otherwise
+    # the shipped default fires level 4 for the qualifying gfx942 D128 fp16 shape.
+    if _flash_level_env in ("1", "2", "3", "4", "5"):
+        _flash_level = _flash_level_env
+    elif _ships_l4:
+        _flash_level = "4"
+    else:
+        _flash_level = "0"
+    if _ships_l4 and _flash_level in ("1", "2", "3", "4", "5"):
         use_mfma_32x32x8 = True
         use_transposed_qk_32x32_ovr = _flash_level in ("2", "3", "4", "5")
+        # conflict-free V (levels 3/5) is INCOMPLETE / buggy (WIP, not shipped):
+        # a parallel track is fixing it. The shipped default never selects it
+        # (default level 4 has no cfv); it is reachable ONLY via an explicit
+        # HIPDNN_GFX942_FLASH_PIPELINE=3/5 testing override.
         use_conflict_free_v_ovr = _flash_level in ("3", "5")
         use_k_single_buffer_ovr = _flash_level in ("4", "5")
         block_m_per_warp = 32  # one M=32 atom per warp

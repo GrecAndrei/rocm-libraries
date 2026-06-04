@@ -435,6 +435,29 @@ AnalyticTarget analyticTarget(const SdpaSelectionProblem& problem) {
         return {numWarps, /*block_m_per_warp=*/32, tileSize};
     }
 
+    // gfx942 (CDNA3 / MI300X) head_size=128 fp16: SHIP the validated L4 kernel
+    // (transposed-x8 + K single-buffer). L4 measured +18-33% over the narrow
+    // baseline (up to 178.9 TF, ~62% of flash), correct, gfx950 byte-identical.
+    // The Python compile path (_unified_tiled_spec_from_problem) adds the two
+    // L4 knobs that do NOT travel on the wire -- ``use_mfma_32x32x8`` and
+    // ``use_k_single_buffer`` -- plus ``use_transposed_qk_32x32`` for every
+    // gfx942 D128 fp16 build by default; the C++ selector's only job is to pick
+    // the matching GEOMETRY so the launch grid stays coherent with the kernel.
+    // The level-4 fitter (compile_service.py) collapses to a single geometry on
+    // EVERY D128 fp16 shape (block_size / GQA-independent): the K single-buffer
+    // BLOCK_M<=tile gate plus the 64 KB LDS cap force num_warps=1,
+    // block_m_per_warp=32 (BLOCK_M=32), tile_size=64. We mirror exactly that
+    // here, with the PLAIN flags (use_mfma_32x32=false): the wire's
+    // ``use_mfma_32x32`` is the gfx950 32x32x16 atom and would BLOCK the Python
+    // L4 branch (it gates on ``not use_mfma_32x32``), so the analytic pick must
+    // be the plain nw1/mw32/t64 candidate. ``analyticCloseness`` already
+    // penalises the mfma/transposed-bundled candidate (+8), so the plain combo
+    // wins the argmax. bf16 D128 (32x32x8 is fp16-only) and all D64 are left to
+    // the branches above/below -- unchanged. cfv is never selected here.
+    if (problem.arch == "gfx942" && problem.head_size == 128 && problem.dtype == "fp16") {
+        return {/*num_warps=*/1, /*block_m_per_warp=*/32, /*tile_size=*/64};
+    }
+
     std::int32_t tileSize = 2 * bs;
     if (problem.sliding_window > 0) {
         tileSize = bs;
