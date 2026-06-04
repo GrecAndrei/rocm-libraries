@@ -407,6 +407,9 @@ struct AnalyticTarget {
     std::int32_t num_warps;
     std::int32_t block_m_per_warp;
     std::int32_t tile_size;
+    // When true, the early-V schedule is rewarded (not penalised) by
+    // analyticCloseness so the analytic pick lands on the early-V variant.
+    bool prefer_early_v = false;
 };
 
 AnalyticTarget analyticTarget(const SdpaSelectionProblem& problem) {
@@ -455,7 +458,18 @@ AnalyticTarget analyticTarget(const SdpaSelectionProblem& problem) {
         numWarps /= 2;
     }
 
-    return {numWarps, /*block_m_per_warp=*/16, tileSize};
+    // gfx942 (CDNA3 / MI300X) head_size=128 GQA: the oracle-best overlaps the
+    // V load with QK+softmax (early-V schedule) for ~2-4% over the plain async
+    // pipeline, at no LDS cost. Two carve-outs from oracle data on this MI300X:
+    // MHA (num_queries_per_kv==1) does not benefit (its oracle-best keeps the
+    // plain schedule), and the benefit inverts at very long prefill (seqlen_q
+    // 8192 prefers plain — the V load is already well-hidden), so gate to GQA
+    // with seqlen_q <= 4096. The continuous axes (nw2/mw16/t64) already match
+    // the oracle; only the schedule flag moves.
+    const bool preferEarlyV = problem.arch == "gfx942" && problem.head_size == 128 &&
+                              problem.num_queries_per_kv() > 1 && problem.seqlen_q <= 4096;
+
+    return {numWarps, /*block_m_per_warp=*/16, tileSize, preferEarlyV};
 }
 
 // Distance score: lower is closer to the analytic target. Returned as a
@@ -476,7 +490,9 @@ double analyticCloseness(const SdpaPerfKnobs& cand, const AnalyticTarget& target
         dist += 8.0;
     }
     if (cand.use_early_v_schedule) {
-        dist += 0.5;
+        // Reward early-V where the target prefers it (gfx942 D128 GQA), else
+        // penalise so the plain async pipeline wins on a tie of the axes.
+        dist += target.prefer_early_v ? -0.5 : 0.5;
     }
     return -dist;
 }
