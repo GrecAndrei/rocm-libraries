@@ -301,6 +301,22 @@ const std::vector<SdpaCase> kSdpaCases = {
     {2, 8, 8, 64, 64, 128, true, data_objects::DataType::BFLOAT16, "Bf16CausalD128"},
     {2, 8, 8, 64, 64, 256, true, data_objects::DataType::BFLOAT16, "Bf16CausalD256"},
     {2, 8, 2, 64, 64, 128, true, data_objects::DataType::BFLOAT16, "Bf16CausalGqaD128"},
+    // Strided-V LDS lane-map stress cases (Batch 2.2 verification net). The
+    // base cases above are all S=64 single-tile MHA/qpk4; these add multi-tile
+    // K/V loops, edge-tile masking (Sq/Skv multiples of 16 but NOT of the 64
+    // tile), high GQA ratios, and GQA-on-D64 (otherwise untested) -- the axes a
+    // change to the strided-V B-operand lane map is most likely to corrupt.
+    // B  Hq Hkv  Sq  Skv   D  causal dtype                          name
+    {1, 8, 8, 512, 512, 64, true, data_objects::DataType::HALF, "Fp16CausalMhaD64S512"},
+    {1, 8, 1, 512, 512, 128, true, data_objects::DataType::HALF, "Fp16CausalGqa8D128S512"},
+    {2, 8, 8, 208, 208, 64, true, data_objects::DataType::HALF, "Fp16CausalMhaD64S208"},
+    {2, 8, 2, 144, 144, 64, true, data_objects::DataType::HALF, "Fp16CausalGqaD64S144"},
+    {1, 8, 4, 528, 528, 128, true, data_objects::DataType::HALF, "Fp16CausalGqaD128S528"},
+    {1, 8, 8, 512, 512, 64, true, data_objects::DataType::BFLOAT16, "Bf16CausalMhaD64S512"},
+    {1, 8, 1, 512, 512, 128, true, data_objects::DataType::BFLOAT16, "Bf16CausalGqa8D128S512"},
+    {2, 8, 8, 208, 208, 64, true, data_objects::DataType::BFLOAT16, "Bf16CausalMhaD64S208"},
+    {2, 8, 2, 144, 144, 64, true, data_objects::DataType::BFLOAT16, "Bf16CausalGqaD64S144"},
+    {1, 8, 4, 528, 528, 128, true, data_objects::DataType::BFLOAT16, "Bf16CausalGqaD128S528"},
 };
 
 INSTANTIATE_TEST_SUITE_P(Shapes, IntegrationGpuCkDslSdpaFwdFp16Gpu, ::testing::ValuesIn(kSdpaCases),
