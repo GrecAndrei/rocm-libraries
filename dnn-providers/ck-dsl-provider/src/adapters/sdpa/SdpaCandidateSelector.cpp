@@ -411,6 +411,27 @@ struct AnalyticTarget {
 
 AnalyticTarget analyticTarget(const SdpaSelectionProblem& problem) {
     const std::int32_t bs = problem.block_size;
+
+    // gfx942 (CDNA3 / MI300X) head_size=64 family. The general policy below
+    // picks mw=16 + 2x-tile, but on gfx942 the D64 oracle is always mw=32
+    // with a 1x tile (tile_size == block_size). gfx942 is LDS-bound at one
+    // CTA/CU on the 64 KB part: the mw=32 + 2x-tile combo (e.g.
+    // nw4/mw32/t128 ~= 70 KB) is LDS-rejected by supportsTiled2d, while the
+    // 1x-tile mw=32 combo (nw4/mw32/t64 ~= 51 KB) fits. Oracle data on this
+    // MI300X shows 1.7-2.0x over the mw=16/2x-tile pick. num_warps follows
+    // the oracle by tile granularity: the larger block (bs>=64 -> T=64 KV
+    // tokens/iter) amortizes BLOCK_M=128 (nw4), while the smaller block
+    // (bs=32 -> T=32) prefers BLOCK_M=64 (nw2). The shared DMA-floor clamp
+    // then applies.
+    if (problem.arch == "gfx942" && problem.head_size == 64) {
+        const std::int32_t tileSize = bs;  // 1x multiple so mw=32 fits 64 KB LDS
+        std::int32_t numWarps = bs >= 64 ? 4 : 2;
+        while (numWarps > 1 && tileSize * problem.head_size < numWarps * 64 * 8) {
+            numWarps /= 2;
+        }
+        return {numWarps, /*block_m_per_warp=*/32, tileSize};
+    }
+
     std::int32_t tileSize = 2 * bs;
     if (problem.sliding_window > 0) {
         tileSize = bs;

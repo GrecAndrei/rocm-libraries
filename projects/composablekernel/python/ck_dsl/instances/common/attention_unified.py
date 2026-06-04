@@ -1076,6 +1076,15 @@ def _select_2d_block_m_per_warp(problem: UnifiedAttentionProblem) -> int:
     # latent trap: it doubled BLOCK_M without the atom benefit and ran
     # ~1.4x slower than mw=16 on the sinks trace family. ``select_path``
     # has already routed decode-class shapes to 3D before we get here.
+    # gfx942 (CDNA3 / MI300X) head_size=64: the oracle is always mw=32 with a
+    # 1x tile (tile_size == block_size) on the plain 16x16 atom path. gfx942 is
+    # LDS-bound at one CTA/CU on the 64 KB part, so the mw=32 + 2x-tile combo is
+    # rejected while the 1x-tile mw=32 combo fits, yielding 1.7-2.0x over mw=16.
+    # Arch-gated so the gfx950 selection below is byte-identical (gfx950 never
+    # enters this branch). The C++ SdpaCandidateSelector is the shipping +
+    # measured path on gfx942; this mirrors it for DSL-side consistency.
+    if _resolve_attention_arch() == "gfx942" and problem.head_size == 64:
+        return 32
     if _enable_transposed_qk_32x32(problem):  # includes _enable_combo_2d
         return 32
     if problem.use_fp8 and problem.max_seqlen_q > 256 and problem.num_seqs >= 2:
