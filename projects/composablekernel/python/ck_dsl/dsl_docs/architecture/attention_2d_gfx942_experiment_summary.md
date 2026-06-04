@@ -247,3 +247,30 @@ Next, in order:
    parked as not-worth-it.
 4. **G (agpr) / D128 K-single-buffer: closed** — both were occupancy plays; R showed occupancy
    barely pays. Do not invest without a new bound that re-opens them.
+
+---
+
+## Batch 2.1 — rocprof the bound [done; supersedes the "compute-bound" framing above]
+
+rocprofv3 on the ship configs (logs `WIP/.../rocprof/`). The bound is **LDS bank conflicts**, not
+compute — correcting the post-R wording: the MFMA pipe is ~95% idle because warps stall on LDS.
+
+| metric | D128 (40% PT) | D64 (55% PT) |
+|---|---:|---:|
+| MFMA pipe busy | **4.63%** | 6.64% |
+| busy cycles waiting on LDS (`SQ_WAIT_INST_LDS/BUSY`) | **0.574** | 1.580 |
+| bank conflicts / LDS instr | **11.34** | 6.61 |
+| LDSBankConflict (derived) | 40.3% | 30.0% |
+| MemUnitStalled | ~0% | ~0% |
+| inst mix | VALU 54% / LDS 20% / MFMA 7% | VALU 70% / LDS 14% / MFMA 5% |
+
+Diagnosis: **LDS-bank-conflict bound** (D128: 11.3 conflicts/LDS inst, ~57% of busy spent waiting on
+LDS), MFMA-starved, softmax-VALU-heavy, NOT memory- or occupancy-bound. This also explains R
+(2 CTA/CU doesn't relieve per-access conflict serialization) and X (it swizzled `P_lds`/`Acc_lds`,
+but the hot conflict is the **strided-V B-operand LDS read** — the gfx942 narrow path emulates the
+`ds_read_tr16` lane map with strided loads; X targeted the wrong tile, hence D128 unmoved).
+
+**Next experiment (Batch 2.2):** targeted de-conflict of the strided-V (and K_lds) read — a swizzle
+or layout change on that specific access, with cheap addressing to avoid the VGPR blowup that sank
+the blanket swizzle (X). Validate with the same rocprof counters: `SQ_LDS_BANK_CONFLICT` per LDS
+inst and MFMA-busy should rise on D128.
