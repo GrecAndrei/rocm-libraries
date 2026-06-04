@@ -2,8 +2,12 @@
 // SPDX-License-Identifier: MIT
 
 #pragma once
+
+#include "amdgcn_mma.hpp"
+#include "mma_op_family.hpp"
+
 #include "ck_tile/core/arch/arch.hpp"
-#include "ck_tile/core/arch/mma/mma_op_family.hpp"
+#include "ck_tile/core/numeric/integer.hpp"
 
 namespace ck_tile::core::arch::mma {
 
@@ -68,8 +72,3 @@ concept MmaSelectorI = requires(MmaSelector op) {
 #endif // CK_TILE_CONCEPTS
 
 } // namespace ck_tile::core::arch::mma
-
-// Include the implementations
-#include "wmma/wmma_selector.hpp"
-#include "mfma/mfma_selector.hpp"
-#include "sparse/sparse_selector.hpp"

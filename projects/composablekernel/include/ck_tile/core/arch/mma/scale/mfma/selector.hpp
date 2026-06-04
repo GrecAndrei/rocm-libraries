@@ -3,15 +3,17 @@
 
 #pragma once
 
+#include "scale_gfx9.hpp"
+
 #include "ck_tile/core/arch/arch.hpp"
+#include "ck_tile/core/arch/mma/amdgcn_mma.hpp"
 #include "ck_tile/core/arch/mma/mma_op_family.hpp"
 #include "ck_tile/core/arch/mma/mma_selector.hpp"
 #include "ck_tile/core/arch/mma/mma_traits.hpp"
-#include "ck_tile/core/arch/mma/scale/mfma/scale_gfx9.hpp"
 #include "ck_tile/core/arch/mma/scale/scale_traits.hpp"
+#include "ck_tile/core/numeric/integer.hpp"
 #include "ck_tile/core/utility/type_traits.hpp"
 
-#include <cstdint>
 #include <type_traits>
 
 namespace ck_tile::core::arch::mma {
@@ -30,9 +32,9 @@ namespace ck_tile::core::arch::mma {
 template <typename ADataType,
           typename BDataType,
           typename CDataType,
-          std::uint32_t WaveTileM,
-          std::uint32_t WaveTileN,
-          std::uint32_t WaveTileKTest,
+          uint32_t WaveTileM,
+          uint32_t WaveTileN,
+          uint32_t WaveTileKTest,
           typename CompilerTarget>
 // TODO: c++20 amdgcn_target_arch_id CompilerTarget>
 // TODO: c++20 requires(is_target_arch_cdna(CompilerTarget) &&
@@ -83,9 +85,9 @@ struct ScaleMfmaDefaultSelector
 template <typename ADataType,
           typename BDataType,
           typename CDataType,
-          std::uint32_t WaveTileM,
-          std::uint32_t WaveTileN,
-          std::uint32_t WaveTileK,
+          uint32_t WaveTileM,
+          uint32_t WaveTileN,
+          uint32_t WaveTileK,
           typename CompilerTarget,
           MmaOpFamily OpFamily>
 // TODO: c++20 amdgcn_target_arch_id CompilerTarget>

@@ -2,13 +2,23 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 
+#include "sparse_selector.hpp"
+#include "sparse_transforms.hpp"
+
+#include "ck_tile/core/arch/arch.hpp"
+#include "ck_tile/core/arch/mma/mma_op_family.hpp"
 #include "ck_tile/core/arch/mma/mma_pipeline.hpp"
 #include "ck_tile/core/arch/mma/mma_selector.hpp"
-#include "ck_tile/core/arch/mma/mma_traits.hpp"
 #include "ck_tile/core/arch/mma/mma_wavewise.hpp"
-#include "ck_tile/core/arch/mma/sparse/sparse_transforms.hpp"
+#include "ck_tile/core/config.hpp"
+#include "ck_tile/core/numeric/ext_vector_base.hpp"
+#include "ck_tile/core/numeric/integer.hpp"
 #include "ck_tile/core/numeric/vector_type.hpp"
-#include <cstdint>
+#include "ck_tile/core/utility/bit_cast.hpp"
+
+#include <tuple>
+#include <type_traits>
+#include <utility>
 
 namespace ck_tile::core::arch::mma {
 

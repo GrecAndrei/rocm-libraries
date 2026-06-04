@@ -4,7 +4,7 @@
 #pragma once
 
 // Include scale MFMA traits and architecture-specific implementations
-#include "ck_tile/core/arch/mma/scale/mfma/scale_gfx9.hpp"
-#include "ck_tile/core/arch/mma/scale/scale_selector.hpp"
-#include "ck_tile/core/arch/mma/scale/scale_traits.hpp"
-#include "ck_tile/core/arch/mma/scale/scale_transforms.hpp"
+#include "mfma/scale_gfx9.hpp"
+#include "scale_selector.hpp"
+#include "scale_traits.hpp"
+#include "scale_transforms.hpp"

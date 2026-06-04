@@ -1,16 +1,19 @@
 // Copyright (c) Advanced Micro Devices, Inc., or its affiliates.
 // SPDX-License-Identifier: MIT
 #pragma once
-#include "ck_tile/core/arch/arch.hpp"
-#include "ck_tile/core/numeric/vector_type.hpp"
 
-#include "amdgcn_mma.hpp"
+#include "mfma/mfma_selector.hpp"
+#include "mfma/mfma_transforms.hpp"
+#include "mma_op_family.hpp"
 #include "mma_pipeline.hpp"
 #include "mma_selector.hpp"
 #include "mma_transforms.hpp"
+#include "wmma/wmma_selector.hpp"
+#include "wmma/wmma_transforms.hpp"
 
-#include "mfma/mfma.hpp"
-#include "wmma/wmma.hpp"
+#include "ck_tile/core/arch/arch.hpp"
+#include "ck_tile/core/numeric/integer.hpp"
+
 #include <tuple>
 
 namespace ck_tile::core::arch::mma {

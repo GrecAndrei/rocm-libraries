@@ -3,4 +3,4 @@
 
 #pragma once
 
-#include "ck_tile/core/arch/mma/scale/mfma/selector.hpp"
+#include "mfma/selector.hpp"

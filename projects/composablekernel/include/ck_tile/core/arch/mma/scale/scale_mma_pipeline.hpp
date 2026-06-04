@@ -2,18 +2,17 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 
+#include "scale_selector.hpp"
+#include "scale_transforms.hpp"
+
 #include "ck_tile/core/arch/arch.hpp"
 #include "ck_tile/core/arch/mma/mma_op_family.hpp"
 #include "ck_tile/core/arch/mma/mma_pipeline.hpp"
 #include "ck_tile/core/arch/mma/mma_wavewise.hpp"
-#include "ck_tile/core/arch/mma/scale/scale_selector.hpp"
-#include "ck_tile/core/arch/mma/scale/scale_transforms.hpp"
 #include "ck_tile/core/config.hpp"
+#include "ck_tile/core/numeric/integer.hpp"
 
-#include <cstdint>
 #include <tuple>
-#include <type_traits>
-#include <utility>
 
 namespace ck_tile::core::arch::mma {
 
@@ -39,9 +38,9 @@ namespace ck_tile::core::arch::mma {
 template <typename ADataType,
           typename BDataType,
           typename CDataType,
-          std::uint32_t WaveTileM,
-          std::uint32_t WaveTileN,
-          std::uint32_t WaveTileK,
+          uint32_t WaveTileM,
+          uint32_t WaveTileN,
+          uint32_t WaveTileK,
           MmaAccumPolicy AccumPolicy = MmaAccumPolicy::ROW_MAJOR,
           typename CompilerTarget =
               decltype(get_compiler_target()), // TODO: c++20 amdgcn_target_arch_id GfxTargetId =

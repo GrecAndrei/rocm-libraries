@@ -3,5 +3,5 @@
 
 #pragma once
 
-#include "ck_tile/core/arch/mma/sparse/mfma/selector.hpp"
-#include "ck_tile/core/arch/mma/sparse/wmma/selector.hpp"
+#include "mfma/selector.hpp"
+#include "wmma/selector.hpp"

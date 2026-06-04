@@ -3,7 +3,8 @@
 
 #pragma once
 
-#include "ck_tile/core/arch/mma/utility/tile_distribution_encoding_register_mapper.hpp"
+#include "tile_distribution_encoding_register_mapper.hpp"
+
 #include "ck_tile/core/container/sequence.hpp"
 #include "ck_tile/core/container/tuple.hpp"
 #include "ck_tile/core/numeric/integer.hpp"
