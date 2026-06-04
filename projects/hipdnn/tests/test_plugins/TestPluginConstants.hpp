@@ -170,4 +170,11 @@ inline const std::string& testGoodHeuristicPluginPath()
         = getTestCustomFilepathForPlugin(TEST_GOOD_HEURISTIC_PLUGIN_NAME);
     return s_testGoodHeuristicPluginPath;
 }
+
+inline const std::string& testAutotunePluginPath()
+{
+    static const std::string s_testAutotunePluginPath
+        = getTestCustomFilepathForPlugin(TEST_AUTOTUNE_PLUGIN_NAME);
+    return s_testAutotunePluginPath;
+}
 } // namespace hipdnn_tests::plugin_constants

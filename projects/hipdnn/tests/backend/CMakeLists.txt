@@ -69,6 +69,7 @@ target_compile_definitions(
             TEST_MALFORMED_VERSION_PLUGIN_NAME="${HIPDNN_TEST_MALFORMED_VERSION_PLUGIN_TARGET}"
             TEST_VERSION_ZERO_PLUGIN_NAME="${HIPDNN_TEST_VERSION_ZERO_PLUGIN_TARGET}"
             TEST_GOOD_HEURISTIC_PLUGIN_NAME="${TEST_GOOD_HEURISTIC_PLUGIN_NAME}"
+            TEST_AUTOTUNE_PLUGIN_NAME="${TEST_AUTOTUNE_PLUGIN_NAME}"
 )
 
 # Ensure test plugins are built before tests
@@ -92,6 +93,7 @@ add_dependencies(
     ${HIPDNN_TEST_MALFORMED_VERSION_PLUGIN_TARGET}
     ${HIPDNN_TEST_VERSION_ZERO_PLUGIN_TARGET}
     test_good_heuristic_plugin
+    test_autotune_plugin
 )
 
 clang_tidy_check(hipdnn_public_backend_tests)

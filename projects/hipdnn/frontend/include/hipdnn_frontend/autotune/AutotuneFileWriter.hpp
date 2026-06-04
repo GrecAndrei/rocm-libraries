@@ -1,0 +1,443 @@
+// Copyright © Advanced Micro Devices, Inc., or its affiliates.
+// SPDX-License-Identifier: MIT
+
+/**
+ * @file AutotuneFileWriter.hpp
+ * @brief JSON file writer for persisting autotuning results
+ *
+ * Writes autotune results in EngineOverrideConfig-compatible JSON format,
+ * allowing the results to be loaded on subsequent runs via
+ * HIPDNN_ENGINE_OVERRIDE_FILE. Supports append/replace semantics and
+ * atomic file writes via temp file + rename.
+ */
+
+#pragma once
+
+#ifndef HIPDNN_FRONTEND_SKIP_JSON_LIB
+
+#include <hipdnn_frontend/Error.hpp>
+#include <hipdnn_frontend/Logging.hpp>
+#include <hipdnn_frontend/autotune/AutotuneTypes.hpp>
+
+#include <nlohmann/json.hpp>
+
+#include <chrono>
+#include <cstdio>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
+#include <string>
+#include <vector>
+
+namespace hipdnn_frontend
+{
+namespace autotune
+{
+
+/// Serialize a KnobSetting to a JSON object.
+inline nlohmann::json knobSettingToJson(const KnobSetting& setting)
+{
+    nlohmann::json knob;
+    knob["knob_id"] = setting.knobId();
+
+    std::visit(
+        [&knob](const auto& value) {
+            using T = std::decay_t<decltype(value)>;
+            if constexpr(std::is_same_v<T, int64_t>)
+            {
+                knob["type"] = "int";
+                knob["value"] = value;
+            }
+            else if constexpr(std::is_same_v<T, double>)
+            {
+                knob["type"] = "double";
+                knob["value"] = value;
+            }
+            else if constexpr(std::is_same_v<T, std::string>)
+            {
+                knob["type"] = "string";
+                knob["value"] = value;
+            }
+        },
+        setting.value());
+
+    return knob;
+}
+
+/// Get the string representation of an AutotuneStrategy
+inline std::string strategyToString(AutotuneStrategy strategy)
+{
+    switch(strategy)
+    {
+    case AutotuneStrategy::SINGLE_SHOT:
+        return "SINGLE_SHOT";
+    case AutotuneStrategy::FIXED_AVERAGE:
+        return "FIXED_AVERAGE";
+    case AutotuneStrategy::RUN_UNTIL_STABLE:
+        return "RUN_UNTIL_STABLE";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+/// Get the lowercase string representation of an AutotuneStrategy (for config file output)
+inline std::string strategyToLowerString(AutotuneStrategy strategy)
+{
+    switch(strategy)
+    {
+    case AutotuneStrategy::SINGLE_SHOT:
+        return "single_shot";
+    case AutotuneStrategy::FIXED_AVERAGE:
+        return "fixed_average";
+    case AutotuneStrategy::RUN_UNTIL_STABLE:
+        return "run_until_stable";
+    default:
+        return "unknown";
+    }
+}
+
+/// Get the string representation of a TuneMode
+inline std::string tuneModeToString(TuneMode mode)
+{
+    switch(mode)
+    {
+    case TuneMode::AUTO:
+        return "AUTO";
+    case TuneMode::EXHAUSTIVE:
+        return "EXHAUSTIVE";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+/// Get the lowercase string representation of a TuneMode (for config file output)
+inline std::string tuneModeToLowerString(TuneMode mode)
+{
+    switch(mode)
+    {
+    case TuneMode::AUTO:
+        return "auto";
+    case TuneMode::EXHAUSTIVE:
+        return "exhaustive";
+    default:
+        return "unknown";
+    }
+}
+
+/// Build a single JSON engine_overrides entry from an AutotuneResult.
+///
+/// @param result The autotune result to serialize
+/// @param opName The operation name for the entry (e.g. "conv_fprop")
+/// @param tensorDims Tensor dimensions for the entry (one vector<int64_t> per tensor)
+/// @param tensorStrides Tensor strides for the entry (one vector<int64_t> per tensor)
+/// @return A nlohmann::json object representing the entry
+inline nlohmann::json buildOverrideEntry(const AutotuneResult& result,
+                                         const std::string& opName,
+                                         const std::vector<std::vector<int64_t>>& tensorDims,
+                                         const std::vector<std::vector<int64_t>>& tensorStrides)
+{
+    nlohmann::json entry;
+    entry["op"] = opName;
+    entry["engine_name"] = result.engineName;
+
+    // Tensor patterns (dimensions and strides)
+    nlohmann::json tensors = nlohmann::json::array();
+    for(size_t i = 0; i < tensorDims.size(); ++i)
+    {
+        nlohmann::json t;
+        t["dim"] = tensorDims[i];
+        if(i < tensorStrides.size() && !tensorStrides[i].empty())
+        {
+            t["stride"] = tensorStrides[i];
+        }
+        tensors.push_back(std::move(t));
+    }
+    entry["tensors"] = std::move(tensors);
+
+    // Knob settings
+    if(!result.knobSettings.empty())
+    {
+        nlohmann::json knobs = nlohmann::json::array();
+        for(const auto& setting : result.knobSettings)
+        {
+            knobs.push_back(knobSettingToJson(setting));
+        }
+        entry["knobs"] = std::move(knobs);
+    }
+
+    // Autotune metadata
+    nlohmann::json metadata;
+    metadata["min_time_ms"] = result.minTimeMs;
+    metadata["avg_time_ms"] = result.avgTimeMs;
+    metadata["stddev_ms"] = result.stddevMs;
+    metadata["iterations_run"] = result.iterationsRun;
+    metadata["mode"] = tuneModeToLowerString(result.modeUsed);
+    metadata["strategy"] = strategyToLowerString(result.strategyUsed);
+    metadata["rank"] = result.rank;
+    metadata["workspace_size"] = result.workspaceSize;
+    if(!result.deviceName.empty())
+    {
+        metadata["device"] = result.deviceName;
+    }
+
+    // Timestamp in ISO 8601 format, captured at write time
+    {
+        const auto now = std::chrono::system_clock::now();
+        const auto timeT = std::chrono::system_clock::to_time_t(now);
+        std::tm utcTm{};
+#if defined(_WIN32)
+        gmtime_s(&utcTm, &timeT);
+#else
+        gmtime_r(&timeT, &utcTm);
+#endif
+        std::ostringstream oss;
+        oss << std::put_time(&utcTm, "%Y-%m-%dT%H:%M:%SZ");
+        metadata["timestamp"] = oss.str();
+    }
+
+    metadata["ran_exhaustive"] = result.ranExhaustive;
+    if(result.strategyUsed == AutotuneStrategy::RUN_UNTIL_STABLE)
+    {
+        metadata["converged"] = result.converged;
+    }
+    entry["autotune_metadata"] = std::move(metadata);
+
+    return entry;
+}
+
+/// Write autotuning results to a JSON file in EngineOverrideConfig format.
+///
+/// The file format matches what EngineOverrideConfig::load() expects:
+/// @code{.json}
+/// {
+///   "engine_overrides": [
+///     {
+///       "op": "conv_fprop",
+///       "engine_name": "MIOPEN_ENGINE",
+///       "tensors": [ { "dim": [1, 3, 224, 224] }, { "dim": [64, 3, 7, 7] } ],
+///       "knobs": [ { "knob_id": "SPLIT_K", "type": "int", "value": 2 } ],
+///       "autotune_metadata": { "min_time_ms": 1.23, "rank": 0 }
+///     }
+///   ]
+/// }
+/// @endcode
+///
+/// @param filePath Output file path
+/// @param opName The operation name to use in entries
+/// @param results Ranked autotune results (only succeeded entries are written)
+/// @param deleteAllExisting When true, starts with an empty file; when false,
+///        loads existing entries and replaces matching (op, tensors, knobs) entries
+/// @param tensorDims Tensor dimensions for the entry
+/// @param tensorStrides Tensor strides for the entry
+/// @return Error on I/O failure
+inline Error writeAutotuneResults(const std::string& filePath,
+                                  const std::string& opName,
+                                  const std::vector<AutotuneResult>& results,
+                                  bool deleteAllExisting,
+                                  const std::vector<std::vector<int64_t>>& tensorDims,
+                                  const std::vector<std::vector<int64_t>>& tensorStrides)
+{
+    nlohmann::json root;
+
+    // Load existing file content unless we're deleting it all
+    if(!deleteAllExisting && std::filesystem::exists(filePath))
+    {
+        try
+        {
+            std::ifstream existingFile(filePath);
+            if(existingFile.is_open())
+            {
+                root = nlohmann::json::parse(existingFile);
+            }
+        }
+        catch(const nlohmann::json::exception& e)
+        {
+            HIPDNN_FE_LOG_WARN("AutotuneFileWriter: failed to parse existing file "
+                               << filePath << ": " << e.what() << ". Starting fresh.");
+            root = nlohmann::json::object();
+        }
+    }
+
+    if(!root.contains("engine_overrides") || !root["engine_overrides"].is_array())
+    {
+        root["engine_overrides"] = nlohmann::json::array();
+    }
+
+    // Build new entries from successful results
+    std::vector<nlohmann::json> newEntries;
+    for(const auto& result : results)
+    {
+        if(!result.succeeded)
+        {
+            continue;
+        }
+
+        auto entry = buildOverrideEntry(result, opName, tensorDims, tensorStrides);
+        newEntries.push_back(std::move(entry));
+    }
+
+    if(newEntries.empty())
+    {
+        HIPDNN_FE_LOG_WARN("AutotuneFileWriter: no successful results to write");
+        return {ErrorCode::OK, ""};
+    }
+
+    // Remove pre-existing entries that match any new entry's (op, tensors, knobs)
+    // signature, then append all new entries. Entries with different knob
+    // configurations for the same (op, tensors) are preserved.
+    auto& overrides = root["engine_overrides"];
+
+    // Helper: compare two knob JSON arrays for equivalence (order-independent)
+    auto knobsMatch = [](const nlohmann::json& a, const nlohmann::json& b) -> bool {
+        // Both absent or both empty arrays are equivalent
+        const bool aEmpty = a.is_null() || (a.is_array() && a.empty());
+        const bool bEmpty = b.is_null() || (b.is_array() && b.empty());
+        if(aEmpty && bEmpty)
+        {
+            return true;
+        }
+        if(aEmpty != bEmpty)
+        {
+            return false;
+        }
+        if(a.size() != b.size())
+        {
+            return false;
+        }
+
+        // Build a set of (knob_id, value) pairs from each and compare
+        // For order-independent comparison, sort copies by knob_id
+        auto sortByKnobId = [](nlohmann::json arr) {
+            std::sort(arr.begin(), arr.end(), [](const nlohmann::json& x, const nlohmann::json& y) {
+                // Try knob_id first, fall back to name for backward compatibility
+                auto getId = [](const nlohmann::json& k) -> std::string {
+                    if(k.contains("knob_id"))
+                    {
+                        return k["knob_id"].get<std::string>();
+                    }
+                    if(k.contains("name"))
+                    {
+                        return k["name"].get<std::string>();
+                    }
+                    return "";
+                };
+                return getId(x) < getId(y);
+            });
+            return arr;
+        };
+
+        auto sortedA = sortByKnobId(a);
+        auto sortedB = sortByKnobId(b);
+
+        for(size_t i = 0; i < sortedA.size(); ++i)
+        {
+            auto getId = [](const nlohmann::json& k) -> std::string {
+                if(k.contains("knob_id"))
+                {
+                    return k["knob_id"].get<std::string>();
+                }
+                if(k.contains("name"))
+                {
+                    return k["name"].get<std::string>();
+                }
+                return "";
+            };
+
+            if(getId(sortedA[i]) != getId(sortedB[i]))
+            {
+                return false;
+            }
+            if(sortedA[i].contains("value") && sortedB[i].contains("value"))
+            {
+                if(sortedA[i]["value"] != sortedB[i]["value"])
+                {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+
+    if(!overrides.empty() && !newEntries.empty())
+    {
+        // Erase pre-existing entries matching any new entry's (op, tensors, knobs) key
+        overrides.erase(
+            std::remove_if(overrides.begin(),
+                           overrides.end(),
+                           [&](const nlohmann::json& existing) {
+                               for(const auto& newEntry : newEntries)
+                               {
+                                   if(existing.contains("op") && existing["op"] == newEntry["op"]
+                                      && existing.contains("tensors")
+                                      && existing["tensors"] == newEntry["tensors"])
+                                   {
+                                       // Compare knobs
+                                       const auto& existingKnobs
+                                           = existing.contains("knobs")
+                                                 ? existing["knobs"]
+                                                 : nlohmann::json(nlohmann::json::value_t::null);
+                                       const auto& newKnobs
+                                           = newEntry.contains("knobs")
+                                                 ? newEntry["knobs"]
+                                                 : nlohmann::json(nlohmann::json::value_t::null);
+                                       if(knobsMatch(existingKnobs, newKnobs))
+                                       {
+                                           return true;
+                                       }
+                                   }
+                               }
+                               return false;
+                           }),
+            overrides.end());
+    }
+
+    for(auto& newEntry : newEntries)
+    {
+        overrides.push_back(std::move(newEntry));
+    }
+
+    // Atomic write: write to temp file, then rename
+    const std::string tempPath = filePath + ".tmp";
+    {
+        std::ofstream outFile(tempPath);
+        if(!outFile.is_open())
+        {
+            return {ErrorCode::INVALID_VALUE,
+                    "AutotuneFileWriter: cannot open temp file for writing: " + tempPath};
+        }
+        outFile << root.dump(2) << '\n';
+        outFile.flush();
+        if(!outFile.good())
+        {
+            return {ErrorCode::INVALID_VALUE,
+                    "AutotuneFileWriter: write to temp file failed: " + tempPath};
+        }
+    }
+
+    // Rename temp file to target (atomic on POSIX, best-effort on Windows)
+    std::error_code ec;
+    std::filesystem::rename(tempPath, filePath, ec);
+    if(ec.value() != 0)
+    {
+        // Fallback: try remove + rename
+        std::filesystem::remove(filePath, ec);
+        std::filesystem::rename(tempPath, filePath, ec);
+        if(ec.value() != 0)
+        {
+            return {ErrorCode::INVALID_VALUE,
+                    "AutotuneFileWriter: failed to rename temp file to " + filePath + ": "
+                        + ec.message()};
+        }
+    }
+
+    HIPDNN_FE_LOG_INFO("AutotuneFileWriter: wrote " << newEntries.size() << " entries to "
+                                                    << filePath);
+    return {ErrorCode::OK, ""};
+}
+
+} // namespace autotune
+} // namespace hipdnn_frontend
+
+#endif // HIPDNN_FRONTEND_SKIP_JSON_LIB

@@ -67,6 +67,8 @@
 
 #include <algorithm>
 #include <array>
+#include <sstream>
+#include <unordered_map>
 #include <unordered_set>
 
 #include <hipdnn_backend.h>
@@ -96,6 +98,7 @@
 #include <hipdnn_frontend/detail/BackendWrapper.hpp>
 #include <hipdnn_frontend/detail/ConvolutionFpropUnpacker.hpp>
 #include <hipdnn_frontend/detail/CreateBackendDescriptor.hpp>
+#include <hipdnn_frontend/detail/EngineOverrideUtils.hpp>
 #include <hipdnn_frontend/detail/GraphDetail.hpp>
 #include <hipdnn_frontend/detail/GraphOverrideValidation.hpp>
 #include <hipdnn_frontend/detail/GraphPacker.hpp>
@@ -130,7 +133,14 @@
 #endif
 #include <hipdnn_frontend/node/detail/TopologicalSortingUtils.hpp>
 
+#include <hipdnn_frontend/autotune/AutotuneTypes.hpp>
+#include <hipdnn_frontend/autotune/BenchmarkStatistics.hpp>
+#include <hipdnn_frontend/autotune/CartesianProduct.hpp>
+#include <hipdnn_frontend/autotune/KnobConstants.hpp>
+#include <hipdnn_frontend/autotune/PlanSpec.hpp>
+
 #ifndef HIPDNN_FRONTEND_SKIP_JSON_LIB
+#include <hipdnn_frontend/autotune/AutotuneFileWriter.hpp>
 #include <nlohmann/json.hpp>
 #endif
 
@@ -177,15 +187,430 @@ struct OverrideEntry
  */
 class Graph : public INode
 {
+protected:
+    /// A compiled execution plan containing both the engine config and execution
+    /// plan descriptors, along with metadata identifying which engine and knob
+    /// settings produced it. The single-plan lifecycle populates a vector of size 1
+    /// at index 0; autotuning populates multiple entries and sets the active index
+    /// to the winner.
+    struct CompiledPlan
+    {
+        std::unique_ptr<detail::ScopedHipdnnBackendDescriptor> engineConfigDesc;
+        std::unique_ptr<detail::ScopedHipdnnBackendDescriptor> executionPlanDesc;
+        int64_t engineId = -1;
+        std::vector<KnobSetting> knobSettings;
+        int64_t workspaceSize = -1; ///< Cached workspace size; -1 = not yet queried
+    };
+
+    /// All compiled plans. create_execution_plans() retains all engine configs
+    /// from the heuristic query (one entry per engine config);
+    /// create_execution_plan_ext() clears and emplaces one entry. Autotuning
+    /// populates multiple entries and selects a winner via _activePlanIndex.
+    std::vector<CompiledPlan> _compiledPlans;
+
+    /// Index of the active plan in _compiledPlans. Must be < _compiledPlans.size()
+    /// whenever _compiledPlans is non-empty. Reset to 0 when the vector is cleared.
+    size_t _activePlanIndex = 0;
+
+    /// Plan specs collected by add_engine_*() methods for autotuning.
+    /// Each PlanSpec captures (engineId, knobSettings, workspaceSize) and is deduplicated
+    /// by (engineId, knobSettings) via PlanSpec::operator==.
+    std::vector<PlanSpec> _planSpecs;
+
+    /// Get the active plan's engine config descriptor, or nullptr if no active plan exists.
+    detail::ScopedHipdnnBackendDescriptor* activeEngineConfigPtr()
+    {
+        if(_compiledPlans.empty() || _activePlanIndex >= _compiledPlans.size())
+        {
+            return nullptr;
+        }
+        return _compiledPlans[_activePlanIndex].engineConfigDesc.get();
+    }
+
+    /// Get the active plan's execution plan descriptor, or nullptr if no active plan exists.
+    detail::ScopedHipdnnBackendDescriptor* activeExecutionPlanPtr()
+    {
+        if(_compiledPlans.empty() || _activePlanIndex >= _compiledPlans.size())
+        {
+            return nullptr;
+        }
+        return _compiledPlans[_activePlanIndex].executionPlanDesc.get();
+    }
+
+    /// Get the active plan's execution plan descriptor, or nullptr if no active plan exists.
+    const detail::ScopedHipdnnBackendDescriptor* activeExecutionPlanPtr() const
+    {
+        if(_compiledPlans.empty() || _activePlanIndex >= _compiledPlans.size())
+        {
+            return nullptr;
+        }
+        return _compiledPlans[_activePlanIndex].executionPlanDesc.get();
+    }
+
+    /// Compile a single plan from an engine ID and knob settings.
+    /// This is the core compilation logic extracted for reuse by both
+    /// create_execution_plan_ext() (single-plan path) and autotune()
+    /// (multi-plan path). Does not modify _compiledPlans or _activePlanIndex.
+    /// @param engineId The engine to compile a plan for
+    /// @param knobSettings The knob settings to apply
+    /// @param[out] plan The compiled plan (moved on success)
+    /// @return ErrorCode::OK on success
+    Error compilePlanFromSpec(int64_t engineId,
+                              const std::vector<KnobSetting>& knobSettings,
+                              CompiledPlan& plan)
+    {
+        // Create engine descriptor and engine config descriptor
+        detail::ScopedHipdnnBackendDescriptor engineDesc;
+        HIPDNN_CHECK_ERROR(hipdnn_frontend::detail::createEngineDescriptorForGraph(
+            engineDesc, _graphDesc->get(), engineId));
+
+        auto engineConfigDesc = std::make_unique<detail::ScopedHipdnnBackendDescriptor>(
+            HIPDNN_BACKEND_ENGINECFG_DESCRIPTOR);
+
+        HIPDNN_RETURN_ON_BACKEND_FAILURE(detail::hipdnnBackend()->backendSetAttribute(
+                                             engineConfigDesc->get(),
+                                             HIPDNN_ATTR_ENGINECFG_ENGINE,
+                                             HIPDNN_TYPE_BACKEND_DESCRIPTOR,
+                                             1,
+                                             static_cast<const void*>(&engineDesc.get())),
+                                         "Failed to set engine on the engine config descriptor.");
+
+        // Validate and apply knob settings
+        std::unordered_map<KnobType_t, Knob> existingKnobs;
+        HIPDNN_CHECK_ERROR(get_knob_lookup_for_engine(engineId, existingKnobs));
+
+        std::vector<KnobSetting> validatedSettings;
+        HIPDNN_CHECK_ERROR(
+            validateAndFilterKnobSettings(knobSettings, existingKnobs, validatedSettings));
+
+        if(!validatedSettings.empty())
+        {
+            HIPDNN_CHECK_ERROR(detail::applyKnobSettingsViaDescriptors(engineConfigDesc->get(),
+                                                                       validatedSettings));
+        }
+
+        // Finalize engine config
+        HIPDNN_RETURN_ON_BACKEND_FAILURE(
+            detail::hipdnnBackend()->backendFinalize(engineConfigDesc->get()),
+            "Failed to finalize engine config descriptor");
+
+        // Create execution plan descriptor
+        auto executionPlanDesc = std::make_unique<detail::ScopedHipdnnBackendDescriptor>(
+            HIPDNN_BACKEND_EXECUTION_PLAN_DESCRIPTOR);
+
+        if(!executionPlanDesc->valid())
+        {
+            return {ErrorCode::HIPDNN_BACKEND_ERROR,
+                    "Failed to create backend execution descriptor."};
+        }
+
+        plan.engineConfigDesc = std::move(engineConfigDesc);
+        plan.executionPlanDesc = std::move(executionPlanDesc);
+        plan.engineId = engineId;
+        plan.knobSettings = validatedSettings;
+
+        return {ErrorCode::OK, ""};
+    }
+
 private:
     std::unique_ptr<detail::ScopedHipdnnBackendDescriptor> _graphDesc;
     bool _graphDescFinalized = false;
-    std::unique_ptr<detail::ScopedHipdnnBackendDescriptor> _engineConfigDesc;
-    std::unique_ptr<detail::ScopedHipdnnBackendDescriptor> _executionPlanDesc;
 
     std::optional<int64_t> _preferredEngineId;
 
     bool _isOverrideShapeEnabled = false;
+
+    /// Knob settings from the engine override config file, forwarded to plan creation.
+    /// Set by lowerGraphToDescriptors() when EngineOverrideConfig returns a MatchResult
+    /// with non-empty knobs.
+    std::optional<std::vector<KnobSetting>> _preferredKnobSettings;
+
+    /// Get the active plan's engine config descriptor. Throws if no active plan exists.
+    detail::ScopedHipdnnBackendDescriptor& activeEngineConfig()
+    {
+        auto* ptr = activeEngineConfigPtr();
+        if(ptr == nullptr)
+        {
+            throw Error(ErrorCode::INVALID_VALUE, "No active engine config");
+        }
+        return *ptr;
+    }
+
+    /// Get the active plan's execution plan descriptor. Throws if no active plan exists.
+    detail::ScopedHipdnnBackendDescriptor& activeExecutionPlan()
+    {
+        auto* ptr = activeExecutionPlanPtr();
+        if(ptr == nullptr)
+        {
+            throw Error(ErrorCode::INVALID_VALUE, "No active execution plan");
+        }
+        return *ptr;
+    }
+
+    /// Get the active plan's execution plan descriptor (const). Throws if no active plan exists.
+    const detail::ScopedHipdnnBackendDescriptor& activeExecutionPlan() const
+    {
+        const auto* ptr = activeExecutionPlanPtr();
+        if(ptr == nullptr)
+        {
+            throw Error(ErrorCode::INVALID_VALUE, "No active execution plan");
+        }
+        return *ptr;
+    }
+
+    /// Get all tensors in the graph as a vector (for autotuning file I/O).
+    /// Returns all tensors that have UIDs, sorted by UID for deterministic output.
+    std::vector<std::shared_ptr<TensorAttributes>> getInputOutputTensors() const
+    {
+        std::unordered_set<std::shared_ptr<TensorAttributes>> allTensors;
+        gatherHipdnnTensorsSubtree(allTensors);
+
+        std::vector<std::shared_ptr<TensorAttributes>> result;
+        result.reserve(allTensors.size());
+        for(const auto& tensor : allTensors)
+        {
+            if(tensor && tensor->has_uid())
+            {
+                result.push_back(tensor);
+            }
+        }
+
+        // Sort by UID for deterministic ordering
+        std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) {
+            return a->get_uid() < b->get_uid();
+        });
+
+        return result;
+    }
+
+    /// Determine the core operation name for config file output.
+    /// Priority: convolution/GEMM/SDPA (highest) > normalization > pointwise (lowest).
+    /// Returns the graph name as fallback if no recognized operation is found.
+    std::string getCoreOperationName() const
+    {
+        // Priority levels: 0 = default/unknown, 1 = pointwise, 2 = normalization,
+        // 3 = conv/matmul/SDPA
+        int bestPriority = 0;
+        std::string bestName;
+
+        for(const auto& node : _sub_nodes)
+        {
+            if(!node)
+            {
+                continue;
+            }
+            int priority = 0;
+            std::string name;
+            switch(node->getNodeType())
+            {
+            case NodeType::CONVOLUTION_FPROP:
+                priority = 3;
+                name = "conv_fprop";
+                break;
+            case NodeType::CONVOLUTION_DGRAD:
+                priority = 3;
+                name = "conv_dgrad";
+                break;
+            case NodeType::CONVOLUTION_WGRAD:
+                priority = 3;
+                name = "conv_wgrad";
+                break;
+            case NodeType::MATMUL:
+                priority = 3;
+                name = "matmul";
+                break;
+            case NodeType::SDPA_FWD:
+                priority = 3;
+                name = "sdpa_fwd";
+                break;
+            case NodeType::SDPA_BWD:
+                priority = 3;
+                name = "sdpa_bwd";
+                break;
+            case NodeType::BATCHNORM:
+            case NodeType::BATCHNORM_INFERENCE:
+            case NodeType::BATCHNORM_BACKWARD:
+            case NodeType::BATCHNORM_INFERENCE_VARIANCE_EXT:
+                priority = 2;
+                name = "batchnorm";
+                break;
+            case NodeType::LAYER_NORM:
+                priority = 2;
+                name = "layernorm";
+                break;
+            case NodeType::RMS_NORM:
+                priority = 2;
+                name = "rmsnorm";
+                break;
+            case NodeType::POINTWISE:
+                priority = 1;
+                name = "pointwise";
+                break;
+            default:
+                break;
+            }
+
+            if(priority > bestPriority)
+            {
+                bestPriority = priority;
+                bestName = std::move(name);
+            }
+
+            // Short-circuit: can't do better than priority 3
+            if(bestPriority == 3)
+            {
+                break;
+            }
+        }
+
+        return bestPriority > 0 ? bestName : graph_attributes.get_name();
+    }
+
+    /// Add a plan spec to _planSpecs if no duplicate exists (linear scan dedup).
+    void addPlanSpecIfUnique(const PlanSpec& spec)
+    {
+        auto it = std::find(_planSpecs.begin(), _planSpecs.end(), spec);
+        if(it == _planSpecs.end())
+        {
+            _planSpecs.push_back(spec);
+        }
+        else
+        {
+            HIPDNN_FE_LOG_INFO("Duplicate plan spec for engine " << spec.engineId << " with "
+                                                                 << spec.knobSettings.size()
+                                                                 << " knob(s), skipping");
+        }
+    }
+
+    /// Execute a graph using a specific execution plan descriptor.
+    /// This is used by autotune() for warmup and timed iterations.
+    static Error executeWithPlan(hipdnnHandle_t handle,
+                                 detail::ScopedHipdnnBackendDescriptor& execPlan,
+                                 const std::unordered_map<int64_t, void*>& variantPack,
+                                 void* workspace)
+    {
+        auto variantPackDesc = std::make_unique<detail::ScopedHipdnnBackendDescriptor>(
+            HIPDNN_BACKEND_VARIANT_PACK_DESCRIPTOR);
+        if(!variantPackDesc || !variantPackDesc->valid())
+        {
+            return {ErrorCode::HIPDNN_BACKEND_ERROR, "Failed to create variant pack descriptor."};
+        }
+
+        std::vector<int64_t> variantPackKeys;
+        std::vector<void*> variantPackValues;
+        variantPackKeys.reserve(variantPack.size());
+        variantPackValues.reserve(variantPack.size());
+        for(const auto& [key, value] : variantPack)
+        {
+            variantPackKeys.push_back(key);
+            variantPackValues.push_back(value);
+        }
+
+        HIPDNN_RETURN_ON_BACKEND_FAILURE(detail::hipdnnBackend()->backendSetAttribute(
+                                             variantPackDesc->get(),
+                                             HIPDNN_ATTR_VARIANT_PACK_DATA_POINTERS,
+                                             HIPDNN_TYPE_VOID_PTR,
+                                             static_cast<int64_t>(variantPackValues.size()),
+                                             static_cast<const void*>(variantPackValues.data())),
+                                         "failed to set the variant pack data pointers.");
+
+        HIPDNN_RETURN_ON_BACKEND_FAILURE(detail::hipdnnBackend()->backendSetAttribute(
+                                             variantPackDesc->get(),
+                                             HIPDNN_ATTR_VARIANT_PACK_UNIQUE_IDS,
+                                             HIPDNN_TYPE_INT64,
+                                             static_cast<int64_t>(variantPackKeys.size()),
+                                             variantPackKeys.data()),
+                                         "failed to set the variant pack unique ids.");
+
+        HIPDNN_RETURN_ON_BACKEND_FAILURE(
+            detail::hipdnnBackend()->backendSetAttribute(variantPackDesc->get(),
+                                                         HIPDNN_ATTR_VARIANT_PACK_WORKSPACE,
+                                                         HIPDNN_TYPE_VOID_PTR,
+                                                         1,
+                                                         static_cast<const void*>(&workspace)),
+            "failed to set the variant pack workspace.");
+
+        HIPDNN_RETURN_ON_BACKEND_FAILURE(
+            detail::hipdnnBackend()->backendFinalize(variantPackDesc->get()),
+            "Failed to finalize variant pack descriptor");
+
+        HIPDNN_RETURN_ON_BACKEND_FAILURE(
+            detail::hipdnnBackend()->backendExecute(handle, execPlan.get(), variantPackDesc->get()),
+            "Execute failed.");
+
+        return {ErrorCode::OK, ""};
+    }
+
+    /// Run one timed iteration using a fresh profiling control descriptor.
+    /// Creates descriptor, records START → execute → STOP → finalize → ELAPSED_MS.
+    /// A new descriptor is created each call because ProfilingControlDescriptor
+    /// does not support reset — setAttribute throws after finalize.
+    static Error benchmarkOnce(hipdnnHandle_t handle,
+                               detail::ScopedHipdnnBackendDescriptor& execPlan,
+                               const std::unordered_map<int64_t, void*>& variantPack,
+                               void* workspace,
+                               float& elapsedMs)
+    {
+        elapsedMs = 0.0f;
+
+        // Create a fresh profiling descriptor for this iteration
+        // NOLINTNEXTLINE(misc-const-correctness)
+        detail::ScopedHipdnnBackendDescriptor profilingDesc(HIPDNN_BACKEND_PROFILING_CONTROL_EXT);
+        if(!profilingDesc.valid())
+        {
+            return {ErrorCode::HIPDNN_BACKEND_ERROR,
+                    "Failed to create profiling control descriptor"};
+        }
+
+        // Set handle (creates HIP events)
+        HIPDNN_RETURN_ON_BACKEND_FAILURE(
+            detail::hipdnnBackend()->backendSetAttribute(profilingDesc.get(),
+                                                         HIPDNN_ATTR_PROFILING_HANDLE_EXT,
+                                                         HIPDNN_TYPE_HANDLE,
+                                                         1,
+                                                         static_cast<const void*>(&handle)),
+            "Failed to set handle on profiling descriptor");
+
+        // Record start event
+        bool startVal = true;
+        HIPDNN_RETURN_ON_BACKEND_FAILURE(
+            detail::hipdnnBackend()->backendSetAttribute(profilingDesc.get(),
+                                                         HIPDNN_ATTR_PROFILING_START_EXT,
+                                                         HIPDNN_TYPE_BOOLEAN,
+                                                         1,
+                                                         &startVal),
+            "Failed to set profiling start");
+
+        // Execute
+        HIPDNN_CHECK_ERROR(executeWithPlan(handle, execPlan, variantPack, workspace));
+
+        // Record stop event
+        bool stopVal = true;
+        HIPDNN_RETURN_ON_BACKEND_FAILURE(
+            detail::hipdnnBackend()->backendSetAttribute(profilingDesc.get(),
+                                                         HIPDNN_ATTR_PROFILING_STOP_EXT,
+                                                         HIPDNN_TYPE_BOOLEAN,
+                                                         1,
+                                                         &stopVal),
+            "Failed to set profiling stop");
+
+        // Finalize synchronizes events and computes elapsed time
+        HIPDNN_RETURN_ON_BACKEND_FAILURE(
+            detail::hipdnnBackend()->backendFinalize(profilingDesc.get()),
+            "Failed to finalize profiling descriptor");
+
+        // Read elapsed time
+        HIPDNN_RETURN_ON_BACKEND_FAILURE(
+            detail::hipdnnBackend()->backendGetAttribute(profilingDesc.get(),
+                                                         HIPDNN_ATTR_PROFILING_ELAPSED_MS_EXT,
+                                                         HIPDNN_TYPE_FLOAT,
+                                                         1,
+                                                         nullptr,
+                                                         &elapsedMs),
+            "Failed to get profiling elapsed ms");
+
+        return {ErrorCode::OK, ""};
+    }
 
     /// Apply validated knob settings to the engine config descriptor via
     /// the descriptor-based C API path.
@@ -196,7 +621,8 @@ private:
             return {ErrorCode::OK, ""};
         }
 
-        return detail::applyKnobSettingsViaDescriptors(_engineConfigDesc->get(), validatedSettings);
+        return detail::applyKnobSettingsViaDescriptors(activeEngineConfig().get(),
+                                                       validatedSettings);
     }
 
     Error validateAndFilterKnobSettings(const std::vector<KnobSetting>& settings,
@@ -228,6 +654,47 @@ private:
             HIPDNN_CHECK_ERROR(knob.validate(setting));
 
             validatedSettings.emplace_back(setting);
+        }
+
+        return {ErrorCode::OK, ""};
+    }
+
+    /// Validate knob settings strictly: return an error for the first unknown
+    /// or out-of-range knob. Used by add_engine_*() for early validation.
+    Error validateKnobSettingsStrict(const std::vector<KnobSetting>& settings,
+                                     int64_t engineId) const
+    {
+        if(settings.empty())
+        {
+            return {ErrorCode::OK, ""};
+        }
+
+        std::unordered_map<KnobType_t, Knob> knobLookup;
+        HIPDNN_CHECK_ERROR(get_knob_lookup_for_engine(engineId, knobLookup));
+
+        for(const auto& setting : settings)
+        {
+            // Skip the benchmarking knob — it is managed by autotune()
+            if(setting.knobId() == autotune::BENCHMARKING_KNOB_NAME)
+            {
+                continue;
+            }
+
+            auto knobIt = knobLookup.find(setting.knobId());
+            if(knobIt == knobLookup.end())
+            {
+                return {ErrorCode::INVALID_VALUE,
+                        "Knob '" + setting.knobId() + "' is not available for engine "
+                            + std::to_string(engineId)};
+            }
+
+            auto valErr = knobIt->second.validate(setting);
+            if(valErr.is_bad())
+            {
+                return {ErrorCode::INVALID_VALUE,
+                        "Knob '" + setting.knobId() + "' has invalid value for engine "
+                            + std::to_string(engineId) + ": " + valErr.get_message()};
+            }
         }
 
         return {ErrorCode::OK, ""};
@@ -287,26 +754,6 @@ private:
         return hasValidGraphDesc() && _graphDescFinalized;
     }
 
-    Error finalizeExecutionPlanDescriptor()
-    {
-        // Finalize engine config after knobs have been set
-        HIPDNN_RETURN_ON_BACKEND_FAILURE(
-            detail::hipdnnBackend()->backendFinalize(_engineConfigDesc->get()),
-            "Failed to finalize engine config descriptor");
-
-        // Create execution plan descriptor
-        _executionPlanDesc = std::make_unique<detail::ScopedHipdnnBackendDescriptor>(
-            HIPDNN_BACKEND_EXECUTION_PLAN_DESCRIPTOR);
-
-        if(!_executionPlanDesc->valid())
-        {
-            return {ErrorCode::HIPDNN_BACKEND_ERROR,
-                    "Failed to create backend execution descriptor."};
-        }
-
-        return {ErrorCode::OK, ""};
-    }
-
     void assignUnsetTensorUids()
     {
         std::unordered_set<std::shared_ptr<TensorAttributes>> allTensors;
@@ -344,6 +791,24 @@ private:
             HIPDNN_FE_LOG_INFO("Purging existing graph descriptor before re-lowering");
         }
         resetGraphDesc();
+
+        if(!_preferredEngineId.has_value())
+        {
+            auto overrideResult
+                = hipdnn_frontend::engine_override::getPreferredIdFromOverrideConfig(*this);
+            if(overrideResult.has_value())
+            {
+                _preferredEngineId = overrideResult->engineId;
+                if(!overrideResult->knobs.empty())
+                {
+                    _preferredKnobSettings = std::move(overrideResult->knobs);
+                    HIPDNN_FE_LOG_INFO("Engine override config provided "
+                                       << _preferredKnobSettings->size()
+                                       << " knob setting(s) for engine "
+                                       << _preferredEngineId.value());
+                }
+            }
+        }
 
         std::unordered_map<int64_t, detail::ScopedHipdnnBackendDescriptor> tensorDescs;
         std::vector<detail::ScopedHipdnnBackendDescriptor> operations;
@@ -413,7 +878,7 @@ private:
         std::vector<std::unique_ptr<detail::ScopedHipdnnBackendDescriptor>> engineConfigs;
         std::vector<int64_t> engineIds;
         HIPDNN_CHECK_ERROR(hipdnn_frontend::detail::getEngineConfigs(
-            engineConfigs, engineIds, engineHeuristicDesc, _preferredEngineId.has_value()));
+            engineConfigs, engineIds, engineHeuristicDesc, /*getAll=*/true));
 
         size_t selectedIndex = 0;
         if(_preferredEngineId.has_value())
@@ -436,12 +901,25 @@ private:
 
         HIPDNN_FE_LOG_INFO("Selected engine id " << engineIds[selectedIndex]
                                                  << " for execution plan.");
-        _engineConfigDesc = std::move(engineConfigs[selectedIndex]);
+
+        // Populate _compiledPlans with ALL engine configs and set the active
+        // index to the selected engine.
+        _compiledPlans.clear();
+        _activePlanIndex = selectedIndex;
+        _compiledPlans.reserve(engineConfigs.size());
+        for(size_t i = 0; i < engineConfigs.size(); ++i)
+        {
+            auto& plan = _compiledPlans.emplace_back();
+            plan.engineConfigDesc = std::move(engineConfigs[i]);
+            plan.engineId = engineIds[i];
+        }
 
         return {ErrorCode::OK, ""};
     }
 
     /// Initialize engine config for a specific engine ID.
+    /// Clears the compiled plans vector and creates a single plan entry with
+    /// the engine config set but not yet finalized.
     /// @param engineId The engine to configure
     /// @note This method does NOT finalize the engine config. The caller must
     ///       finalize after setting any knobs on the config.
@@ -463,7 +941,12 @@ private:
                                              static_cast<const void*>(&engineDesc.get())),
                                          "Failed to set engine on the engine config descriptor.");
 
-        _engineConfigDesc = std::move(engineConfigDesc);
+        _compiledPlans.clear();
+        _activePlanIndex = 0;
+        auto& plan = _compiledPlans.emplace_back();
+        plan.engineConfigDesc = std::move(engineConfigDesc);
+        plan.engineId = engineId;
+
         return {ErrorCode::OK, ""};
     }
 
@@ -909,8 +1392,8 @@ protected:
         // Any cached backend descriptors are stale and must be cleared. The caller
         // must call build_operation_graph() to rebuild them.
         resetGraphDesc();
-        _engineConfigDesc.reset();
-        _executionPlanDesc.reset();
+        _compiledPlans.clear();
+        _activePlanIndex = 0;
         return {};
     }
 
@@ -1098,6 +1581,13 @@ public:
     {
         HIPDNN_FE_LOG_INFO("Creating execution plans for graph " << graph_attributes.get_name());
 
+        if(!_planSpecs.empty())
+        {
+            return {ErrorCode::INVALID_VALUE,
+                    "Cannot call create_execution_plans() after add_engine_*(). "
+                    "The plan-spec path and compiled-plan path are mutually exclusive."};
+        }
+
         if(!hasReadyGraphDesc())
         {
             return {ErrorCode::HIPDNN_BACKEND_ERROR,
@@ -1111,13 +1601,19 @@ public:
 
         HIPDNN_CHECK_ERROR(initializeEngineConfig(engineHeuristicDesc.get()));
 
-        _executionPlanDesc = std::make_unique<detail::ScopedHipdnnBackendDescriptor>(
-            HIPDNN_BACKEND_EXECUTION_PLAN_DESCRIPTOR);
-
-        if(!_executionPlanDesc->valid())
+        // Allocate an unfinalized execution plan descriptor for each engine
+        // config. build_plans() will finalize the active plan (default) or all
+        // plans (BuildPlanPolicy::ALL).
+        for(auto& plan : _compiledPlans)
         {
-            return {ErrorCode::HIPDNN_BACKEND_ERROR,
-                    "Failed to create backend execution descriptor."};
+            plan.executionPlanDesc = std::make_unique<detail::ScopedHipdnnBackendDescriptor>(
+                HIPDNN_BACKEND_EXECUTION_PLAN_DESCRIPTOR);
+
+            if(!plan.executionPlanDesc->valid())
+            {
+                return {ErrorCode::HIPDNN_BACKEND_ERROR,
+                        "Failed to create backend execution descriptor."};
+            }
         }
 
         return {ErrorCode::OK, ""};
@@ -1143,6 +1639,13 @@ public:
     {
         HIPDNN_FE_LOG_INFO("Creating execution plans for graph " << graph_attributes.get_name());
 
+        if(!_planSpecs.empty())
+        {
+            return {ErrorCode::INVALID_VALUE,
+                    "Cannot call create_execution_plan_ext() after add_engine_*(). "
+                    "The plan-spec path and compiled-plan path are mutually exclusive."};
+        }
+
         if(!hasReadyGraphDesc())
         {
             return {ErrorCode::HIPDNN_BACKEND_ERROR,
@@ -1150,16 +1653,14 @@ public:
                     "execution plan."};
         }
 
-        std::unordered_map<KnobType_t, Knob> existingKnobs;
-        HIPDNN_CHECK_ERROR(get_knob_lookup_for_engine(engineId, existingKnobs));
-        HIPDNN_CHECK_ERROR(initializeEngineConfig(engineId));
+        CompiledPlan plan;
+        HIPDNN_CHECK_ERROR(compilePlanFromSpec(engineId, settings, plan));
 
-        std::vector<KnobSetting> validatedSettings;
-        HIPDNN_CHECK_ERROR(
-            validateAndFilterKnobSettings(settings, existingKnobs, validatedSettings));
-        HIPDNN_CHECK_ERROR(applyKnobSettingsToEngineConfig(validatedSettings));
+        _compiledPlans.clear();
+        _activePlanIndex = 0;
+        _compiledPlans.push_back(std::move(plan));
 
-        return finalizeExecutionPlanDescriptor();
+        return {ErrorCode::OK, ""};
     }
 
     /**
@@ -1173,7 +1674,8 @@ public:
         HIPDNN_FE_LOG_INFO("Checking execution plan support for graph "
                            << graph_attributes.get_name());
 
-        if(!_executionPlanDesc || !_executionPlanDesc->valid())
+        const auto* execPlan = activeExecutionPlanPtr();
+        if(execPlan == nullptr || !execPlan->valid())
         {
             return {ErrorCode::HIPDNN_BACKEND_ERROR,
                     "Execution plan descriptor is not created or invalid."};
@@ -1353,8 +1855,8 @@ public:
         _preferredEngineId = tempEngineId;
         _isOverrideShapeEnabled = tempOverrideShapeEnabled;
         setGraphDesc(std::move(graphDesc), handle != nullptr);
-        _engineConfigDesc.reset();
-        _executionPlanDesc.reset();
+        _compiledPlans.clear();
+        _activePlanIndex = 0;
         return {};
     }
 
@@ -1379,7 +1881,8 @@ public:
     // NOLINTNEXTLINE(readability-identifier-naming)
     Error serialize_compiled_plan(std::vector<uint8_t>& data) const
     {
-        if(!_executionPlanDesc || !_executionPlanDesc->valid())
+        const auto* execPlan = activeExecutionPlanPtr();
+        if(execPlan == nullptr || !execPlan->valid())
         {
             return {ErrorCode::INVALID_VALUE,
                     "Graph has no compiled execution plan. Call build() or build_plans() first."};
@@ -1388,7 +1891,7 @@ public:
         size_t planByteSize = 0;
         HIPDNN_RETURN_ON_BACKEND_FAILURE(
             detail::hipdnnBackend()->backendGetSerializedExecutionPlanExt(
-                _executionPlanDesc->get(), 0, &planByteSize, nullptr),
+                execPlan->get(), 0, &planByteSize, nullptr),
             "Failed to query serialized compiled plan size");
 
         if(planByteSize == 0)
@@ -1399,7 +1902,7 @@ public:
         data.resize(planByteSize);
         HIPDNN_RETURN_ON_BACKEND_FAILURE(
             detail::hipdnnBackend()->backendGetSerializedExecutionPlanExt(
-                _executionPlanDesc->get(), planByteSize, &planByteSize, data.data()),
+                execPlan->get(), planByteSize, &planByteSize, data.data()),
             "Failed to serialize compiled plan");
         data.resize(planByteSize);
 
@@ -1433,8 +1936,12 @@ public:
                 handle, &executionPlan, data.data(), data.size()),
             "Failed to deserialize compiled plan");
 
-        _executionPlanDesc = std::make_unique<detail::ScopedHipdnnBackendDescriptor>(executionPlan);
-        _engineConfigDesc.reset();
+        // Deserialized plans have no engine config — only the execution plan.
+        _compiledPlans.clear();
+        _activePlanIndex = 0;
+        auto& plan = _compiledPlans.emplace_back();
+        plan.executionPlanDesc
+            = std::make_unique<detail::ScopedHipdnnBackendDescriptor>(executionPlan);
         resetGraphDesc();
         _sub_nodes.clear();
         _isOverrideShapeEnabled = false;
@@ -1595,8 +2102,8 @@ public:
         _preferredEngineId = tempEngineId;
         _isOverrideShapeEnabled = tempOverrideShapeEnabled;
         setGraphDesc(std::move(graphDesc), handle != nullptr);
-        _engineConfigDesc.reset();
-        _executionPlanDesc.reset();
+        _compiledPlans.clear();
+        _activePlanIndex = 0;
         return {};
     }
 
@@ -1672,27 +2179,107 @@ public:
 #endif // HIPDNN_FRONTEND_SKIP_JSON_LIB
 
     /**
-     * @brief Finalize the execution plan
+     * @brief Finalize execution plans
      *
      * Called internally by build() after create_execution_plans().
+     *
+     * @param policy Controls which plans are compiled:
+     *   - HEURISTICS_CHOICE: compile only the active (top-ranked) plan
+     *   - ALL: compile every plan in _compiledPlans, setting _activePlanIndex
+     *     to the first plan that compiles successfully
      *
      * @return ErrorCode::OK on success, or ErrorCode::HIPDNN_BACKEND_ERROR
      *         on failure. Call get_message() for the specific failure reason.
      */
-    Error build_plans() // NOLINT(readability-identifier-naming)
+    // NOLINTNEXTLINE(readability-identifier-naming)
+    Error build_plans(BuildPlanPolicy policy = BuildPlanPolicy::HEURISTICS_CHOICE)
     {
-        HIPDNN_FE_LOG_INFO("Building plans for graph " << graph_attributes.get_name());
+        HIPDNN_FE_LOG_INFO("Building plans for graph "
+                           << graph_attributes.get_name()
+                           << " with policy: " << static_cast<int>(policy));
 
+        if(policy == BuildPlanPolicy::ALL)
+        {
+            bool anySucceeded = false;
+            size_t firstSuccessIndex = 0;
+
+            for(size_t i = 0; i < _compiledPlans.size(); ++i)
+            {
+                auto& plan = _compiledPlans[i];
+
+                // Skip entries without valid descriptors
+                if(!plan.engineConfigDesc || !plan.engineConfigDesc->valid()
+                   || !plan.executionPlanDesc || !plan.executionPlanDesc->valid())
+                {
+                    HIPDNN_FE_LOG_WARN("Skipping plan index "
+                                       << i << " (engine " << plan.engineId
+                                       << "): missing or invalid descriptor");
+                    continue;
+                }
+
+                // Set the engine config on the execution plan descriptor
+                auto setStatus = detail::hipdnnBackend()->backendSetAttribute(
+                    plan.executionPlanDesc->get(),
+                    HIPDNN_ATTR_EXECUTION_PLAN_ENGINE_CONFIG,
+                    HIPDNN_TYPE_BACKEND_DESCRIPTOR,
+                    1,
+                    static_cast<const void*>(&plan.engineConfigDesc->get()));
+                if(setStatus != HIPDNN_STATUS_SUCCESS)
+                {
+                    HIPDNN_FE_LOG_WARN("Failed to set engine config on plan index "
+                                       << i << " (engine " << plan.engineId << "), skipping");
+                    continue;
+                }
+
+                // Finalize the execution plan
+                auto finStatus
+                    = detail::hipdnnBackend()->backendFinalize(plan.executionPlanDesc->get());
+                if(finStatus != HIPDNN_STATUS_SUCCESS)
+                {
+                    HIPDNN_FE_LOG_WARN("Failed to finalize plan index "
+                                       << i << " (engine " << plan.engineId << "), skipping");
+                    continue;
+                }
+
+                // Query and cache workspace size
+                int64_t wsSize = 0;
+                detail::hipdnnBackend()->backendGetAttribute(
+                    plan.executionPlanDesc->get(),
+                    HIPDNN_ATTR_EXECUTION_PLAN_WORKSPACE_SIZE,
+                    HIPDNN_TYPE_INT64,
+                    1,
+                    nullptr,
+                    &wsSize);
+                plan.workspaceSize = wsSize;
+
+                if(!anySucceeded)
+                {
+                    firstSuccessIndex = i;
+                    anySucceeded = true;
+                }
+            }
+
+            if(!anySucceeded)
+            {
+                return {ErrorCode::HIPDNN_BACKEND_ERROR,
+                        "Failed to finalize any execution plan (policy=ALL)."};
+            }
+
+            _activePlanIndex = firstSuccessIndex;
+            return {ErrorCode::OK, ""};
+        }
+
+        // HEURISTICS_CHOICE path: compile only the active plan (original behavior)
         HIPDNN_RETURN_ON_BACKEND_FAILURE(detail::hipdnnBackend()->backendSetAttribute(
-                                             _executionPlanDesc->get(),
+                                             activeExecutionPlan().get(),
                                              HIPDNN_ATTR_EXECUTION_PLAN_ENGINE_CONFIG,
                                              HIPDNN_TYPE_BACKEND_DESCRIPTOR,
                                              1,
-                                             static_cast<const void*>(&_engineConfigDesc->get())),
+                                             static_cast<const void*>(&activeEngineConfig().get())),
                                          "Failed to set the engine config on execution plan.");
 
         HIPDNN_RETURN_ON_BACKEND_FAILURE(
-            detail::hipdnnBackend()->backendFinalize(_executionPlanDesc->get()),
+            detail::hipdnnBackend()->backendFinalize(activeExecutionPlan().get()),
             "Failed to finalize execution plan descriptor");
 
         return {ErrorCode::OK, ""};
@@ -1721,7 +2308,8 @@ public:
      *
      * @param handle The hipDNN handle
      * @param modes Heuristic modes for engine selection
-     * @param policy Build plan policy (currently only HEURISTICS_CHOICE is used)
+     * @param policy Build plan policy: HEURISTICS_CHOICE compiles only the
+     *        top-ranked plan; ALL compiles every engine config
      * @param do_multithreaded_builds Reserved for future use
      * @return ErrorCode::OK on success, or ErrorCode::INVALID_VALUE /
      *         ErrorCode::ATTRIBUTE_NOT_SET / ErrorCode::HIPDNN_BACKEND_ERROR /
@@ -1732,10 +2320,17 @@ public:
     // NOLINTBEGIN(readability-identifier-naming)
     Error build(hipdnnHandle_t handle,
                 const std::vector<HeuristicMode>& modes = {HeuristicMode::FALLBACK},
-                [[maybe_unused]] BuildPlanPolicy policy = BuildPlanPolicy::HEURISTICS_CHOICE,
+                BuildPlanPolicy policy = BuildPlanPolicy::HEURISTICS_CHOICE,
                 [[maybe_unused]] bool do_multithreaded_builds = false)
     // NOLINTEND(readability-identifier-naming)
     {
+        if(!_planSpecs.empty())
+        {
+            return {ErrorCode::INVALID_VALUE,
+                    "Cannot call build() after add_engine_*(). "
+                    "The plan-spec path and compiled-plan path are mutually exclusive."};
+        }
+
         auto graphName
             = graph_attributes.get_name().empty() ? "unnamed" : graph_attributes.get_name();
         HIPDNN_FE_LOG_INFO("BUILD with handle for graph '"
@@ -1743,13 +2338,1903 @@ public:
                            << ", modes count: " << modes.size());
 
         HIPDNN_CHECK_ERROR(build_operation_graph(handle));
-        HIPDNN_CHECK_ERROR(create_execution_plans(modes));
+
+        // If the engine override config provided both an engine ID and knob settings,
+        // use the explicit plan creation path to apply them. Otherwise, fall through
+        // to the heuristics path.
+        if(_preferredEngineId.has_value() && _preferredKnobSettings.has_value())
+        {
+            HIPDNN_FE_LOG_INFO("Using preferred engine " << _preferredEngineId.value() << " with "
+                                                         << _preferredKnobSettings->size()
+                                                         << " override knob(s) for graph "
+                                                         << graphName);
+            HIPDNN_CHECK_ERROR(
+                create_execution_plan_ext(_preferredEngineId.value(), *_preferredKnobSettings));
+        }
+        else
+        {
+            HIPDNN_CHECK_ERROR(create_execution_plans(modes));
+        }
+
         HIPDNN_CHECK_ERROR(check_support());
-        HIPDNN_CHECK_ERROR(build_plans());
+        HIPDNN_CHECK_ERROR(build_plans(policy));
 
         HIPDNN_FE_LOG_INFO("BUILD ALL OK for graph " << graphName);
         return {ErrorCode::OK, ""};
     }
+
+    // ── Autotune: Engine Discovery ──────────────────────────────────────
+
+    /**
+     * @brief Query available engine configurations for this graph
+     *
+     * Queries the backend for all engines applicable to this graph and returns
+     * rich metadata about each engine, including available knobs, workspace
+     * requirements, and whether the engine supports exhaustive cache priming.
+     *
+     * Requires build_operation_graph() to have been called first.
+     *
+     * @param[out] configs Output vector of EngineConfigInfo structs
+     * @param modes Heuristic modes for engine ranking
+     * @return ErrorCode::OK on success, or ErrorCode::HIPDNN_BACKEND_ERROR
+     *         if the graph has not been built.
+     */
+    // NOLINTNEXTLINE(readability-identifier-naming)
+    Error get_engine_configs(std::vector<EngineConfigInfo>& configs,
+                             const std::vector<HeuristicMode>& modes = {HeuristicMode::FALLBACK})
+    {
+        configs.clear();
+
+        if(!hasReadyGraphDesc())
+        {
+            return {ErrorCode::HIPDNN_BACKEND_ERROR,
+                    "Graph has not been built. Call build_operation_graph() first."};
+        }
+
+        detail::ScopedHipdnnBackendDescriptor engineHeuristicDesc;
+        HIPDNN_CHECK_ERROR(hipdnn_frontend::detail::createEngineHeuristicDescriptorForGraph(
+            engineHeuristicDesc, _graphDesc->get(), modes));
+
+        std::vector<std::unique_ptr<detail::ScopedHipdnnBackendDescriptor>> engineConfigDescs;
+        std::vector<int64_t> engineIds;
+        HIPDNN_CHECK_ERROR(detail::getEngineConfigs(
+            engineConfigDescs, engineIds, engineHeuristicDesc.get(), /*getAll=*/true));
+
+        configs.reserve(engineIds.size());
+        for(size_t i = 0; i < engineIds.size(); ++i)
+        {
+            EngineConfigInfo info;
+            info.engineId = engineIds[i];
+
+            // Resolve engine name with hex fallback for unknown engines
+            try
+            {
+                info.engineName
+                    = std::string(hipdnn_data_sdk::utilities::getEngineNameFromId(engineIds[i]));
+            }
+            catch(const std::out_of_range&)
+            {
+                std::ostringstream oss;
+                oss << "0x" << std::hex << engineIds[i];
+                info.engineName = oss.str();
+            }
+
+            // Get knobs for this engine (failure is non-fatal; info.knobs stays empty)
+            auto knobErr = get_knobs_for_engine(engineIds[i], info.knobs);
+            if(knobErr.is_bad())
+            {
+                HIPDNN_FE_LOG_WARN("Failed to get knobs for engine " << engineIds[i]);
+            }
+
+            // Check for benchmarking knob (supportsExhaustive)
+            info.supportsExhaustive = false;
+            for(const auto& knob : info.knobs)
+            {
+                if(knob.knobId() == autotune::BENCHMARKING_KNOB_NAME)
+                {
+                    info.supportsExhaustive = true;
+                    break;
+                }
+            }
+
+            // Query workspace size from finalized engine config descriptor
+            int64_t wsSize = 0;
+            auto wsStatus
+                = detail::hipdnnBackend()->backendGetAttribute(engineConfigDescs[i]->get(),
+                                                               HIPDNN_ATTR_ENGINECFG_WORKSPACE_SIZE,
+                                                               HIPDNN_TYPE_INT64,
+                                                               1,
+                                                               nullptr,
+                                                               &wsSize);
+            if(wsStatus == HIPDNN_STATUS_SUCCESS)
+            {
+                info.workspaceSize = wsSize;
+            }
+
+            configs.push_back(std::move(info));
+        }
+
+        return {ErrorCode::OK, ""};
+    }
+
+    // ── Autotune: Plan Spec Collection ──────────────────────────────────
+
+    /**
+     * @brief Add multiple engine configs as plan specs for autotuning
+     *
+     * Takes a vector of EngineConfigInfo (from get_engine_configs()) and
+     * creates a plan spec for each engine using its default knob settings.
+     * Duplicates are silently skipped.
+     *
+     * @param configs Engine configurations to add (must not be empty)
+     * @return ErrorCode::OK on success, ErrorCode::INVALID_VALUE if configs is empty
+     */
+    // NOLINTNEXTLINE(readability-identifier-naming)
+    Error add_engine_configs(const std::vector<EngineConfigInfo>& configs)
+    {
+        if(!_compiledPlans.empty())
+        {
+            return {ErrorCode::INVALID_VALUE,
+                    "Cannot call add_engine_configs() after create_execution_plans()/build(). "
+                    "The plan-spec path and compiled-plan path are mutually exclusive."};
+        }
+
+        if(!hasReadyGraphDesc())
+        {
+            return {ErrorCode::HIPDNN_BACKEND_ERROR,
+                    "Graph has not been built. Call build_operation_graph() first."};
+        }
+
+        if(configs.empty())
+        {
+            return {ErrorCode::INVALID_VALUE, "Input list is empty"};
+        }
+
+        for(const auto& config : configs)
+        {
+            PlanSpec spec;
+            spec.engineId = config.engineId;
+            spec.workspaceSize = config.workspaceSize;
+            // Default knob settings (empty — engine uses its defaults)
+
+            addPlanSpecIfUnique(spec);
+        }
+        return {ErrorCode::OK, ""};
+    }
+
+    /**
+     * @brief Add a single engine with specific knob settings as a plan spec
+     *
+     * Validates that the engine exists for this graph. The global.benchmarking
+     * knob is stripped if present (it is managed exclusively by autotune()).
+     *
+     * @param engineId The engine to add
+     * @param knobSettings Knob settings to apply
+     * @return ErrorCode::OK on success, ErrorCode::INVALID_VALUE if the
+     *         engine is not valid for this graph
+     */
+    // NOLINTNEXTLINE(readability-identifier-naming)
+    Error add_engine(int64_t engineId, const std::vector<KnobSetting>& knobSettings = {})
+    {
+        if(!_compiledPlans.empty())
+        {
+            return {ErrorCode::INVALID_VALUE,
+                    "Cannot call add_engine() after create_execution_plans()/build(). "
+                    "The plan-spec path and compiled-plan path are mutually exclusive."};
+        }
+
+        if(!hasReadyGraphDesc())
+        {
+            return {ErrorCode::HIPDNN_BACKEND_ERROR,
+                    "Graph has not been built. Call build_operation_graph() first."};
+        }
+
+        // Validate engine exists for this graph by querying knobs
+        std::vector<Knob> knobs;
+        auto engineErr = get_knobs_for_engine(engineId, knobs);
+        if(engineErr.is_bad())
+        {
+            return {ErrorCode::INVALID_VALUE,
+                    "Engine ID " + std::to_string(engineId)
+                        + " is not valid for this graph: " + engineErr.get_message()};
+        }
+
+        PlanSpec spec;
+        spec.engineId = engineId;
+
+        // Strip global.benchmarking knob, copy remaining settings
+        for(const auto& setting : knobSettings)
+        {
+            if(setting.knobId() == autotune::BENCHMARKING_KNOB_NAME)
+            {
+                HIPDNN_FE_LOG_WARN("Stripping internal knob '"
+                                   << autotune::BENCHMARKING_KNOB_NAME
+                                   << "' from add_engine() call. "
+                                   << "This knob is managed by autotune() in EXHAUSTIVE mode.");
+                continue;
+            }
+            spec.knobSettings.push_back(setting);
+        }
+
+        // Validate knob settings against engine's available knobs
+        HIPDNN_CHECK_ERROR(validateKnobSettingsStrict(spec.knobSettings, engineId));
+
+        // Query workspace size
+        detail::ScopedHipdnnBackendDescriptor engineDesc;
+        auto createErr = hipdnn_frontend::detail::createEngineDescriptorForGraph(
+            engineDesc, _graphDesc->get(), engineId);
+        if(createErr.is_good())
+        {
+            auto engineConfigDesc = std::make_unique<detail::ScopedHipdnnBackendDescriptor>(
+                HIPDNN_BACKEND_ENGINECFG_DESCRIPTOR);
+            auto setStatus = detail::hipdnnBackend()->backendSetAttribute(
+                engineConfigDesc->get(),
+                HIPDNN_ATTR_ENGINECFG_ENGINE,
+                HIPDNN_TYPE_BACKEND_DESCRIPTOR,
+                1,
+                static_cast<const void*>(&engineDesc.get()));
+            if(setStatus == HIPDNN_STATUS_SUCCESS)
+            {
+                auto finStatus = detail::hipdnnBackend()->backendFinalize(engineConfigDesc->get());
+                if(finStatus == HIPDNN_STATUS_SUCCESS)
+                {
+                    int64_t wsSize = 0;
+                    detail::hipdnnBackend()->backendGetAttribute(
+                        engineConfigDesc->get(),
+                        HIPDNN_ATTR_ENGINECFG_WORKSPACE_SIZE,
+                        HIPDNN_TYPE_INT64,
+                        1,
+                        nullptr,
+                        &wsSize);
+                    spec.workspaceSize = wsSize;
+                }
+            }
+        }
+
+        addPlanSpecIfUnique(spec);
+        return {ErrorCode::OK, ""};
+    }
+
+    /**
+     * @brief Add multiple engine variants with explicit knob settings
+     *
+     * Each EngineVariant becomes one plan spec. Engines that are not valid
+     * for this graph are silently skipped (batch operation semantics).
+     *
+     * @param variants Engine variants to add (must not be empty)
+     * @return ErrorCode::OK on success, ErrorCode::INVALID_VALUE if variants is empty
+     */
+    // NOLINTNEXTLINE(readability-identifier-naming)
+    Error add_engine_variants(const std::vector<EngineVariant>& variants)
+    {
+        if(!_compiledPlans.empty())
+        {
+            return {ErrorCode::INVALID_VALUE,
+                    "Cannot call add_engine_variants() after create_execution_plans()/build(). "
+                    "The plan-spec path and compiled-plan path are mutually exclusive."};
+        }
+
+        if(!hasReadyGraphDesc())
+        {
+            return {ErrorCode::HIPDNN_BACKEND_ERROR,
+                    "Graph has not been built. Call build_operation_graph() first."};
+        }
+
+        if(variants.empty())
+        {
+            return {ErrorCode::INVALID_VALUE, "Input list is empty"};
+        }
+
+        for(const auto& variant : variants)
+        {
+            // Silently skip engines that don't work for this graph (batch semantics)
+            std::vector<Knob> knobs;
+            auto err = get_knobs_for_engine(variant.engineId, knobs);
+            if(err.is_bad())
+            {
+                HIPDNN_FE_LOG_INFO("Skipping engine " << variant.engineId
+                                                      << " in add_engine_variants(): not valid "
+                                                         "for this graph");
+                continue;
+            }
+
+            PlanSpec spec;
+            spec.engineId = variant.engineId;
+
+            // Convert map-based knob settings to vector, stripping benchmarking knob
+            for(const auto& [knobId, value] : variant.knobSettings)
+            {
+                if(knobId == autotune::BENCHMARKING_KNOB_NAME)
+                {
+                    HIPDNN_FE_LOG_WARN("Stripping internal knob '"
+                                       << autotune::BENCHMARKING_KNOB_NAME
+                                       << "' from add_engine_variants() call. "
+                                       << "This knob is managed by autotune() in EXHAUSTIVE mode.");
+                    continue;
+                }
+                spec.knobSettings.emplace_back(knobId, value);
+            }
+
+            // Validate knob settings — return hard error for invalid knobs
+            auto knobErr = validateKnobSettingsStrict(spec.knobSettings, variant.engineId);
+            if(knobErr.is_bad())
+            {
+                return {ErrorCode::INVALID_VALUE,
+                        "Engine " + std::to_string(variant.engineId)
+                            + " in add_engine_variants(): " + knobErr.get_message()};
+            }
+
+            addPlanSpecIfUnique(spec);
+        }
+        return {ErrorCode::OK, ""};
+    }
+
+    /**
+     * @brief Add plan specs from a Cartesian product sweep of knob values
+     *
+     * Expands each sweep spec into individual plan specs via Cartesian product
+     * of the knob axes, merging with fixed settings. Engine must be valid
+     * for this graph.
+     *
+     * @param specs Sweep specifications (one per engine to sweep)
+     * @return ErrorCode::OK on success, ErrorCode::INVALID_VALUE if the
+     *         input is empty or a Cartesian product exceeds safety limits
+     */
+    // NOLINTNEXTLINE(readability-identifier-naming)
+    Error add_engine_sweep(const std::vector<EngineSweepSpec>& specs)
+    {
+        if(!_compiledPlans.empty())
+        {
+            return {ErrorCode::INVALID_VALUE,
+                    "Cannot call add_engine_sweep() after create_execution_plans()/build(). "
+                    "The plan-spec path and compiled-plan path are mutually exclusive."};
+        }
+
+        if(!hasReadyGraphDesc())
+        {
+            return {ErrorCode::HIPDNN_BACKEND_ERROR,
+                    "Graph has not been built. Call build_operation_graph() first."};
+        }
+
+        if(specs.empty())
+        {
+            return {ErrorCode::INVALID_VALUE, "Input list is empty"};
+        }
+
+        for(const auto& sweepSpec : specs)
+        {
+            // Validate engine
+            std::vector<Knob> knobs;
+            auto validateErr = get_knobs_for_engine(sweepSpec.engineId, knobs);
+            if(validateErr.is_bad())
+            {
+                HIPDNN_FE_LOG_INFO("Skipping engine " << sweepSpec.engineId
+                                                      << " in add_engine_sweep(): not valid "
+                                                         "for this graph");
+                continue;
+            }
+
+            // Validate sweep axes and fixed settings against engine's available knobs
+            {
+                std::unordered_map<KnobType_t, Knob> knobLookup;
+                HIPDNN_CHECK_ERROR(get_knob_lookup_for_engine(sweepSpec.engineId, knobLookup));
+
+                // Validate axis knob IDs exist and each value is within range
+                for(const auto& axis : sweepSpec.axes)
+                {
+                    if(axis.knobId == autotune::BENCHMARKING_KNOB_NAME)
+                    {
+                        HIPDNN_FE_LOG_WARN(
+                            "Stripping internal knob '"
+                            << autotune::BENCHMARKING_KNOB_NAME
+                            << "' from add_engine_sweep() sweep axis. "
+                            << "This knob is managed by autotune() in EXHAUSTIVE mode.");
+                        continue;
+                    }
+                    auto knobIt = knobLookup.find(axis.knobId);
+                    if(knobIt == knobLookup.end())
+                    {
+                        return {ErrorCode::INVALID_VALUE,
+                                "Sweep axis knob '" + axis.knobId + "' is not available for engine "
+                                    + std::to_string(sweepSpec.engineId)};
+                    }
+                    for(const auto& val : axis.values)
+                    {
+                        const KnobSetting testSetting(axis.knobId, val);
+                        auto valErr = knobIt->second.validate(testSetting);
+                        if(valErr.is_bad())
+                        {
+                            return {ErrorCode::INVALID_VALUE,
+                                    "Sweep axis knob '" + axis.knobId
+                                        + "' has invalid value for engine "
+                                        + std::to_string(sweepSpec.engineId) + ": "
+                                        + valErr.get_message()};
+                        }
+                    }
+                }
+
+                // Validate fixed settings
+                for(const auto& [knobId, value] : sweepSpec.fixedSettings)
+                {
+                    if(knobId == autotune::BENCHMARKING_KNOB_NAME)
+                    {
+                        HIPDNN_FE_LOG_WARN(
+                            "Stripping internal knob '"
+                            << autotune::BENCHMARKING_KNOB_NAME
+                            << "' from add_engine_sweep() fixed settings. "
+                            << "This knob is managed by autotune() in EXHAUSTIVE mode.");
+                        continue;
+                    }
+                    auto knobIt = knobLookup.find(knobId);
+                    if(knobIt == knobLookup.end())
+                    {
+                        return {ErrorCode::INVALID_VALUE,
+                                "Fixed setting knob '" + knobId + "' is not available for engine "
+                                    + std::to_string(sweepSpec.engineId)};
+                    }
+                    const KnobSetting testSetting(knobId, value);
+                    auto valErr = knobIt->second.validate(testSetting);
+                    if(valErr.is_bad())
+                    {
+                        return {ErrorCode::INVALID_VALUE,
+                                "Fixed setting knob '" + knobId + "' has invalid value for engine "
+                                    + std::to_string(sweepSpec.engineId) + ": "
+                                    + valErr.get_message()};
+                    }
+                }
+            }
+
+            // Compute Cartesian product
+            std::vector<std::vector<KnobSetting>> combinations;
+            HIPDNN_CHECK_ERROR(autotune::computeCartesianProduct(sweepSpec.axes, combinations));
+
+            // For each combination, merge with fixed settings and add as a plan spec
+            for(auto& combo : combinations)
+            {
+                PlanSpec spec;
+                spec.engineId = sweepSpec.engineId;
+
+                // Add fixed settings first (stripping benchmarking knob)
+                for(const auto& [knobId, value] : sweepSpec.fixedSettings)
+                {
+                    if(knobId == autotune::BENCHMARKING_KNOB_NAME)
+                    {
+                        HIPDNN_FE_LOG_WARN(
+                            "Stripping internal knob '"
+                            << autotune::BENCHMARKING_KNOB_NAME
+                            << "' from add_engine_sweep() fixed settings. "
+                            << "This knob is managed by autotune() in EXHAUSTIVE mode.");
+                        continue;
+                    }
+                    spec.knobSettings.emplace_back(knobId, value);
+                }
+
+                // Add swept settings (stripping benchmarking knob)
+                for(auto& setting : combo)
+                {
+                    if(setting.knobId() == autotune::BENCHMARKING_KNOB_NAME)
+                    {
+                        HIPDNN_FE_LOG_WARN(
+                            "Stripping internal knob '"
+                            << autotune::BENCHMARKING_KNOB_NAME
+                            << "' from add_engine_sweep() sweep settings. "
+                            << "This knob is managed by autotune() in EXHAUSTIVE mode.");
+                        continue;
+                    }
+                    spec.knobSettings.push_back(std::move(setting));
+                }
+
+                addPlanSpecIfUnique(spec);
+            }
+        }
+
+        return {ErrorCode::OK, ""};
+    }
+
+    /**
+     * @brief Add all available engines with default knob settings
+     *
+     * Convenience method that calls get_engine_configs() followed by
+     * add_engine_configs(). Equivalent to discovering all engines and
+     * adding them all for autotuning.
+     *
+     * @param modes Heuristic modes for engine ranking
+     * @return ErrorCode::OK on success
+     */
+    // NOLINTNEXTLINE(readability-identifier-naming)
+    Error add_all_engines(const std::vector<HeuristicMode>& modes = {HeuristicMode::FALLBACK})
+    {
+        if(!_compiledPlans.empty())
+        {
+            return {ErrorCode::INVALID_VALUE,
+                    "Cannot call add_all_engines() after create_execution_plans()/build(). "
+                    "The plan-spec path and compiled-plan path are mutually exclusive."};
+        }
+
+        std::vector<EngineConfigInfo> configs;
+        HIPDNN_CHECK_ERROR(get_engine_configs(configs, modes));
+        return add_engine_configs(configs);
+    }
+
+    // ── Autotune: Workspace Query ───────────────────────────────────────
+
+    /**
+     * @brief Get the maximum workspace size across all collected plan specs
+     *
+     * Iterates the plan specs added by add_engine_*() calls and returns
+     * the maximum workspace requirement. Use this to allocate workspace
+     * before calling autotune().
+     *
+     * @param[out] maxSize Maximum workspace size in bytes (0 if no plan specs)
+     * @return ErrorCode::OK on success
+     */
+    // NOLINTNEXTLINE(readability-identifier-naming)
+    Error get_max_workspace_size(int64_t& maxSize) const
+    {
+        maxSize = 0;
+        for(const auto& spec : _planSpecs)
+        {
+            maxSize = std::max(maxSize, spec.workspaceSize);
+        }
+        return {ErrorCode::OK, ""};
+    }
+
+    // ── Autotune: Benchmarking ──────────────────────────────────────────
+
+    /**
+     * @brief Autotune the graph to find the fastest engine configuration
+     *
+     * Benchmarks execution plans from one of two sources:
+     * - Plan specs from add_engine_*() calls (plan-spec path)
+     * - Pre-compiled plans from build_plans(BuildPlanPolicy::ALL) (compiled-plan path)
+     *
+     * The data source is auto-detected. If neither path has candidates,
+     * an error is returned.
+     *
+     * Ranks plans by performance and sets the winner as the active plan.
+     * Optionally persists results to a JSON config file.
+     *
+     * Requires build_operation_graph() and at least one add_engine_*() call
+     * or a prior build_plans(BuildPlanPolicy::ALL) call.
+     *
+     * @param handle The hipDNN handle
+     * @param variantPack Map from tensor UID to device memory pointers
+     * @param workspace Pointer to workspace memory
+     * @param config Autotuning configuration (mode, strategy, iterations, etc.)
+     * @param storageConfig File output parameters (empty filePath = no file output)
+     * @param[out] results Per-engine benchmarking results (optional)
+     * @return ErrorCode::OK on success
+     *
+     * @code{.cpp}
+     * // Workflow 1: Plan-spec path (add_engine_*() -> autotune)
+     * graph.build_operation_graph(handle);
+     * graph.add_all_engines();
+     * int64_t maxWs;
+     * graph.get_max_workspace_size(maxWs);
+     * void* workspace;
+     * hipMalloc(&workspace, maxWs);
+     *
+     * AutotuneConfig config;
+     * config.mode = TuneMode::EXHAUSTIVE;
+     * std::vector<AutotuneResult> results;
+     * graph.autotune(handle, variantPack, workspace, config, {}, &results);
+     *
+     * // Workflow 2: Compiled-plan path (cuDNN drop-in)
+     * graph.build_operation_graph(handle);
+     * graph.create_execution_plans({hipdnn::HeurMode::A});
+     * graph.build_plans(BuildPlanPolicy::ALL);
+     * graph.autotune(handle, variantPack, workspace, config, {}, &results);
+     * @endcode
+     */
+    Error autotune(hipdnnHandle_t handle,
+                   const std::unordered_map<int64_t, void*>& variantPack,
+                   void* workspace,
+                   const AutotuneConfig& config = {},
+                   const AutotuneStorageConfig& storageConfig = {},
+                   std::vector<AutotuneResult>* results = nullptr)
+    {
+        // ── Config validation ───────────────────────────────────────────
+        if(config.warmupIterations < 0)
+        {
+            return {ErrorCode::INVALID_VALUE, "warmupIterations must be >= 0"};
+        }
+        if(config.timedIterations < 1)
+        {
+            return {ErrorCode::INVALID_VALUE, "timedIterations must be >= 1"};
+        }
+        if(config.maxIterations < 1)
+        {
+            return {ErrorCode::INVALID_VALUE, "maxIterations must be >= 1"};
+        }
+        if(config.strategy == AutotuneStrategy::RUN_UNTIL_STABLE)
+        {
+            if(config.windowSize < 2)
+            {
+                return {ErrorCode::INVALID_VALUE, "windowSize must be >= 2"};
+            }
+            if(config.stabilityThreshold <= 0.0f || config.stabilityThreshold >= 1.0f)
+            {
+                return {ErrorCode::INVALID_VALUE,
+                        "stabilityThreshold must be in the range (0.0, 1.0)"};
+            }
+            if(config.maxIterations < config.windowSize)
+            {
+                return {ErrorCode::INVALID_VALUE,
+                        "maxIterations must be >= windowSize for RUN_UNTIL_STABLE"};
+            }
+        }
+
+        // ── Upfront parameter validation ────────────────────────────────
+        if(handle == nullptr)
+        {
+            return {ErrorCode::INVALID_VALUE, "handle must not be null"};
+        }
+        if(variantPack.empty())
+        {
+            return {ErrorCode::INVALID_VALUE,
+                    "variantPack must contain at least one tensor pointer"};
+        }
+
+        if(!hasReadyGraphDesc())
+        {
+            return {ErrorCode::HIPDNN_BACKEND_ERROR,
+                    "Graph has not been built. Call build_operation_graph() first."};
+        }
+
+        // ── Validate variantPack contains all required tensor UIDs ──────
+        {
+            std::unordered_set<std::shared_ptr<TensorAttributes>> allTensors;
+            gatherHipdnnTensorsSubtree(allTensors);
+
+            std::vector<int64_t> missingUids;
+            for(const auto& tensor : allTensors)
+            {
+                if(tensor && tensor->has_uid() && !tensor->get_is_virtual())
+                {
+                    if(variantPack.find(tensor->get_uid()) == variantPack.end())
+                    {
+                        missingUids.push_back(tensor->get_uid());
+                    }
+                }
+            }
+            if(!missingUids.empty())
+            {
+                std::sort(missingUids.begin(), missingUids.end());
+                std::string msg = "variantPack is missing required non-virtual tensor UIDs: ";
+                for(size_t i = 0; i < missingUids.size(); ++i)
+                {
+                    if(i > 0)
+                    {
+                        msg += ", ";
+                    }
+                    msg += std::to_string(missingUids[i]);
+                }
+                return {ErrorCode::INVALID_VALUE, std::move(msg)};
+            }
+        }
+
+        // Strict check (defensive invariant)
+        if(!_planSpecs.empty() && !_compiledPlans.empty())
+        {
+            return {ErrorCode::INVALID_VALUE,
+                    "Internal error: both plan specs and compiled plans are present. "
+                    "This should not happen if entry function guards are working correctly."};
+        }
+
+        // Auto-detect data source
+        const bool useCompiledPlans = _planSpecs.empty() && !_compiledPlans.empty();
+        if(_planSpecs.empty() && !useCompiledPlans)
+        {
+            return {ErrorCode::INVALID_VALUE,
+                    "No autotuning candidates. "
+                    "Call add_engine_*() or build_plans(BuildPlanPolicy::ALL) first."};
+        }
+
+        if(useCompiledPlans && config.mode == TuneMode::EXHAUSTIVE)
+        {
+            return {ErrorCode::INVALID_VALUE,
+                    "EXHAUSTIVE mode is not supported with pre-compiled plans. "
+                    "Pre-compiled plans are already fully built; exhaustive priming "
+                    "requires compilation from plan specs. Use TuneMode::AUTO instead."};
+        }
+
+        // Shared types for the benchmarking index map (visible in both paths)
+        struct PlanBenchmarkInfo
+        {
+            size_t planIndex;
+            size_t specIndex;
+        };
+        std::vector<PlanBenchmarkInfo> compiledPlanMap;
+
+        // Variables used only on the plan-spec path but declared here for scope
+        std::vector<PlanSpec> filteredSpecs;
+        std::unordered_set<size_t> primingSucceeded;
+        std::unordered_map<size_t, std::string> primingFailureReasons;
+
+        if(!useCompiledPlans)
+        {
+            // ── Plan-spec path: filter, prime, compile ──────────────────
+
+            // ── Filter plan specs ───────────────────────────────────────
+            filteredSpecs.reserve(_planSpecs.size());
+
+            // Apply engineIdFilter
+            std::unordered_set<int64_t> filterSet;
+            if(!config.engineIdFilter.empty())
+            {
+                filterSet.insert(config.engineIdFilter.begin(), config.engineIdFilter.end());
+            }
+
+            for(const auto& spec : _planSpecs)
+            {
+                if(!filterSet.empty() && filterSet.find(spec.engineId) == filterSet.end())
+                {
+                    continue;
+                }
+                if(config.maxWorkspaceBytes > 0
+                   && spec.workspaceSize > static_cast<int64_t>(config.maxWorkspaceBytes))
+                {
+                    HIPDNN_FE_LOG_INFO("Skipping engine " << spec.engineId << " (workspace "
+                                                          << spec.workspaceSize << " exceeds limit "
+                                                          << config.maxWorkspaceBytes << ")");
+                    continue;
+                }
+                filteredSpecs.push_back(spec);
+            }
+
+            if(filteredSpecs.empty())
+            {
+                return {ErrorCode::INVALID_VALUE,
+                        "No plan specs remain after filtering. Check engineIdFilter and "
+                        "maxWorkspaceBytes."};
+            }
+
+            // ── EXHAUSTIVE priming phase ────────────────────────────────
+            if(config.mode == TuneMode::EXHAUSTIVE)
+            {
+                HIPDNN_FE_LOG_INFO("EXHAUSTIVE mode: priming " << filteredSpecs.size()
+                                                               << " engines");
+
+                for(size_t specIdx = 0; specIdx < filteredSpecs.size(); ++specIdx)
+                {
+                    auto& spec = filteredSpecs[specIdx];
+
+                    // Check if this engine supports exhaustive priming
+                    std::vector<Knob> knobs;
+                    auto knobErr = get_knobs_for_engine(spec.engineId, knobs);
+                    bool supportsBenchmarking = false;
+                    if(knobErr.is_good())
+                    {
+                        for(const auto& knob : knobs)
+                        {
+                            if(knob.knobId() == autotune::BENCHMARKING_KNOB_NAME)
+                            {
+                                supportsBenchmarking = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if(!supportsBenchmarking)
+                    {
+                        HIPDNN_FE_LOG_INFO("Engine " << spec.engineId
+                                                     << " does not support exhaustive priming");
+                        continue;
+                    }
+
+                    // Build priming plan with global.benchmarking=1
+                    auto primingKnobs = spec.knobSettings;
+                    primingKnobs.emplace_back(autotune::BENCHMARKING_KNOB_NAME, int64_t{1});
+
+                    CompiledPlan primingPlan;
+                    auto compileErr = compilePlanFromSpec(spec.engineId, primingKnobs, primingPlan);
+                    if(compileErr.is_bad())
+                    {
+                        if(!config.continueOnPrimingFailure)
+                        {
+                            return {ErrorCode::HIPDNN_BACKEND_ERROR,
+                                    "EXHAUSTIVE priming failed for engine "
+                                        + std::to_string(spec.engineId) + ": "
+                                        + compileErr.get_message()};
+                        }
+                        HIPDNN_FE_LOG_WARN("EXHAUSTIVE priming failed for engine "
+                                           << spec.engineId << ": " << compileErr.get_message()
+                                           << " (continuing without priming)");
+                        primingFailureReasons[specIdx]
+                            = "Priming compilation failed: " + compileErr.get_message();
+                        continue;
+                    }
+
+                    // Finalize the priming plan
+                    auto finStatus = detail::hipdnnBackend()->backendSetAttribute(
+                        primingPlan.executionPlanDesc->get(),
+                        HIPDNN_ATTR_EXECUTION_PLAN_ENGINE_CONFIG,
+                        HIPDNN_TYPE_BACKEND_DESCRIPTOR,
+                        1,
+                        static_cast<const void*>(&primingPlan.engineConfigDesc->get()));
+                    if(finStatus != HIPDNN_STATUS_SUCCESS)
+                    {
+                        if(!config.continueOnPrimingFailure)
+                        {
+                            return {ErrorCode::HIPDNN_BACKEND_ERROR,
+                                    "Failed to set engine config on priming plan for engine "
+                                        + std::to_string(spec.engineId)};
+                        }
+                        primingFailureReasons[specIdx]
+                            = "Priming failed: could not set engine config on priming plan";
+                        continue;
+                    }
+
+                    finStatus = detail::hipdnnBackend()->backendFinalize(
+                        primingPlan.executionPlanDesc->get());
+                    if(finStatus != HIPDNN_STATUS_SUCCESS)
+                    {
+                        if(!config.continueOnPrimingFailure)
+                        {
+                            return {ErrorCode::HIPDNN_BACKEND_ERROR,
+                                    "Failed to finalize priming plan for engine "
+                                        + std::to_string(spec.engineId)};
+                        }
+                        primingFailureReasons[specIdx]
+                            = "Priming failed: could not finalize priming plan";
+                        continue;
+                    }
+
+                    // Execute priming plan once
+                    auto execErr = executeWithPlan(
+                        handle, *primingPlan.executionPlanDesc, variantPack, workspace);
+                    if(execErr.is_bad())
+                    {
+                        if(!config.continueOnPrimingFailure)
+                        {
+                            return {ErrorCode::HIPDNN_BACKEND_ERROR,
+                                    "EXHAUSTIVE priming execution failed for engine "
+                                        + std::to_string(spec.engineId) + ": "
+                                        + execErr.get_message()};
+                        }
+                        HIPDNN_FE_LOG_WARN("EXHAUSTIVE priming execution failed for engine "
+                                           << spec.engineId << " (continuing without priming)");
+                        primingFailureReasons[specIdx]
+                            = "Priming execution failed: " + execErr.get_message();
+                        continue;
+                    }
+
+                    // Priming succeeded for this spec
+                    primingSucceeded.insert(specIdx);
+
+                    // Priming plan is discarded (goes out of scope)
+                }
+            }
+
+            // ── Compile real plans ──────────────────────────────────────
+            _compiledPlans.clear();
+            _activePlanIndex = 0;
+
+            for(size_t specIdx = 0; specIdx < filteredSpecs.size(); ++specIdx)
+            {
+                const auto& spec = filteredSpecs[specIdx];
+                CompiledPlan plan;
+                auto compileErr = compilePlanFromSpec(spec.engineId, spec.knobSettings, plan);
+                if(compileErr.is_bad())
+                {
+                    HIPDNN_FE_LOG_WARN("Failed to compile plan for engine "
+                                       << spec.engineId << ": " << compileErr.get_message());
+                    continue;
+                }
+
+                // Finalize the plan
+                auto finStatus = detail::hipdnnBackend()->backendSetAttribute(
+                    plan.executionPlanDesc->get(),
+                    HIPDNN_ATTR_EXECUTION_PLAN_ENGINE_CONFIG,
+                    HIPDNN_TYPE_BACKEND_DESCRIPTOR,
+                    1,
+                    static_cast<const void*>(&plan.engineConfigDesc->get()));
+                if(finStatus != HIPDNN_STATUS_SUCCESS)
+                {
+                    HIPDNN_FE_LOG_WARN("Failed to set engine config on plan for engine "
+                                       << spec.engineId);
+                    continue;
+                }
+
+                finStatus = detail::hipdnnBackend()->backendFinalize(plan.executionPlanDesc->get());
+                if(finStatus != HIPDNN_STATUS_SUCCESS)
+                {
+                    HIPDNN_FE_LOG_WARN("Failed to finalize plan for engine " << spec.engineId);
+                    continue;
+                }
+
+                // Query workspace size for this compiled plan
+                int64_t wsSize = 0;
+                detail::hipdnnBackend()->backendGetAttribute(
+                    plan.executionPlanDesc->get(),
+                    HIPDNN_ATTR_EXECUTION_PLAN_WORKSPACE_SIZE,
+                    HIPDNN_TYPE_INT64,
+                    1,
+                    nullptr,
+                    &wsSize);
+                plan.workspaceSize = wsSize;
+
+                const size_t idx = _compiledPlans.size();
+                _compiledPlans.push_back(std::move(plan));
+                compiledPlanMap.push_back({idx, specIdx});
+            }
+
+            if(_compiledPlans.empty())
+            {
+                return {ErrorCode::HIPDNN_BACKEND_ERROR,
+                        "No plans could be compiled from the provided plan specs."};
+            }
+        }
+        else
+        {
+            // ── Compiled-plan path: plans already exist, just filter and build the index map
+
+            // Safety: ensure workspace sizes are cached for all compiled plans
+            for(auto& plan : _compiledPlans)
+            {
+                if(plan.workspaceSize == -1 && plan.executionPlanDesc
+                   && plan.executionPlanDesc->valid())
+                {
+                    int64_t wsSize = 0;
+                    detail::hipdnnBackend()->backendGetAttribute(
+                        plan.executionPlanDesc->get(),
+                        HIPDNN_ATTR_EXECUTION_PLAN_WORKSPACE_SIZE,
+                        HIPDNN_TYPE_INT64,
+                        1,
+                        nullptr,
+                        &wsSize);
+                    plan.workspaceSize = wsSize;
+                }
+            }
+
+            // Filter and build the index map
+            std::unordered_set<int64_t> filterSet;
+            if(!config.engineIdFilter.empty())
+            {
+                filterSet.insert(config.engineIdFilter.begin(), config.engineIdFilter.end());
+            }
+
+            _activePlanIndex = 0;
+
+            for(size_t i = 0; i < _compiledPlans.size(); ++i)
+            {
+                auto& plan = _compiledPlans[i];
+
+                // Skip entries without valid execution plans (failed to compile in build_plans)
+                if(!plan.executionPlanDesc || !plan.executionPlanDesc->valid())
+                {
+                    continue;
+                }
+
+                // Apply engine ID filter
+                if(!filterSet.empty() && filterSet.find(plan.engineId) == filterSet.end())
+                {
+                    continue;
+                }
+
+                // Apply workspace limit
+                if(config.maxWorkspaceBytes > 0
+                   && plan.workspaceSize > static_cast<int64_t>(config.maxWorkspaceBytes))
+                {
+                    HIPDNN_FE_LOG_INFO("Skipping engine " << plan.engineId << " (workspace "
+                                                          << plan.workspaceSize << " exceeds limit "
+                                                          << config.maxWorkspaceBytes << ")");
+                    continue;
+                }
+
+                compiledPlanMap.push_back({i, i}); // identity mapping: planIndex == specIndex
+            }
+
+            if(compiledPlanMap.empty())
+            {
+                return {ErrorCode::INVALID_VALUE,
+                        "No compiled plans remain after filtering. "
+                        "Check engineIdFilter and maxWorkspaceBytes."};
+            }
+        }
+
+        // ── Workspace null check (after plan map is built) ──────────────
+        if(workspace == nullptr)
+        {
+            bool anyNeedsWorkspace = false;
+            if(!useCompiledPlans)
+            {
+                for(const auto& spec : filteredSpecs)
+                {
+                    if(spec.workspaceSize > 0)
+                    {
+                        anyNeedsWorkspace = true;
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                for(const auto& info : compiledPlanMap)
+                {
+                    if(_compiledPlans[info.planIndex].workspaceSize > 0)
+                    {
+                        anyNeedsWorkspace = true;
+                        break;
+                    }
+                }
+            }
+            if(anyNeedsWorkspace)
+            {
+                return {ErrorCode::INVALID_VALUE,
+                        "workspace pointer is null but at least one candidate plan "
+                        "requires workspace memory"};
+            }
+        }
+
+        // ── Query device name for metadata ────────────────────────────
+        std::string currentDeviceName;
+        {
+            int deviceId = 0;
+            if(hipGetDevice(&deviceId) == hipSuccess)
+            {
+                hipDeviceProp_t deviceProps;
+                if(hipGetDeviceProperties(&deviceProps, deviceId) == hipSuccess)
+                {
+                    currentDeviceName = deviceProps.gcnArchName;
+                }
+            }
+        }
+
+        // ── Benchmark each plan ─────────────────────────────────────────
+        std::vector<AutotuneResult> allResults;
+        allResults.reserve(_compiledPlans.size());
+
+        for(const auto& [planIdx, specIdx] : compiledPlanMap)
+        {
+            auto& plan = _compiledPlans[planIdx];
+            AutotuneResult result;
+
+            if(useCompiledPlans)
+            {
+                result.engineId = plan.engineId;
+                result.knobSettings = plan.knobSettings;
+            }
+            else
+            {
+                const auto& spec = filteredSpecs[specIdx];
+                result.engineId = spec.engineId;
+                result.knobSettings = spec.knobSettings;
+            }
+
+            result.modeUsed = config.mode;
+            result.strategyUsed = config.strategy;
+            result.deviceName = currentDeviceName;
+            result.workspaceSize = plan.workspaceSize;
+
+            // Resolve engine name (use result.engineId, same for both paths)
+            try
+            {
+                result.engineName
+                    = std::string(hipdnn_data_sdk::utilities::getEngineNameFromId(result.engineId));
+            }
+            catch(const std::out_of_range&)
+            {
+                std::ostringstream oss;
+                oss << "0x" << std::hex << result.engineId;
+                result.engineName = oss.str();
+            }
+
+            // EXHAUSTIVE priming tracking (only on plan-spec path)
+            if(!useCompiledPlans && config.mode == TuneMode::EXHAUSTIVE)
+            {
+                if(primingSucceeded.count(specIdx) > 0)
+                {
+                    result.ranExhaustive = true;
+                }
+                else
+                {
+                    result.ranExhaustive = false;
+                    auto failIt = primingFailureReasons.find(specIdx);
+                    if(failIt != primingFailureReasons.end())
+                    {
+                        if(!result.errorMessage.empty())
+                        {
+                            result.errorMessage += "; ";
+                        }
+                        result.errorMessage += failIt->second;
+                    }
+                }
+            }
+
+            // ── Device sync before warmup ──────────────────────────────────
+            // Ensure GPU is idle from previous plan's work before starting
+            // warmup for this plan. Without this, warmup iterations may
+            // overlap with the previous plan's timed/warmup GPU work.
+            {
+                // NOLINTNEXTLINE(misc-const-correctness)
+                detail::ScopedHipdnnBackendDescriptor syncDesc(
+                    HIPDNN_BACKEND_PROFILING_CONTROL_EXT);
+                if(syncDesc.valid())
+                {
+                    detail::hipdnnBackend()->backendSetAttribute(syncDesc.get(),
+                                                                 HIPDNN_ATTR_PROFILING_HANDLE_EXT,
+                                                                 HIPDNN_TYPE_HANDLE,
+                                                                 1,
+                                                                 static_cast<const void*>(&handle));
+                    bool syncVal = true;
+                    detail::hipdnnBackend()->backendSetAttribute(
+                        syncDesc.get(),
+                        HIPDNN_ATTR_PROFILING_DEVICE_SYNC_EXT,
+                        HIPDNN_TYPE_BOOLEAN,
+                        1,
+                        &syncVal);
+                }
+            }
+
+            // ── Warmup iterations ───────────────────────────────────────
+            bool warmupFailed = false;
+            for(int w = 0; w < config.warmupIterations; ++w)
+            {
+                auto execErr
+                    = executeWithPlan(handle, *plan.executionPlanDesc, variantPack, workspace);
+                if(execErr.is_bad())
+                {
+                    warmupFailed = true;
+                    result.errorMessage = "Warmup failed: " + execErr.get_message();
+                    break;
+                }
+            }
+            if(warmupFailed)
+            {
+                result.succeeded = false;
+                allResults.push_back(std::move(result));
+                continue;
+            }
+
+            // ── Device sync before timed iterations ─────────────────────
+            // Use a one-shot ProfilingControlDescriptor to call hipDeviceSynchronize()
+            // via the backend, keeping HIP calls out of the frontend header.
+            {
+                // NOLINTNEXTLINE(misc-const-correctness)
+                detail::ScopedHipdnnBackendDescriptor syncDesc(
+                    HIPDNN_BACKEND_PROFILING_CONTROL_EXT);
+                if(syncDesc.valid())
+                {
+                    detail::hipdnnBackend()->backendSetAttribute(syncDesc.get(),
+                                                                 HIPDNN_ATTR_PROFILING_HANDLE_EXT,
+                                                                 HIPDNN_TYPE_HANDLE,
+                                                                 1,
+                                                                 static_cast<const void*>(&handle));
+                    bool syncVal = true;
+                    detail::hipdnnBackend()->backendSetAttribute(
+                        syncDesc.get(),
+                        HIPDNN_ATTR_PROFILING_DEVICE_SYNC_EXT,
+                        HIPDNN_TYPE_BOOLEAN,
+                        1,
+                        &syncVal);
+                }
+            }
+
+            // ── Timed iterations ────────────────────────────────────────
+            std::vector<float> timings;
+            bool benchmarkFailed = false;
+
+            if(config.strategy == AutotuneStrategy::SINGLE_SHOT)
+            {
+                float elapsed = 0.0f;
+                auto benchErr = benchmarkOnce(
+                    handle, *plan.executionPlanDesc, variantPack, workspace, elapsed);
+                if(benchErr.is_bad())
+                {
+                    result.succeeded = false;
+                    result.errorMessage = "Benchmark failed: " + benchErr.get_message();
+                    benchmarkFailed = true;
+                }
+                else
+                {
+                    timings.push_back(elapsed);
+                    result.converged = true;
+                }
+                result.iterationsRun = 1;
+            }
+            else if(config.strategy == AutotuneStrategy::FIXED_AVERAGE)
+            {
+                timings.reserve(static_cast<size_t>(config.timedIterations));
+                for(int t = 0; t < config.timedIterations; ++t)
+                {
+                    float elapsed = 0.0f;
+                    auto benchErr = benchmarkOnce(
+                        handle, *plan.executionPlanDesc, variantPack, workspace, elapsed);
+                    if(benchErr.is_bad())
+                    {
+                        result.succeeded = false;
+                        result.errorMessage = "Benchmark failed on iteration " + std::to_string(t)
+                                              + ": " + benchErr.get_message();
+                        benchmarkFailed = true;
+                        break;
+                    }
+                    timings.push_back(elapsed);
+                }
+                result.iterationsRun = static_cast<int>(timings.size());
+                result.converged = !benchmarkFailed;
+            }
+            else // RUN_UNTIL_STABLE
+            {
+                timings.reserve(static_cast<size_t>(config.maxIterations));
+                bool converged = false;
+                for(int t = 0; t < config.maxIterations; ++t)
+                {
+                    float elapsed = 0.0f;
+                    auto benchErr = benchmarkOnce(
+                        handle, *plan.executionPlanDesc, variantPack, workspace, elapsed);
+                    if(benchErr.is_bad())
+                    {
+                        result.succeeded = false;
+                        result.errorMessage = "Benchmark failed on iteration " + std::to_string(t)
+                                              + ": " + benchErr.get_message();
+                        benchmarkFailed = true;
+                        break;
+                    }
+                    timings.push_back(elapsed);
+
+                    // Check convergence after we have enough samples
+                    if(static_cast<int>(timings.size()) >= config.windowSize)
+                    {
+                        // Check the last windowSize samples
+                        const std::vector<float> window(timings.end() - config.windowSize,
+                                                        timings.end());
+                        const float cov = autotune::computeCoefficientOfVariation(window);
+                        if(cov < config.stabilityThreshold)
+                        {
+                            converged = true;
+                            break;
+                        }
+                    }
+                }
+                result.iterationsRun = static_cast<int>(timings.size());
+                result.converged = converged;
+            }
+
+            if(benchmarkFailed)
+            {
+                allResults.push_back(std::move(result));
+                continue;
+            }
+
+            // ── Compute statistics ──────────────────────────────────────
+            result.succeeded = true;
+            result.minTimeMs = *std::min_element(timings.begin(), timings.end());
+            result.avgTimeMs = autotune::computeMean(timings);
+            if(timings.size() > 1)
+            {
+                result.stddevMs = autotune::computeStddev(timings);
+            }
+
+            allResults.push_back(std::move(result));
+        }
+
+        // ── Ranking ─────────────────────────────────────────────────────
+
+        // Separate succeeded and failed results
+        std::vector<AutotuneResult> succeededResults;
+        std::vector<AutotuneResult> failedResults;
+        for(auto& r : allResults)
+        {
+            if(r.succeeded)
+            {
+                succeededResults.push_back(std::move(r));
+            }
+            else
+            {
+                failedResults.push_back(std::move(r));
+            }
+        }
+
+        if(config.rankingFn)
+        {
+            // Pass only succeeded results to the user's ranking function
+            try
+            {
+                config.rankingFn(succeededResults);
+            }
+            catch(const std::exception& e)
+            {
+                HIPDNN_FE_LOG_WARN("Custom ranking function threw an exception: "
+                                   << e.what() << ". Falling back to default ranking.");
+                std::stable_sort(succeededResults.begin(),
+                                 succeededResults.end(),
+                                 [](const AutotuneResult& a, const AutotuneResult& b) {
+                                     return a.minTimeMs < b.minTimeMs;
+                                 });
+            }
+            catch(...)
+            {
+                HIPDNN_FE_LOG_WARN("Custom ranking function threw an unknown exception. "
+                                   "Falling back to default ranking.");
+                std::stable_sort(succeededResults.begin(),
+                                 succeededResults.end(),
+                                 [](const AutotuneResult& a, const AutotuneResult& b) {
+                                     return a.minTimeMs < b.minTimeMs;
+                                 });
+            }
+        }
+        else
+        {
+            // Default ranking: succeeded engines by minTimeMs ascending
+            std::stable_sort(succeededResults.begin(),
+                             succeededResults.end(),
+                             [](const AutotuneResult& a, const AutotuneResult& b) {
+                                 return a.minTimeMs < b.minTimeMs;
+                             });
+        }
+
+        // Reassemble: succeeded first, then failed
+        allResults.clear();
+        allResults.reserve(succeededResults.size() + failedResults.size());
+        for(auto& r : succeededResults)
+        {
+            allResults.push_back(std::move(r));
+        }
+        for(auto& r : failedResults)
+        {
+            allResults.push_back(std::move(r));
+        }
+
+        // Assign ranks: succeeded get 0-based ranks, failed get -1
+        for(size_t i = 0; i < allResults.size(); ++i)
+        {
+            if(allResults[i].succeeded)
+            {
+                allResults[i].rank = static_cast<int>(i);
+            }
+            else
+            {
+                allResults[i].rank = -1;
+            }
+        }
+
+        // ── Select winner ───────────────────────────────────────────────
+        // Find the first successful result and set its compiled plan as active.
+        // Match through compiledPlanMap to find the correct plan index.
+        // On the plan-spec path, match via filteredSpecs (compilePlanFromSpec()
+        // may validate/filter knob settings). On the compiled-plan path, match
+        // directly from _compiledPlans.
+        bool winnerFound = false;
+        for(const auto& result : allResults)
+        {
+            if(!result.succeeded)
+            {
+                continue;
+            }
+            for(const auto& [pIdx, sIdx] : compiledPlanMap)
+            {
+                int64_t candidateEngineId;
+                const std::vector<KnobSetting>* candidateKnobs;
+                if(useCompiledPlans)
+                {
+                    candidateEngineId = _compiledPlans[pIdx].engineId;
+                    candidateKnobs = &_compiledPlans[pIdx].knobSettings;
+                }
+                else
+                {
+                    const auto& spec = filteredSpecs[sIdx];
+                    candidateEngineId = spec.engineId;
+                    candidateKnobs = &spec.knobSettings;
+                }
+                if(candidateEngineId == result.engineId && *candidateKnobs == result.knobSettings)
+                {
+                    _activePlanIndex = pIdx;
+                    winnerFound = true;
+                    HIPDNN_FE_LOG_INFO("Autotune winner: engine "
+                                       << result.engineName << " (ID " << result.engineId
+                                       << ") with min time " << result.minTimeMs << " ms");
+                    break;
+                }
+            }
+            if(winnerFound)
+            {
+                break;
+            }
+        }
+
+        if(!winnerFound)
+        {
+            return {ErrorCode::HIPDNN_BACKEND_ERROR,
+                    "All engines failed during autotuning. No winner selected."};
+        }
+
+        // ── Persist results ─────────────────────────────────────────────
+#ifndef HIPDNN_FRONTEND_SKIP_JSON_LIB
+        if(!storageConfig.filePath.empty())
+        {
+            // Collect tensor dimensions and strides from the graph's input/output tensors
+            std::vector<std::vector<int64_t>> tensorDims;
+            std::vector<std::vector<int64_t>> tensorStrides;
+            auto allTensors = getInputOutputTensors();
+            tensorDims.reserve(allTensors.size());
+            tensorStrides.reserve(allTensors.size());
+            for(const auto& tensor : allTensors)
+            {
+                tensorDims.push_back(tensor->get_dim());
+                tensorStrides.push_back(tensor->get_stride());
+            }
+
+            auto writeErr
+                = autotune::writeAutotuneResults(storageConfig.filePath.string(),
+                                                 getCoreOperationName(),
+                                                 allResults,
+                                                 storageConfig.deleteAllExistingFileContent,
+                                                 tensorDims,
+                                                 tensorStrides);
+            if(writeErr.is_bad())
+            {
+                HIPDNN_FE_LOG_WARN("Failed to write autotune results to "
+                                   << storageConfig.filePath << ": " << writeErr.get_message());
+            }
+        }
+#else
+        (void)storageConfig;
+#endif
+
+        // ── Output results ──────────────────────────────────────────────
+        if(results != nullptr)
+        {
+            *results = std::move(allResults);
+        }
+
+        return {ErrorCode::OK, ""};
+    }
+
+    /**
+     * @brief Autotune overload using tensor handle-based variant pack
+     *
+     * Convenience overload that converts the tensor-to-pointer map to
+     * a UID-based variant pack before calling the primary autotune().
+     */
+    Error autotune(hipdnnHandle_t handle,
+                   const std::unordered_map<std::shared_ptr<TensorAttributes>, void*>& tensorLookup,
+                   void* workspace,
+                   const AutotuneConfig& config = {},
+                   const AutotuneStorageConfig& storageConfig = {},
+                   std::vector<AutotuneResult>* results = nullptr)
+    {
+        std::unordered_map<int64_t, void*> variantPack;
+        for(const auto& [tensor, ptr] : tensorLookup)
+        {
+            if(tensor && tensor->has_uid())
+            {
+                variantPack[tensor->get_uid()] = ptr;
+            }
+            else
+            {
+                return {ErrorCode::INVALID_VALUE,
+                        "Tensor in tensor lookup is null or does not have a valid uid."};
+            }
+        }
+        return autotune(handle, variantPack, workspace, config, storageConfig, results);
+    }
+
+    // NOLINTBEGIN(readability-identifier-naming)
+
+    /**
+     * @brief Get the number of compiled execution plans
+     *
+     * Returns the total number of entries in the compiled plan vector.
+     * Call after create_execution_plans() + build_plans(ALL) to determine
+     * how many candidate plans are available for autotuning or manual
+     * iteration.
+     *
+     * @return Number of compiled plans (may include entries that failed compilation)
+     */
+    int64_t get_execution_plan_count() const
+    {
+        return static_cast<int64_t>(_compiledPlans.size());
+    }
+
+    /**
+     * @brief Execute the graph using the plan at a specific index
+     *
+     * Runs a single execution using the plan at plan_index. Returns an error
+     * (rather than aborting) when the plan is invalid or uncompiled, allowing
+     * the caller to skip it and continue iterating — matching the cuDNN
+     * sample autotune-loop pattern.
+     *
+     * @param handle The hipDNN handle
+     * @param variantPack Map from tensor UID to device memory pointers
+     * @param workspace Pointer to workspace memory (can be nullptr if size is 0)
+     * @param plan_index Zero-based index into the compiled plan vector
+     * @return ErrorCode::OK on success, ErrorCode::INVALID_VALUE if the index
+     *         is out of bounds or the plan at that index has no valid execution
+     *         plan descriptor, or ErrorCode::HIPDNN_BACKEND_ERROR on backend
+     *         failure.
+     */
+    Error execute_plan_at_index(hipdnnHandle_t handle,
+                                const std::unordered_map<int64_t, void*>& variantPack,
+                                void* workspace,
+                                int64_t plan_index) const
+    {
+        if(plan_index < 0 || static_cast<size_t>(plan_index) >= _compiledPlans.size())
+        {
+            return {ErrorCode::INVALID_VALUE,
+                    "plan_index " + std::to_string(plan_index) + " is out of bounds (have "
+                        + std::to_string(_compiledPlans.size()) + " plans)."};
+        }
+
+        const auto& plan = _compiledPlans[static_cast<size_t>(plan_index)];
+        if(!plan.executionPlanDesc || !plan.executionPlanDesc->valid())
+        {
+            return {ErrorCode::INVALID_VALUE,
+                    "Plan at index " + std::to_string(plan_index)
+                        + " has no valid execution plan descriptor."};
+        }
+
+        // Create variant pack descriptor (same pattern as execute())
+        auto variantPackDesc = std::make_unique<detail::ScopedHipdnnBackendDescriptor>(
+            HIPDNN_BACKEND_VARIANT_PACK_DESCRIPTOR);
+        if(!variantPackDesc || !variantPackDesc->valid())
+        {
+            return {ErrorCode::HIPDNN_BACKEND_ERROR, "Failed to create variant pack descriptor."};
+        }
+
+        std::vector<int64_t> variantPackKeys;
+        std::vector<void*> variantPackValues;
+        variantPackKeys.reserve(variantPack.size());
+        variantPackValues.reserve(variantPack.size());
+        for(const auto& [key, value] : variantPack)
+        {
+            variantPackKeys.push_back(key);
+            variantPackValues.push_back(value);
+        }
+
+        HIPDNN_RETURN_ON_BACKEND_FAILURE(detail::hipdnnBackend()->backendSetAttribute(
+                                             variantPackDesc->get(),
+                                             HIPDNN_ATTR_VARIANT_PACK_DATA_POINTERS,
+                                             HIPDNN_TYPE_VOID_PTR,
+                                             static_cast<int64_t>(variantPackValues.size()),
+                                             static_cast<const void*>(variantPackValues.data())),
+                                         "failed to set the variant pack data pointers.");
+
+        HIPDNN_RETURN_ON_BACKEND_FAILURE(detail::hipdnnBackend()->backendSetAttribute(
+                                             variantPackDesc->get(),
+                                             HIPDNN_ATTR_VARIANT_PACK_UNIQUE_IDS,
+                                             HIPDNN_TYPE_INT64,
+                                             static_cast<int64_t>(variantPackKeys.size()),
+                                             variantPackKeys.data()),
+                                         "failed to set the variant pack unique ids.");
+
+        HIPDNN_RETURN_ON_BACKEND_FAILURE(
+            detail::hipdnnBackend()->backendSetAttribute(variantPackDesc->get(),
+                                                         HIPDNN_ATTR_VARIANT_PACK_WORKSPACE,
+                                                         HIPDNN_TYPE_VOID_PTR,
+                                                         1,
+                                                         static_cast<const void*>(&workspace)),
+            "failed to set the variant pack workspace.");
+
+        HIPDNN_RETURN_ON_BACKEND_FAILURE(
+            detail::hipdnnBackend()->backendFinalize(variantPackDesc->get()),
+            "Failed to finalize variant pack descriptor");
+
+        HIPDNN_RETURN_ON_BACKEND_FAILURE(
+            detail::hipdnnBackend()->backendExecute(
+                handle, plan.executionPlanDesc->get(), variantPackDesc->get()),
+            "Execute failed for plan at index " + std::to_string(plan_index) + ".");
+
+        return {ErrorCode::OK, ""};
+    }
+
+    /**
+     * @brief Get the cached workspace size for a plan at a specific index
+     *
+     * Returns the workspace size cached during build_plans(ALL). Does not
+     * query the backend -- the value is purely from the cache.
+     *
+     * @param plan_index Zero-based index into the compiled plan vector
+     * @return Workspace size in bytes, or -1 if plan_index is out of bounds
+     *         or the plan was not successfully compiled
+     */
+    int64_t get_workspace_size_plan_at_index(int64_t plan_index) const
+    {
+        if(plan_index < 0 || static_cast<size_t>(plan_index) >= _compiledPlans.size())
+        {
+            return -1;
+        }
+        return _compiledPlans[static_cast<size_t>(plan_index)].workspaceSize;
+    }
+
+    /**
+     * @brief Get the cached workspace size for a plan at a specific index (error-returning overload)
+     *
+     * Same as the int64_t-returning overload, but returns an Error for invalid
+     * indices instead of -1. This overload follows the same pattern as
+     * get_plan_name_at_index() and allows callers to distinguish between
+     * "workspace size is 0" and "index is invalid."
+     *
+     * @param plan_index Zero-based index into the compiled plan vector
+     * @param[out] size Output parameter for the workspace size in bytes
+     * @return ErrorCode::OK on success, ErrorCode::INVALID_VALUE if plan_index
+     *         is out of bounds
+     */
+    // NOLINTNEXTLINE(readability-identifier-naming)
+    Error get_workspace_size_plan_at_index(int64_t plan_index, int64_t& size) const
+    {
+        if(plan_index < 0 || static_cast<size_t>(plan_index) >= _compiledPlans.size())
+        {
+            return {ErrorCode::INVALID_VALUE,
+                    "plan_index " + std::to_string(plan_index) + " is out of bounds (have "
+                        + std::to_string(_compiledPlans.size()) + " plans)."};
+        }
+        size = _compiledPlans[static_cast<size_t>(plan_index)].workspaceSize;
+        return {ErrorCode::OK, ""};
+    }
+
+    /**
+     * @brief Get the name of a plan at a specific index
+     *
+     * Constructs a human-readable name from the plan's engine ID.
+     *
+     * @param plan_index Zero-based index into the compiled plan vector
+     * @param[out] name Output parameter for the plan name (format: "engine_<engineId>")
+     * @return ErrorCode::OK on success, ErrorCode::INVALID_VALUE if plan_index
+     *         is out of bounds
+     */
+    Error get_plan_name_at_index(int64_t plan_index, std::string& name) const
+    {
+        if(plan_index < 0 || static_cast<size_t>(plan_index) >= _compiledPlans.size())
+        {
+            return {ErrorCode::INVALID_VALUE,
+                    "plan_index " + std::to_string(plan_index) + " is out of bounds (have "
+                        + std::to_string(_compiledPlans.size()) + " plans)."};
+        }
+
+        const auto& plan = _compiledPlans[static_cast<size_t>(plan_index)];
+        name = "engine_" + std::to_string(plan.engineId);
+
+        return {ErrorCode::OK, ""};
+    }
+
+    /**
+     * @brief Build (activate) the plan at a specific index
+     *
+     * Sets the active plan index so that subsequent execute() calls use
+     * the selected plan. If the plan's execution plan descriptor has not
+     * yet been finalized, compiles it (backendSetAttribute + backendFinalize).
+     *
+     * @param index Zero-based index into the compiled plan vector
+     * @return ErrorCode::OK on success, ErrorCode::INVALID_VALUE if index is
+     *         out of bounds or the plan lacks valid descriptors,
+     *         ErrorCode::HIPDNN_BACKEND_ERROR on finalization failure
+     */
+    Error build_plan_at_index(int64_t index)
+    {
+        if(index < 0 || static_cast<size_t>(index) >= _compiledPlans.size())
+        {
+            return {ErrorCode::INVALID_VALUE,
+                    "index " + std::to_string(index) + " is out of bounds (have "
+                        + std::to_string(_compiledPlans.size()) + " plans)."};
+        }
+
+        auto& plan = _compiledPlans[static_cast<size_t>(index)];
+
+        if(!plan.engineConfigDesc || !plan.engineConfigDesc->valid() || !plan.executionPlanDesc
+           || !plan.executionPlanDesc->valid())
+        {
+            return {ErrorCode::INVALID_VALUE,
+                    "Plan at index " + std::to_string(index)
+                        + " has missing or invalid descriptors."};
+        }
+
+        // If workspace size is still -1, the plan has not been finalized yet.
+        // Compile it using the same pattern as build_plans(ALL).
+        if(plan.workspaceSize == -1)
+        {
+            auto setStatus = detail::hipdnnBackend()->backendSetAttribute(
+                plan.executionPlanDesc->get(),
+                HIPDNN_ATTR_EXECUTION_PLAN_ENGINE_CONFIG,
+                HIPDNN_TYPE_BACKEND_DESCRIPTOR,
+                1,
+                static_cast<const void*>(&plan.engineConfigDesc->get()));
+            if(setStatus != HIPDNN_STATUS_SUCCESS)
+            {
+                return {ErrorCode::HIPDNN_BACKEND_ERROR,
+                        "Failed to set engine config on plan at index " + std::to_string(index)
+                            + "."};
+            }
+
+            auto finStatus
+                = detail::hipdnnBackend()->backendFinalize(plan.executionPlanDesc->get());
+            if(finStatus != HIPDNN_STATUS_SUCCESS)
+            {
+                return {ErrorCode::HIPDNN_BACKEND_ERROR,
+                        "Failed to finalize plan at index " + std::to_string(index) + "."};
+            }
+
+            // Cache workspace size
+            int64_t wsSize = 0;
+            detail::hipdnnBackend()->backendGetAttribute(plan.executionPlanDesc->get(),
+                                                         HIPDNN_ATTR_EXECUTION_PLAN_WORKSPACE_SIZE,
+                                                         HIPDNN_TYPE_INT64,
+                                                         1,
+                                                         nullptr,
+                                                         &wsSize);
+            plan.workspaceSize = wsSize;
+        }
+
+        _activePlanIndex = static_cast<size_t>(index);
+
+        return {ErrorCode::OK, ""};
+    }
+
+    /// @name Autotune: Filtering
+    /// @{
+
+    /**
+     * @brief Remove plans whose workspace exceeds a given limit
+     *
+     * Filters out entries from @c _planSpecs (plan-spec path) or
+     * @c _compiledPlans (compiled-plan path) whose workspace size is
+     * strictly greater than @p workspace. Compiled plans with
+     * @c workspaceSize == -1 (not yet queried) are preserved.
+     *
+     * @note Calling this method invalidates any previously-saved plan indices.
+     *
+     * @param workspace Maximum allowed workspace size in bytes
+     * @return Reference to @c *this for method chaining
+     */
+    Graph& deselect_workspace_greater_than(int64_t workspace)
+    {
+        if(!_planSpecs.empty() && !_compiledPlans.empty())
+        {
+            HIPDNN_FE_LOG_ERROR("Both plan specs and compiled plans present (internal error)");
+            return *this;
+        }
+
+        if(!_planSpecs.empty())
+        {
+            auto before = _planSpecs.size();
+            _planSpecs.erase(std::remove_if(_planSpecs.begin(),
+                                            _planSpecs.end(),
+                                            [workspace](const PlanSpec& s) {
+                                                return s.workspaceSize > workspace;
+                                            }),
+                             _planSpecs.end());
+            HIPDNN_FE_LOG_INFO("deselect_workspace_greater_than("
+                               << workspace << "): removed " << (before - _planSpecs.size())
+                               << " of " << before << " plan specs");
+        }
+        else if(!_compiledPlans.empty())
+        {
+            auto before = _compiledPlans.size();
+            _compiledPlans.erase(std::remove_if(_compiledPlans.begin(),
+                                                _compiledPlans.end(),
+                                                [workspace](const CompiledPlan& p) {
+                                                    return p.workspaceSize != -1
+                                                           && p.workspaceSize > workspace;
+                                                }),
+                                 _compiledPlans.end());
+            HIPDNN_FE_LOG_INFO("deselect_workspace_greater_than("
+                               << workspace << "): removed " << (before - _compiledPlans.size())
+                               << " of " << before << " compiled plans");
+        }
+        else
+        {
+            HIPDNN_FE_LOG_WARN("deselect_workspace_greater_than() called with no plans or specs");
+        }
+
+        return *this;
+    }
+
+    /**
+     * @brief Remove plans whose engine matches any of the given names
+     *
+     * Resolves each engine name to an engine ID via
+     * @c hipdnn_data_sdk::utilities::engineNameToId(), then removes
+     * matching entries from @c _planSpecs (plan-spec path) or
+     * @c _compiledPlans (compiled-plan path). Unknown engine names
+     * (those not registered) are logged as warnings and skipped.
+     *
+     * @note Calling this method invalidates any previously-saved plan indices.
+     *
+     * @param engine_names Engine names to deselect (e.g. {"MIOPEN_ENGINE"})
+     * @return Reference to @c *this for method chaining
+     */
+    Graph& deselect_engines(const std::vector<std::string>& engine_names)
+    {
+        if(engine_names.empty())
+        {
+            return *this;
+        }
+
+        if(!_planSpecs.empty() && !_compiledPlans.empty())
+        {
+            HIPDNN_FE_LOG_ERROR("Both plan specs and compiled plans present (internal error)");
+            return *this;
+        }
+
+        // Resolve names to IDs, skipping unregistered names
+        std::unordered_set<int64_t> barredIds;
+        for(const auto& name : engine_names)
+        {
+            if(!hipdnn_data_sdk::utilities::isEngineNameRegistered(name))
+            {
+                HIPDNN_FE_LOG_WARN("deselect_engines(): unknown engine name '" << name
+                                                                               << "', skipping");
+                continue;
+            }
+            barredIds.insert(hipdnn_data_sdk::utilities::engineNameToId(name));
+        }
+
+        if(barredIds.empty())
+        {
+            return *this;
+        }
+
+        if(!_planSpecs.empty())
+        {
+            auto before = _planSpecs.size();
+            _planSpecs.erase(std::remove_if(_planSpecs.begin(),
+                                            _planSpecs.end(),
+                                            [&barredIds](const PlanSpec& s) {
+                                                return barredIds.count(s.engineId) > 0;
+                                            }),
+                             _planSpecs.end());
+            HIPDNN_FE_LOG_INFO("deselect_engines(): removed " << (before - _planSpecs.size())
+                                                              << " of " << before << " plan specs");
+        }
+        else if(!_compiledPlans.empty())
+        {
+            auto before = _compiledPlans.size();
+            _compiledPlans.erase(std::remove_if(_compiledPlans.begin(),
+                                                _compiledPlans.end(),
+                                                [&barredIds](const CompiledPlan& p) {
+                                                    return barredIds.count(p.engineId) > 0;
+                                                }),
+                                 _compiledPlans.end());
+            HIPDNN_FE_LOG_INFO("deselect_engines(): removed " << (before - _compiledPlans.size())
+                                                              << " of " << before
+                                                              << " compiled plans");
+        }
+        else
+        {
+            HIPDNN_FE_LOG_WARN("deselect_engines() called with no plans or specs");
+        }
+
+        return *this;
+    }
+
+    /// @}
+
+    /**
+     * @brief Get the maximum workspace size across all compiled plans
+     *
+     * Returns the largest workspace size from all successfully compiled
+     * entries in the compiled plan vector. Useful for allocating a single
+     * workspace buffer large enough for any candidate plan during autotuning.
+     *
+     * @return Maximum workspace size in bytes, or 0 if no plans have been
+     *         successfully compiled
+     */
+    int64_t get_autotune_workspace_size() const
+    {
+        int64_t maxSize = 0;
+        for(const auto& plan : _compiledPlans)
+        {
+            maxSize = std::max(maxSize, plan.workspaceSize);
+        }
+        return maxSize;
+    }
+
+    /**
+     * @brief Get the name of the currently active plan
+     *
+     * Convenience wrapper that calls get_plan_name_at_index() with the
+     * current active plan index.
+     *
+     * @param[out] name Output parameter for the plan name
+     * @return ErrorCode::OK on success, or ErrorCode::INVALID_VALUE if no
+     *         active plan exists
+     */
+    Error get_plan_name(std::string& name) const
+    {
+        return get_plan_name_at_index(static_cast<int64_t>(_activePlanIndex), name);
+    }
+
+    // NOLINTEND(readability-identifier-naming)
 
     /**
      * @brief Get the workspace memory size required for execution
@@ -1764,7 +4249,7 @@ public:
     Error get_workspace_size(int64_t& workspaceSize) const
     {
         HIPDNN_RETURN_ON_BACKEND_FAILURE(
-            detail::hipdnnBackend()->backendGetAttribute(_executionPlanDesc->get(),
+            detail::hipdnnBackend()->backendGetAttribute(activeExecutionPlan().get(),
                                                          HIPDNN_ATTR_EXECUTION_PLAN_WORKSPACE_SIZE,
                                                          HIPDNN_TYPE_INT64,
                                                          1,
@@ -1840,7 +4325,8 @@ public:
     {
         HIPDNN_FE_LOG_INFO("Executing graph " << graph_attributes.get_name());
 
-        if(!_executionPlanDesc || !_executionPlanDesc->valid())
+        const auto* execPlan = activeExecutionPlanPtr();
+        if(execPlan == nullptr || !execPlan->valid())
         {
             return {ErrorCode::INVALID_VALUE,
                     "Graph has no compiled execution plan. Call build() or "
@@ -1861,10 +4347,9 @@ public:
             detail::hipdnnBackend()->backendFinalize(variantPackDesc->get()),
             "Failed to finalize variant pack descriptor");
 
-        HIPDNN_RETURN_ON_BACKEND_FAILURE(
-            detail::hipdnnBackend()->backendExecute(
-                handle, _executionPlanDesc->get(), variantPackDesc->get()),
-            "Execute failed.");
+        HIPDNN_RETURN_ON_BACKEND_FAILURE(detail::hipdnnBackend()->backendExecute(
+                                             handle, execPlan->get(), variantPackDesc->get()),
+                                         "Execute failed.");
 
         return {ErrorCode::OK, ""};
     }
@@ -1884,7 +4369,8 @@ public:
                   const std::vector<std::vector<int64_t>>& overrideShapes,
                   const std::vector<std::vector<int64_t>>& overrideStrides) const
     {
-        if(!_executionPlanDesc || !_executionPlanDesc->valid())
+        const auto* execPlanOverride = activeExecutionPlanPtr();
+        if(execPlanOverride == nullptr || !execPlanOverride->valid())
         {
             return {ErrorCode::INVALID_VALUE,
                     "Graph has no compiled execution plan. Call build() or "
@@ -1956,7 +4442,7 @@ public:
 
         HIPDNN_RETURN_ON_BACKEND_FAILURE(
             detail::hipdnnBackend()->backendExecute(
-                handle, _executionPlanDesc->get(), variantPackDesc->get()),
+                handle, execPlanOverride->get(), variantPackDesc->get()),
             "Execute failed.");
 
         return {ErrorCode::OK, ""};
@@ -3236,8 +5722,9 @@ public:
     /// Enable or disable runtime tensor-shape overrides for this graph.
     Graph& set_override_shape_enabled(bool enabled) // NOLINT(readability-identifier-naming)
     {
+        const auto* execPlanCheck = activeExecutionPlanPtr();
         if((_graphDesc && _graphDesc->valid())
-           || (_executionPlanDesc && _executionPlanDesc->valid()))
+           || (execPlanCheck != nullptr && execPlanCheck->valid()))
         {
             HIPDNN_FE_LOG_WARN(
                 "set_override_shape_enabled() called after graph descriptors or execution plans "
