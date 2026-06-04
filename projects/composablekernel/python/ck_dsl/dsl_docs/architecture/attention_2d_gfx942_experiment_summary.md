@@ -100,10 +100,10 @@ the feature tree, running, then `git checkout --` to restore — inherently seri
 | S1 D64 mw=32 + 1× tile | selector | **KEPT** | 3 D64 shapes → oracle (1.33–1.96×) | LDS / selection | block_size keys nw (4 if bs≥64 else 2) |
 | S2 D128 early-V | selector | **KEPT** | +2–4% on 6 GQA D128 | LDS / selection | early-V inverts at S8192; gate seqlen≤4096 |
 | X P/Acc XOR swizzle | kernel | **REVERTED** | D128 noise; bf16 D64 −14.7% | LDS @1 CTA/CU | VGPR tight on nw4/mw32 → watch reg pressure |
-| R register-PV (bf16 D64) | kernel | **IN PROGRESS** | targets 2 CTAs/CU | LDS @1 CTA/CU | (pending) bound shifts off LDS if it pays |
-| A async LDS-DMA 1→2 dword | kernel | **IN PROGRESS** | targets D128 DMA-issue | LDS @1 CTA/CU | (pending) ISA b64 legality on CDNA3 |
-| G agpr-alloc decouple | kernel | **DEFERRED** | expected low (not VGPR-bound) | LDS @1 CTA/CU | revisit only if bound shifts to VGPR/AGPR |
-| K single-buffer (D128) | kernel | **DEFERRED** | frees ~16 KB; HIGH risk | LDS @1 CTA/CU | revisit if R proves 2 CTA/CU pays |
+| R register-PV (bf16 D64) | kernel | **MARGINAL** | 2 CTA/CU reached, but only **+2.6%** (1 shape) | LDS @1 CTA/CU | occupancy thesis spent → pivot to intra-CTA compute |
+| A async LDS-DMA 1→2 dword | kernel | **REVERTED (dead)** | b64 IR-illegal; b96/b128 abort comgr | LDS @1 CTA/CU | no wider async-LDS-DMA exists on CDNA3 |
+| G agpr-alloc decouple | kernel | **DEFERRED (likely dead)** | not VGPR-bound | LDS @1 CTA/CU | bound never shifted to VGPR → no trigger |
+| K single-buffer (D128) | kernel | **DEFERRED (likely dead)** | frees ~16 KB; HIGH risk | LDS @1 CTA/CU | R showed 2 CTA/CU buys only ~2.6% → not worth the risk |
 
 ---
 
@@ -168,21 +168,45 @@ Findings:
 Action: reverted. Carries forward the insight that **VGPR is tight on nw4/mw32** — a constraint
 for every nw4/mw32 lever (and a reason `agpr` (G) is likely worthless while LDS-bound).
 
-### R — register-PV on bf16 D64 [IN PROGRESS]
+### R — register-PV on bf16 D64 [MARGINAL — measured, not shipped]
 
 Goal: drop `P_lds` to reach **2 CTAs/CU** on bf16 D64 nw4/mw32/t64 (51,200 → 32,768 B) and test
-whether 1→2 CTA/CU converts to TFLOPS (latency hiding) or the `_permute_p_c_to_a16` cross-lane
-reshape eats the gain (the gfx950 register-PV negative result). bf16-only; not yet enumerated.
+whether 1→2 CTA/CU converts to TFLOPS or the `_permute_p_c_to_a16` cross-lane reshape eats it.
 
-Result: pending static-probe handoff + serial on-device oracle (requires a bf16 `register_pv`
-candidate added to the C++ enumerator for the oracle to score it).
+Result: **2 CTAs/CU confirmed, but the win is only +2.6% on one shape.** Measured by adding a
+bf16 `register_pv` candidate to the C++ enumerator and running the oracle (change reverted after
+measurement — not shipped).
 
-### A — async LDS-DMA width 1 → 2 dword [IN PROGRESS]
+| bf16 D64 shape | regpv=0 best | regpv=1 best | verdict |
+|---|---:|---:|---|
+| InFam GQA8 D64 S2048 (nw4/mw32/t64, was 1 CTA/CU) | 165.0 | **169.3** | regpv wins **+2.6%** |
+| InFam GQA8 D64 S2016 B32 (nw2/mw32/t32, already 3 CTA/CU) | 166.6 | not picked | regpv loses |
 
-Goal: `ASYNC_LDS_MAX_DWORDS` is clamped to 1 (CDNA3; b96/b128 abort comgr). If gfx942 legalizes
-**b64** load-to-LDS, halve the async-DMA call count (≈4× heavier on D128). Gated on ISA legality.
+Findings:
+- Occupancy probe confirmed the LDS math exactly: nw4/mw32/t64 51,200 → 32,768 B, **1 → 2 CTA/CU**,
+  VGPR unchanged at 143 (no blowup, unlike swizzle).
+- But the reshape is heavy: register_pv adds **+129 `ds.bpermute` + ~384 `ds.swizzle`** (IR doubles,
+  3,241 → 6,475 lines). The shuffle-ALU consumes most of the 2× occupancy → net +2.6%.
+- register_pv only helps configs actually stuck at 1 CTA/CU (nw4/mw32/t64). For nw2/mw32/t32 (already
+  3 CTA/CU) the occupancy gain is moot and the reshape is pure cost → it loses.
 
-Result: pending static-probe handoff (ISA b64 legality is the gate).
+**Decisive diagnostic:** going from 1→2 CTAs/CU buys only ~2.6%, so the kernel is **compute/reshape-
+bound within the CTA, not occupancy/latency-bound**. This retires the "raise occupancy" thesis as
+the dominant lever and keeps D128 K-single-buffering dead (it only mattered if 2-CTA paid big).
+
+Action: not shipped (the +2.6% on one shape requires selector plumbing + `_permute_p_c_to_a16`
+correctness verification on the gfx942 narrow lane map + unit-test churn — poor effort/reward).
+Reproducible via the enumerator one-liner if revisited.
+
+### A — async LDS-DMA width 1 → 2 dword [REVERTED — architectural dead-end]
+
+Goal: if gfx942 legalizes **b64** (2-dword) load-to-LDS, halve the async-DMA call count
+(≈4× heavier on D128).
+
+Result: **DEAD.** The IR builder rejects 2-dword outright:
+`async_buffer_load_lds_addr dwords must be 1, 3, or 4 (got 2)`. b64 is not expressible; the 3/4-dword
+(b96/b128) widths are exactly the documented CDNA3 comgr-abort cases. There is no wider legal
+async-LDS-DMA on gfx942 — width=1 is the only viable setting. No code changed.
 
 ---
 
@@ -203,11 +227,23 @@ Result: pending static-probe handoff (ISA b64 legality is the gate).
 
 ## Recommendations / next levers (bound-driven)
 
-1. **R (register-PV)** is the decisive experiment: it is the only lever that reaches 2 CTAs/CU. Its
-   verdict re-points the whole search — if 2 CTA/CU pays, re-profile the new bound (likely VGPR or
-   compute) and that names the next set, and the deferred **D128 K-single-buffer** lever re-opens;
-   if it does not pay, the kernel is latency/compute-bound *within* the CTA → retire the occupancy
-   branch and pursue intra-CTA pipelining (A, early-V depth, prefetch distance) measured with
-   rocprof (`MemUnitStalled`, issue stalls).
-2. **A (async-DMA b64)** if ISA-legal — independent of the occupancy question; biggest on D128.
-3. **G (agpr)** only if the bound shifts off LDS — measure-to-kill, do not pre-invest.
+**Batch 1 outcome (the pivot):** the cheap **selector** levers delivered the gains (S1+S2: analytic
+35% → 41% of PyTorch, now tracking the oracle ceiling cohort-wide). The **kernel** levers did not
+move the ceiling: X (swizzle) net-negative, A (async-DMA) architecturally dead, R (register-PV)
+only +2.6% on one shape. R's verdict is the important one — **1→2 CTA/CU buys ~2.6%, so the kernel
+is compute-bound within the CTA, not occupancy-bound.** The occupancy-raising branch is therefore
+largely spent on this narrow-16x16 path, and the remaining D128 gap (24–46% of PyTorch) is a
+genuine architectural limit (gfx942 cannot use the wide-K / 32x32 atoms that carry the gfx950 wins).
+
+Next, in order:
+1. **rocprof the compute bound.** Since occupancy is not the limiter, profile the hot loop
+   (`MemUnitStalled`, `VALUBusy`, MFMA issue stalls, LDS bank conflicts via `SQ_LDS_BANK_CONFLICT`)
+   on the D128 ship config to find what actually caps the per-CTA throughput. This re-seeds the next
+   experiment set with evidence rather than hypothesis.
+2. **Intra-CTA pipelining** (the live branch now that occupancy is spent): early-V *depth*, K/V
+   prefetch distance, QK↔softmax↔PV overlap scheduling — measured against the rocprof bound.
+3. **Ship decision on R (+2.6%, bf16 D64 nw4/mw32/t64):** only if the marginal win justifies the
+   selector plumbing + `_permute_p_c_to_a16` correctness verification + unit-test churn. Currently
+   parked as not-worth-it.
+4. **G (agpr) / D128 K-single-buffer: closed** — both were occupancy plays; R showed occupancy
+   barely pays. Do not invest without a new bound that re-opens them.
