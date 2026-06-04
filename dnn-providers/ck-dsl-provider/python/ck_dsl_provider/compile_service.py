@@ -1131,6 +1131,11 @@ def _unified_tiled_spec_from_problem(problem, knobs: dict, arch: str = "gfx950")
                 t = mult * bs
                 if t % 32 != 0:
                     continue
+                # K single-buffer requires BLOCK_M <= tile_size (Q aliases the
+                # single K slot). Skip geometries that would violate the spec
+                # gate so we never emit an unbuildable level-4 config.
+                if use_k_single_buffer_ovr and bm > t:
+                    continue
                 # per-wave token uniformity / DMA payload floor (mirror gate).
                 if t * hd < nw * 64 * 8:
                     continue
@@ -1142,9 +1147,12 @@ def _unified_tiled_spec_from_problem(problem, knobs: dict, arch: str = "gfx950")
             if chosen:
                 break
         if chosen is None:
-            # Fall back to the safest geometry (nw=1, T=32) and let the spec
-            # gate reject if even that overflows (it will not for HD<=128).
-            chosen = (1, 32 if bs <= 32 else ((bs + 31) // 32) * 32)
+            # Fall back to the safest geometry (nw=1, T>=32). For k1buf widen the
+            # tile to >= BLOCK_M (=32) so the BLOCK_M<=tile gate holds.
+            _fb_t = 32 if bs <= 32 else ((bs + 31) // 32) * 32
+            if use_k_single_buffer_ovr:
+                _fb_t = max(_fb_t, 32)
+            chosen = (1, _fb_t)
         num_warps, tile_size = chosen
 
     spec_kwargs = dict(
