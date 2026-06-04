@@ -1042,6 +1042,10 @@ def build_unified_attention_2d_tiled(
     TRANSPOSED_QK_32X32 = spec.use_transposed_qk_32x32
     CONFLICT_FREE_V = spec.use_conflict_free_v
     K_SINGLE_BUF = spec.use_k_single_buffer
+    # DIAGNOSTIC ONLY (not signature-gated -- toggle re-JITs via env): read the
+    # transposed cfv [HD,T+pad] V via 4 scalar n=1 reads instead of one n=4
+    # ds_read_b64. Isolates whether the wide read lowering is the cfv fault.
+    _CFV_SCALAR_READ = os.environ.get("HIPDNN_GFX942_CFV_SCALAR_READ", "0") == "1"
     KV_BYTES = 1 if KV_FP8 else 2
     kv_io_dtype = FP8E4M3 if KV_FP8 else dtype
 
@@ -3954,14 +3958,32 @@ def build_unified_attention_2d_tiled(
                                     b.const_i32(k * 8),
                                     b.mul(lane_half32, b.const_i32(4)),
                                 )
-                                A_v_t = b.smem_load_vN(
-                                    V_lds,
-                                    v_buf,
-                                    v_dim32,
-                                    tok_base,
-                                    dtype=dtype,
-                                    n=4,
-                                )
+                                if _CFV_SCALAR_READ:
+                                    # ISOLATION: read the SAME [HD,T+pad] cfv
+                                    # layout but via 4 scalar n=1 reads (same
+                                    # values/order as the n=4 wide read). If this
+                                    # is CORRECT while n=4 is WRONG, the bug is the
+                                    # n=4 ds_read_b64 lowering over the padded
+                                    # row; if it still fails, it's the
+                                    # layout/MFMA mapping, not the read width.
+                                    _av = []
+                                    for _kk in range(4):
+                                        _t = b.add(tok_base, b.const_i32(_kk))
+                                        _v1 = b.smem_load_vN(
+                                            V_lds, v_buf, v_dim32, _t,
+                                            dtype=dtype, n=1,
+                                        )
+                                        _av.append(b.vec_extract(_v1, 0))
+                                    A_v_t = b.vec_pack(_av, dtype)
+                                else:
+                                    A_v_t = b.smem_load_vN(
+                                        V_lds,
+                                        v_buf,
+                                        v_dim32,
+                                        tok_base,
+                                        dtype=dtype,
+                                        n=4,
+                                    )
                             else:
                                 a_v_elems = []
                                 for kk in range(4):
