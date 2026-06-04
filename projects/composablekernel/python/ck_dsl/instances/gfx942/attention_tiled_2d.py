@@ -36,6 +36,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import os
 from typing import Optional, Tuple
 
 from ...core.ir import (
@@ -1132,6 +1133,92 @@ def build_unified_attention_2d_tiled(
     Q_USES_DUAL_SLOT = Q_ALIAS_K and BLOCK_M > T
     K_lds = b.smem_alloc(K_LDS_DTYPE, [2, T, HD], name_hint="Klds")
     V_BUFS = 1  # single-buffer V (race-free: see comment above)
+    # ---- V_lds bank-deconflict swizzle (HIPDNN_GFX942_SWIZZLE_VLDS) ----
+    # The plain-atom PV B-operand is read with 4 strided ``ds_read_u16`` loads
+    # over the row-major ``V_lds[T, HD]`` tile (``_strided_v_b_operand`` below).
+    # For each read the 32 lanes of a wave-half map onto only 8 LDS banks
+    # (16-col atom window = 8 banks) -> a hard 4-way bank conflict, which the
+    # gfx942 rocprof trace flagged as the dominant stall (57% of busy cycles
+    # on the V read, ~11 conflicts/LDS-instruction). gfx942 has no
+    # ``ds_read_tr16`` transpose read to avoid it.
+    #
+    # The conflict is structural: bank = ((row*HD + col) >> 1) & 31, and for
+    # HD in {64, 128} the ``row*HD`` term is always 0 mod 32 banks, so the row
+    # never reaches the bank and 32 lanes collapse onto 8 banks. The fix is to
+    # give consecutive rows a *padded* row stride so they land on different
+    # banks. V_lds is written by a hardware-contiguous async DMA (no per-lane
+    # dest control), so the pad can only be inserted at a DMA *call* boundary.
+    # Each call writes ``V_ROWS_PER_CALL = THREADS*2 / HD`` whole rows. Padding
+    # at the call boundary moves the per-row bank far enough to break the
+    # 4-way collision down to the irreducible 2-way (the col-parity pair, which
+    # share one 4-byte bank word) ONLY when a call spans <= 2 rows -- i.e. the
+    # 4 colliding rows (lane_rg*4 apart) straddle a padded boundary. With
+    # 8 rows/call (the D64 nw=4 config) all 4 colliding rows fall inside one
+    # contiguous call, so the boundary pad cannot separate them; the swizzle is
+    # auto-disabled there (and on the fp8 / 32x32 / register-pv paths, whose
+    # V-lane map differs). The read inverts the same per-call pad with cheap
+    # shift/and on the already-live row value (VGPR-neutral, no per-element
+    # address recompute).
+    # The contiguous DMA interleaves (wave, call, lane): for the bf16/f16
+    # path each wave deposits ``WAVE * (ASYNC_LDS_MAX_BYTES_PER_LANE//2)``
+    # halves per call lane-contiguously, and the per-call/per-wave bases stack
+    # so the physical LDS half equals the logical ``token*HD + dim``. The
+    # swizzle's per-row pad only reduces cleanly to a ``row -> (group, within)``
+    # split when **one wave deposits exactly one V row per call** -- i.e.
+    # ``WAVE * halves_per_lane == HD`` -- so that ``within = wave`` and
+    # ``group = call``. Require that (true for the D128 nw=2 ship config:
+    # 64*2 == 128). When a wave spans several rows per call (e.g. D64 nw=4,
+    # HD=64: 8 rows/call) the row pad cannot be expressed as a per-call/per-wave
+    # base offset, so the swizzle is auto-disabled there.
+    _V_HALVES_PER_LANE = ASYNC_LDS_MAX_BYTES_PER_LANE // 2
+    _V_ROW_PER_WAVE_CALL = (WAVE * _V_HALVES_PER_LANE) == HD
+    V_ROWS_PER_CALL = NUM_WARPS  # one row per wave per call when eligible
+    # LDS-budget headroom guard: the swizzle adds ``N_GROUPS * V_ROWS_PER_CALL *
+    # PAD`` halves to V_lds. ``supports_tiled_2d`` sized V_lds at the natural
+    # (unpadded) figure, so disable the swizzle if the pad would push the total
+    # estimate past the gfx942 LDS budget (otherwise a borderline config would
+    # comgr-abort only when the env flag is set). Mirrors the gate's formula.
+    try:
+        from ...core.arch import ArchTarget as _ArchTarget
+
+        _LDS_CAP = _ArchTarget.from_gfx(arch).lds_capacity_bytes
+    except Exception:  # noqa: BLE001
+        _LDS_CAP = 65536
+    _swz_extra_bytes = (T // max(V_ROWS_PER_CALL, 1)) * V_ROWS_PER_CALL * 8 * 2
+    _out_stripe_b = 32 if HD <= 64 else HD
+    _lds_natural = (
+        2 * T * HD * 2
+        + T * HD * 2
+        + BLOCK_M * (T + 8) * 2
+        + (0 if BLOCK_M <= 2 * T else BLOCK_M * HD * 2)
+        + BLOCK_M * _out_stripe_b * 2
+    )
+    _swz_fits = (_lds_natural + _swz_extra_bytes) <= _LDS_CAP
+    SWIZZLE_VLDS = (
+        os.environ.get("HIPDNN_GFX942_SWIZZLE_VLDS", "1") == "1"
+        and not FP8_MFMA_PV
+        and not FP8_MFMA_QK
+        and not USE_MFMA_32X32
+        and not REGISTER_PV
+        and V_LDS_DTYPE == dtype
+        and _V_ROW_PER_WAVE_CALL
+        and NUM_WARPS in (1, 2)
+        and (T % V_ROWS_PER_CALL == 0)
+        and HD in (64, 128)
+        and not FAST_PAGED_KV_DESC  # FAST path uses a distinct per-call voff
+        and _swz_fits  # don't blow the LDS budget the static gate sized natural
+    )
+    # Pad of 8 halves (16 bytes) per V row: shifts each row's bank base by
+    # (8 >> 1) = 4 banks, the value the static probe shows breaks the 4-way
+    # collision down to the irreducible 2-way (col-parity pair). 16 bytes keeps
+    # the contiguous per-wave-row DMA store 16-byte aligned.
+    V_LDS_PAD = 8 if SWIZZLE_VLDS else 0
+    # Padded per-row stride and per-call (= V_ROWS_PER_CALL rows) group stride,
+    # both in halves. ``V_GROUP_SHIFT`` splits a row into (group, within=wave)
+    # with a cheap shift/and on the already-live row value.
+    V_LDS_STRIDE = HD + V_LDS_PAD
+    V_GROUP_STRIDE = V_ROWS_PER_CALL * V_LDS_STRIDE
+    V_GROUP_SHIFT = V_ROWS_PER_CALL.bit_length() - 1 if SWIZZLE_VLDS else 0
     if FP8_MFMA_PV:
         # Native-fp8 PV uses ds_read_b64_tr_b8. The validated lane mapping
         # (HIP probe in /tmp/probe_tr_b8_stripe.hip) is:
@@ -1151,8 +1238,42 @@ def build_unified_attention_2d_tiled(
         V_lds = b.smem_alloc(
             V_LDS_DTYPE, [V_BUFS, N_STRIPES, T, 16], name_hint="VldsStripe"
         )
+    elif SWIZZLE_VLDS:
+        # Bank-deconflicted V_lds: flat ``[V_BUFS, N_GROUPS * V_GROUP_STRIDE]``.
+        # Each DMA call fills one group (``V_ROWS_PER_CALL`` rows, one row per
+        # wave), with every row stored at the padded stride ``V_LDS_STRIDE``;
+        # the V_LDS_PAD-half gap after each row rotates that row's bank base.
+        # Reads recover the flat slot via ``_v_load1`` below.
+        V_N_GROUPS = T // V_ROWS_PER_CALL
+        V_N_SLOTS = V_N_GROUPS * V_GROUP_STRIDE
+        V_lds = b.smem_alloc(V_LDS_DTYPE, [V_BUFS, V_N_SLOTS], name_hint="Vlds")
     else:
         V_lds = b.smem_alloc(V_LDS_DTYPE, [V_BUFS, T, HD], name_hint="Vlds")
+
+    def _v_load1(v_buf: Value, v_row: Value, v_n_col: Value) -> Value:
+        """Load a single V_lds element ``V[v_row, v_n_col]`` as ``<1 x dtype>``.
+
+        When ``SWIZZLE_VLDS`` the physical store is the bank-rotated flat
+        layout, so the (row, col) logical coordinate maps to its padded flat
+        slot: ``group*V_GROUP_STRIDE + within*V_LDS_STRIDE + col`` with
+        ``group = row >> V_GROUP_SHIFT`` and ``within = row & (rows-1)``. Both
+        are cheap bit ops on the already-live ``v_row`` (no per-element address
+        recompute -> VGPR-neutral). When the swizzle is off this is exactly the
+        natural ``V_lds[v_buf, v_row, v_n_col]`` 3D access.
+        """
+        if not SWIZZLE_VLDS:
+            return b.smem_load_vN(V_lds, v_buf, v_row, v_n_col, dtype=dtype, n=1)
+        group = b.lshr(v_row, b.const_i32(V_GROUP_SHIFT))
+        within = b.land(v_row, b.const_i32(V_ROWS_PER_CALL - 1))
+        slot = b.add(
+            b.add(
+                b.mul(group, b.const_i32(V_GROUP_STRIDE)),
+                b.mul(within, b.const_i32(V_LDS_STRIDE)),
+            ),
+            v_n_col,
+        )
+        return b.smem_load_vN(V_lds, v_buf, slot, dtype=dtype, n=1)
+
     if not REGISTER_PV:
         # P_lds row stride padding (16 bytes = 8 halves) to eliminate 4-way
         # LDS bank conflict on the softmax `ds_write_b16` stores. With row
@@ -1597,6 +1718,29 @@ def build_unified_attention_2d_tiled(
         wave_lds_offset_i32 = b.to_sgpr_u32(b.mul(wave_id, b.const_i32(WAVE_BYTES)))
         wave_lds_offset_i64 = b.zext(wave_lds_offset_i32, I64)
 
+    # V's DMA dest base when the bank-deconflict swizzle is on: each wave owns
+    # one padded V row per call, so the wave's base advances by the padded row
+    # stride ``WAVE_BYTES + V_LDS_PAD*2`` (bytes) instead of ``WAVE_BYTES``.
+    # Wave-uniform -> pin to SGPR (same rationale as the K/V wave offset above).
+    V_WAVE_BYTES = WAVE_BYTES + (V_LDS_PAD * 2 if SWIZZLE_VLDS else 0)
+    # Per-call dest stride for V (bytes). With the swizzle each call writes
+    # ``V_ROWS_PER_CALL`` padded rows, so the call base steps by the padded
+    # group stride; without it, the natural contiguous ``bytes_per_call``.
+    V_BYTES_PER_CALL_SWZ = bytes_per_call + (
+        V_ROWS_PER_CALL * V_LDS_PAD * 2 if SWIZZLE_VLDS else 0
+    )
+    if not SWIZZLE_VLDS or NUM_WARPS == 1:
+        v_wave_lds_offset_i64 = (
+            b.const_i64(0)
+            if NUM_WARPS == 1
+            else wave_lds_offset_i64
+        )
+    else:
+        v_wave_lds_offset_i32 = b.to_sgpr_u32(
+            b.mul(wave_id, b.const_i32(V_WAVE_BYTES))
+        )
+        v_wave_lds_offset_i64 = b.zext(v_wave_lds_offset_i32, I64)
+
     # ---- Paged KV byte descriptor (full transform DAG) ----
     # The paged-KV cache is laid out ``[num_blocks, BS, NUM_KV, HD]`` with
     # *byte* strides. The kernel addresses it via a chain of coordinate
@@ -1821,8 +1965,10 @@ def build_unified_attention_2d_tiled(
         iter-start full drain). Saves 8 KiB LDS per CTA vs the original
         double-buffer V layout.
         """
-        # V is single-buffered; ignore buf_idx, always write slot 0.
-        V_wave_base = b.smem_ptr_add(V_lds_addr, wave_lds_offset_i64)
+        # V is single-buffered; ignore buf_idx, always write slot 0. The wave
+        # base uses the V-specific (swizzle-aware) wave offset so each wave's
+        # padded V row lands in its bank-rotated slot when SWIZZLE_VLDS is on.
+        V_wave_base = b.smem_ptr_add(V_lds_addr, v_wave_lds_offset_i64)
         if FAST_PAGED_KV_DESC:
             fast_block0, fast_block1 = _fast_paged_kv_blocks(kv_tile_idx)
         for call in range(kv_calls_per_tile):
@@ -1855,7 +2001,9 @@ def build_unified_attention_2d_tiled(
                         linear_half=linear_half,
                         kv_head=kv_head_idx,
                     )
-            v_dst = b.smem_ptr_add(V_wave_base, b.const_i64(call * bytes_per_call))
+            v_dst = b.smem_ptr_add(
+                V_wave_base, b.const_i64(call * V_BYTES_PER_CALL_SWZ)
+            )
             # CACHE_STREAM (SLC): V is consumed once per iter and never
             # re-read within this kernel; see _issue_k_load_runtime for
             # the rationale.
@@ -3537,17 +3685,20 @@ def build_unified_attention_2d_tiled(
             v_k_chunk_base = b.mul(lane_rg, b.const_i32(4))
 
             def _strided_v_b_operand(k_iter: int) -> Value:
-                """<4 x dtype> PV B operand for K-iter ``k_iter`` via strided LDS."""
+                """<4 x dtype> PV B operand for K-iter ``k_iter`` via strided LDS.
+
+                Each of the 4 elements is a distinct V row. ``_v_load1`` applies
+                the bank-deconflict slot mapping when ``HIPDNN_GFX942_SWIZZLE_VLDS``
+                is on (foldable shift/and on ``v_row``); off, it is the natural
+                ``V_lds[v_buf, v_row, v_n_col]`` read.
+                """
                 bv = b.zero_vec(dtype, 4)
                 for j in range(4):
                     v_row = b.add(
                         b.const_i32(k_iter * 16 + j),
                         v_k_chunk_base,
                     )
-                    elem = b.vec_extract(
-                        b.smem_load_vN(V_lds, v_buf, v_row, v_n_col, dtype=dtype, n=1),
-                        0,
-                    )
+                    elem = b.vec_extract(_v_load1(v_buf, v_row, v_n_col), 0)
                     bv = b.vec_insert(bv, elem, j)
                 return bv
 
