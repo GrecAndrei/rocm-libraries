@@ -332,3 +332,124 @@ committed V_lds padding (+2–5%) is the Pareto frontier. The remaining gap to f
 pipelining** (deep K/V prefetch + full QK·softmax·PV overlap, flash's regime), not a V-read lever — a
 larger rewrite. **Ledger: 3 wins shipped (D64 sel, D128 early-V, V padding → analytic 35%→41% of PT);
 6 levers killed with proof (X, A, R, L1, L2, occupancy branch).**
+
+---
+
+## Batch 4 — the flash-pipeline rewrite (v2)
+
+Batch 3 concluded the gap to flash was "structural pipelining, a larger rewrite." Batch 4 **is**
+that rewrite: a fresh 32x32x8 wide-atom flash pipeline on the gfx942 path, built correctness-first
+(Stream A foundation) then layered with the levers below. All edits are env-gated
+(`HIPDNN_GFX942_FLASH_PIPELINE` level 0–5), default OFF; gfx950 byte-identical by construction.
+Merged at commit `9cff43bdd2d`.
+
+### Phase-A correction — what flash actually does (re-profiled)
+
+**The v1 ledger's claim that "flash never round-trips V through LDS at all" is WRONG — corrected
+here.** Fresh kernel-trace + counters of PyTorch aotriton `attn_fwd` on gfx942 (MI300X), D128 fp16:
+
+| flash `attn_fwd` (D128 fp16) | value |
+|---|---:|
+| LDS (dynamic) | **32,768 B** (V *is* staged in LDS) |
+| bank conflicts / LDS-inst | **0.58** (conflict-free) |
+| LDSBankConflict (derived) | 1.0% |
+| archVGPR / accumVGPR | **128 / 384** (acc lives in AGPR) |
+| SGPR / scratch / WG | 112 / 64 / 256 (num_warps=4) |
+| num_stages | 1 |
+| occupancy | ~1 wg/CU (32 KB LDS, high AGPR) |
+| MFMA util | 14.1% |
+| MemUnitStalled | 21.8% (HBM-bound — the *right* bound) |
+
+(D64 variant: 16,384 B LDS, archVGPR 128 / accumVGPR 128 — same num_warps=4, smaller-tile/low-AGPR.)
+
+So flash **does** put V in LDS. Its edge is not deep prefetch (num_stages=1) and not high occupancy
+(~1 wg/CU, same as our v1): it is **(a) a conflict-free V LDS read (0.58 vs our 7–11 conflicts/inst)**
+and **(b) operand residency — P and acc are kept off LDS** (acc in AGPR, no P_lds bridge). The kernel
+is HBM-bound, the correct roofline. This re-pointed the whole v2 plan at *operand residency +
+conflict-free V*, not occupancy or prefetch depth.
+
+### Lever ledger (Batch 4)
+
+| Lever | Kind | Status | Headline result | Mechanism / why |
+|---|---|---|---|---|
+| 32x32x8 base (Stream A) | kernel | **KEPT (foundation)** | correctness-first wide-atom; ~2× *slower* than narrow alone (naive V) | wider K=8 atom alone cut conflicts 11.34→7.25/LDS-inst, but the naive strided V keeps it LDS-bound (MFMA 7%) |
+| transposed-x8 / register-P^T (Stream C) | kernel | **KEPT** | **+1.57×** over plain-x8 (up to 1.82× @ S8192); −62% LDS insts | S^T = K·Q^T so P^T is the PV B-operand *direct from registers* → P_lds round-trip eliminated (SQ_INSTS_LDS 767K→290K) |
+| FA-4 rescale-skip (Stream D) | kernel | **REVERTED (flat)** | within ±1% on 5/7, slightly neg on 2 | DSL has no warp-ballot / predicated `scf.if`-with-results → the `o_acc *= alpha` rescale still issues (runtime `alpha`, backend can't fold `x*1.0`); only P's frame changes |
+| conflict-free-V (Stream prong3) | kernel | **BLOCKED (incorrect)** | cfv as MFMA-**A** on transposed path → 12/9 FAIL (S512 finite 0.165 err) | operand-role asymmetry: [HD,T+pad] is the natural MFMA-**B** layout; cfv-as-B is proven correct (recovery L1), cfv-as-A needs an in-register MFMA-A lane reshape this kernel doesn't do |
+| acc→AGPR / drop Acc_lds | kernel | **REJECTED (evidence gate)** | not implemented | STEP-0 proved the 48 KB peak = K_lds+V_lds only; the backend LDS-coalescing pass already aliases Acc_lds into the loop-dead K/V region → dropping it is moot for occupancy |
+| K single-buffer (prong2) | kernel | **KEPT + SHIPPED** | **L4: 156–178 TF, +18–33% over baseline, 2 wg/CU** | K double→single buffer drops LDS 48→32 KB, crossing the 32 KB threshold → 1→2 wg/CU |
+
+### The valid perf ladder (fp16 D128)
+
+Levels are cumulative env settings. base = the narrow 16x16x16 ship path (L0). Geomean over the
+7 flagged fp16-D128 shapes (Stream C job 354226 / prong2 job 354431); flash ≈ 290 TF.
+
+| level | path | geomean / representative TFLOPS | vs base | vs flash |
+|---|---|---:|---:|---:|
+| L0 | narrow 16x16x16 baseline (ship) | **126.6** | 1.00× | 0.44× |
+| L1 | plain-x8 (32x32x8, P_lds bridge, naive V) | 59.5 | 0.47× | 0.21× |
+| L2 | transposed-x8 (register-P^T, naive V) | 93.3 | 0.74× | 0.32× |
+| **L4** | **transposed-x8 + K single-buffer** | **156–178** | **+18–33%** | **~0.62×** |
+
+Plain-x8 (L1) is the correctness-first foundation and is *below* the narrow baseline — the naive
+strided V plus the P_lds bridge dominate. The transposed register-P^T handoff (L2) recovers most of
+that deficit (+57% over L1), and K single-buffering (L4) crosses the occupancy threshold to land
+**above** the narrow baseline. Per-shape L4 (prong2/prong3 medians):
+
+| shape (D128 fp16) | L0 base | L2 (x8) | **L4 (x8+k1buf)** | L4 vs base |
+|---|---:|---:|---:|---:|
+| GQA S2048 | 120.9 | 81.8 | **147.7** | +22% |
+| GQA S4096 | 134.4 | 91.2 | **165.8** | +24% |
+| MHA S2048 | 113.3 | 91.3 | **132.9** | +17% |
+| GQA B4 S2048 | 133.7 | 90.2 | **171.5** | +28% |
+| GQA S8192 | 135.0 | 113.7 | **178.9** | +33% |
+| GQA B8 S2048 | 134.9 | 91.9 | **174.6** | +29% |
+| GQA B4 S4096 | 137.3 | 95.6 | **173.0** | +26% |
+
+Best observed: **178.9 TF (GQA S8192) ≈ 62% of flash.** D64 fp16 and all bf16 are controls (flag
+inert) and stay flat across levels — measurement validated. **L4 ships: the analytic selector
+auto-selects it for gfx942 D128 fp16 (commit `9cff43bdd2d`).**
+
+### Mechanism for L4 (K single-buffer → 2 wg/CU)
+
+STEP-0 (static gate) decomposed the 48 KB peak exactly: `K_lds = 2·T·HD·2 = 32 KB` (double-buffered),
+`V_lds = T·HD·2 = 16 KB` (already single-buffered), `P_lds = 0` (register-P^T), `Acc_lds` aliased
+(see rejected lever above). The only lever that crosses the 32 KB / 2-wg threshold is cutting loop LDS,
+and V is already single-buffered — so **K single-buffer** (32→16 KB) → loop LDS = 16+16 = **32 KB →
+2 wg/CU** (rocprof-confirmed: `..._earlyv` group_segment 49,152 B / 1 wg/CU → `..._earlyv_k1buf`
+32,768 B / 2 wg/CU). The single-slot K introduces a read-race (next-tile async DMA write `K[i+1]` vs
+the tail of `QK[i]`'s LDS reads); **closed by a post-QK `s_waitcnt(lgkmcnt=0)` + barrier** before the
+next-K DMA, guaranteeing all QK K-reads retire before the shared-slot overwrite. Numerics unchanged
+(same online-softmax math); the fitter enforces `BLOCK_M ≤ tile_size` for L4 (fixes the S528 multi-tile
+edge case). The prior R-lever floor (1→2 wg/CU = +2.6% on a conflict-bound kernel) did *not* hold here:
+on these latency-bound long-prefill shapes the doubled occupancy buys +17–33% over baseline.
+
+### Remaining path to flash (62% → 100%)
+
+The last gap is the **conflict-free V** read (flash's 0.58 vs our ~7 conflicts/LDS-inst). The Batch-4
+prong3 work narrowed the blocker conclusively: cfv on the transposed path fails because the natural
+[HD,T+pad] LDS layout is the MFMA-**B** layout, but the transposed path consumes V as MFMA-**A** —
+an **operand-role asymmetry** (cfv-as-B is proven correct; only cfv-as-A fails, S512 finite 0.165 err).
+The fix is a NEW feature, not a read-index fix: an **in-register MFMA-A VALU lane reshape** — port CK's
+`MakeShuffledVRegBlockDescriptor`. Critical constraint: do the reshape with **`v_perm` (VALU), not
+`ds_swizzle`** — ds_swizzle ops are LDS-port ops that serialize on `lgkmcnt` (exactly the trap that
+made v1's L2 register-V transpose flat). This is an **active follow-on**, not yet implemented.
+
+### Current best policy (updated for v2)
+
+- **D128 fp16**: **L4 transposed-x8 + K single-buffer ships** (analytic auto-selects on gfx942 D128
+  fp16; +18–33% over the narrow baseline, 2 wg/CU, ≈62% of flash, commit `9cff43bdd2d`). Levels 0–3/5
+  and the FA-4 path remain gated OFF building blocks.
+- **D128 bf16**: stays on the narrow 16x16x16 path (the x8 flash atom is fp16-only); D128 bf16 selector
+  unchanged from Batch 1–2 (plain nw2/t64 + GQA early-V seqlen≤4096).
+- **D64** (fp16/bf16): unchanged from Batch 1 (`mw=32`, 1× tile, `nw = bs≥64?4:2`).
+- D256 unsupported (LDS). gfx950 byte-identical.
+
+### Current gaps to PyTorch (updated)
+
+- **D128 fp16: now ~62% of flash** (was 24–46% at end of Batch 3) — L4 shipping lifts the large-S
+  shapes that previously plateaued flat (S8192 24% → ~62%). The residual 38% is the conflict-free-V
+  read, blocked on the MFMA-A register reshape (active follow-on above).
+- **D128 bf16: unchanged (~39% of flash)** — no wide x8 atom for bf16 yet; the v2 ladder is fp16-only.
+- **D64: unchanged (~55–64% of PyTorch)** — selection gap was already closed in Batch 1; the v2 rewrite
+  is a D128-only effort.
