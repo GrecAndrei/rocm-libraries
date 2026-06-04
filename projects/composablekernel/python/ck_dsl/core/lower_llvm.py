@@ -2323,6 +2323,16 @@ class _Lowerer:
         self._current().emit(f"  {r0.name} = extractvalue {{ i32, i32 }} {tmp}, 0")
         self._current().emit(f"  {r1.name} = extractvalue {{ i32, i32 }} {tmp}, 1")
 
+    def _op_tile_perm_b32(self, op: Op) -> None:
+        """``v_perm_b32`` — in-lane byte select across two VGPRs (pure VALU)."""
+        src0, src1, sel = op.operands
+        self._need("amdgcn.perm")
+        self._current().emit(
+            f"  {op.result.name} = call i32 @llvm.amdgcn.perm("
+            f"i32 {self._operand(src0)}, i32 {self._operand(src1)}, "
+            f"i32 {self._operand(sel)})"
+        )
+
     def _op_tile_ds_read_tr16_b64(self, op: Op) -> None:
         """`ds_read_b64_tr_b16` -- gfx950 transpose-read of a 16x16 fp16 tile.
 
