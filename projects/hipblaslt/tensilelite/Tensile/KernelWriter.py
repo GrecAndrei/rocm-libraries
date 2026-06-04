@@ -3656,7 +3656,9 @@ class KernelWriter(metaclass=abc.ABCMeta):
     # initialize SubTileIdx
     self.states.SubTileIdx = 1 if self.states.numItersPLR and kernel["numSubTiles"] else 0
 
-    label_unrolledLoop_lc1 = Label("unrolledLoop_lc1", "", alignment=16)
+    strNta = "" if kernel["AdaptiveGemmNTAB"] == 0 else "_NTA%s" % nta
+    strNtb = "" if kernel["AdaptiveGemmNTAB"] == 0 else "_NTB%s" % ntb
+    label_unrolledLoop_lc1 = Label("unrolledLoop_lc1%s%s" % (strNta, strNtb), "", alignment=16)
 
     # For loopCopies>=2 (EPS uses 2; HalfPLR uses 3), place the lc=1 SBranch target
     #   EPS    : initC[lc=0] -> lc=1 -> lc=0 -> lc=1 -> ...
@@ -5242,6 +5244,14 @@ class KernelWriter(metaclass=abc.ABCMeta):
       originalNta = tensorParametersA["NonTemporal"]
       originalNtb = tensorParametersB["NonTemporal"]
 
+      # gfx1250: NonTemporal only selects cache SCOPE; the actual non-temporal
+      # access comes from the TemporalHint (TH_NT) field, read per-load from
+      # kernel["TemporalHint{A,B}"]. Vary it per body alongside NonTemporal.
+      hasTH = self.states.asmCaps.get("HasTHModifier", False)
+      if hasTH:
+        originalThA = kernel["TemporalHintA"]
+        originalThB = kernel["TemporalHintB"]
+
       ntCombos = [[0, 0], [0, 4], [4, 0]]
       ntLabels = [Label("LoopBody_NTA{}_NTB{}".format(nta, ntb), "") for nta, ntb in ntCombos]
       ntLabelDone = Label("LoopBody_NTA_NTB_Done", "")
@@ -5305,6 +5315,10 @@ class KernelWriter(metaclass=abc.ABCMeta):
         module.add(ntLabels[idx])
         tensorParametersA["NonTemporal"] = nta
         tensorParametersB["NonTemporal"] = ntb
+        if hasTH:
+          # TH_NT(1) for the NT body, TH_RT(0) otherwise.
+          kernel["TemporalHintA"] = 1 if nta else 0
+          kernel["TemporalHintB"] = 1 if ntb else 0
         _kernelBody(pack, packPre, nta, ntb)
         # All paths but the last one need to skip the rest. Use long
         # branches everywhere because each kernelBody can easily exceed
@@ -5318,6 +5332,9 @@ class KernelWriter(metaclass=abc.ABCMeta):
 
       tensorParametersA["NonTemporal"] = originalNta
       tensorParametersB["NonTemporal"] = originalNtb
+      if hasTH:
+        kernel["TemporalHintA"] = originalThA
+        kernel["TemporalHintB"] = originalThB
 
     if kernel["ExpertSchedulingMode"] > 0:
       module.add(SSetRegIMM32B32(dst=HWRegContainer(reg="26", value=[0,2]), src=0x0, comment="enable hardware dependency checking"))
