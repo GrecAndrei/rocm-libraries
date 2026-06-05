@@ -1180,8 +1180,55 @@ def checkSpaceFillAlgoWGMIsValid(name, value):
                     raise Exception(msgBase.format(name, value, dim))
 
 
-def checkParametersAreValid(param, validParams):
-    """Ensures paramaters in params exist and have valid values as specified by validParames"""
+def checkParametersAreValid(
+    param,
+    validParams,
+    *,
+    keyPathPrefix: str = "",
+    srcFile: str = "",
+    typeMismatchCollector=None,
+):
+    """Ensures parameters in params exist and have valid values as specified by validParams.
+
+    In addition to the legacy name+value-membership checks, when the
+    parameter name has an entry in the derived ``_expectedParamTypes`` map
+    and is not in ``_skipTypeCheck``, each element of ``values`` is also
+    type-checked against the union of allowed-value types. ``type(value)``
+    is used (not ``isinstance``) so ``bool`` and ``int`` are distinguished
+    — the bool/int collapse is precisely the class of bug the strict gate
+    targets.
+
+    Type mismatches are reported via the shared :func:`formatMismatch`
+    helper. When ``typeMismatchCollector`` is supplied (a list), formatted
+    strings are appended to it so the caller (``BenchmarkStructs``) can
+    aggregate every mismatch across its iterated calls and raise a single
+    :class:`ConfigTypeError` with the full report. When it is None,
+    mismatches raise ``ConfigTypeError`` directly. The
+    ``TENSILE_STRICT_TYPE_CHECK`` env var lets a caller downgrade to a
+    warning or skip the type check entirely (the legacy name/value checks
+    are unaffected).
+
+    Args:
+        param: ``(name, values)`` tuple; ``values`` is the list of
+            candidate values.
+        validParams: registry to validate ``name``/``values`` against.
+        keyPathPrefix: dotted/bracketed prefix for the keypath in error
+            messages. The caller knows its section (e.g.
+            ``BenchmarkProblems[i][1].ForkParameters``); the validator
+            appends ``.<Key>[<j>]``.
+        srcFile: YAML file path, used for src:line in messages.
+        typeMismatchCollector: optional list that receives formatted
+            mismatch strings instead of raising immediately. The caller
+            is responsible for raising once at the end.
+    """
+    # Defer imports of the shared error machinery so this module stays
+    # importable in any context that doesn't already pull in Common.
+    from .TypeValidationErrors import (
+        ConfigTypeError,
+        formatMismatch,
+        getStrictMode,
+    )
+
     (name, values) = param
     if name == "ProblemSizes":
         return
@@ -1195,7 +1242,14 @@ def checkParametersAreValid(param, validParams):
             )
         )
 
-    for value in values:
+    strictMode = getStrictMode()
+    runTypeCheck = (
+        strictMode != "off"
+        and name in _expectedParamTypes
+        and name not in _skipTypeCheck
+    )
+
+    for idx, value in enumerate(values):
         if validParams[name] != -1 and value not in validParams[name]:
             msgBase = "Invalid parameter value: {} = {}\nValid values for {} are {}{}."
             msgExt = (
@@ -1208,3 +1262,25 @@ def checkParametersAreValid(param, validParams):
             checkSpaceFillAlgoIsValid(name, value)
         elif name == "SFCWGM":
             checkSpaceFillAlgoWGMIsValid(name, value)
+
+        if runTypeCheck:
+            expectedTypes = _expectedParamTypes[name]
+            actualType = type(value)
+            if actualType not in expectedTypes:
+                # Build keypath. Lists of candidate values use [idx]; a
+                # single-element list (the common case for one value per
+                # key) still gets [0] so the location is unambiguous.
+                base = f"{keyPathPrefix}.{name}" if keyPathPrefix else name
+                keyPath = f"{base}[{idx}]" if len(values) > 1 else base
+                msg = formatMismatch(srcFile, keyPath, value, expectedTypes)
+                if typeMismatchCollector is not None:
+                    typeMismatchCollector.append(msg)
+                elif strictMode == "warn":
+                    # Local import to avoid pulling Common.Utilities at
+                    # module top.
+                    from .Utilities import printWarning
+                    printWarning(f"Type mismatch (warn-only): {msg}")
+                else:
+                    raise ConfigTypeError(msg)
+
+

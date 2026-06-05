@@ -123,8 +123,16 @@ def checkCDBufferAndStrides(problemType, problemSizes, isCEqualD):
 class BenchmarkProcess:
     """Representation of benchmarking parameters and resulting steps"""
 
-    def __init__(self, problemTypeConfig, problemSizeGroupConfig, printIndexAssignmentInfo: bool):
-        """Create from the two sections of a config for a BenchmarkProblem"""
+    def __init__(self, problemTypeConfig, problemSizeGroupConfig, printIndexAssignmentInfo: bool,
+                 keyPathPrefix: str = "", srcFile: str = ""):
+        """Create from the two sections of a config for a BenchmarkProblem.
+
+        ``keyPathPrefix`` (e.g. ``BenchmarkProblems[i][1+groupIdx]``) and
+        ``srcFile`` are threaded through to ``checkParametersAreValid``
+        so type-mismatch errors carry the YAML location of the offending
+        key. Both are optional; an empty prefix produces the unqualified
+        keypath used by ad-hoc callers and tests.
+        """
         self.problemType = ProblemType(problemTypeConfig, printIndexAssignmentInfo)
         self.isBatched = "Batched" in problemTypeConfig and problemTypeConfig["Batched"]
         print2("# BenchmarkProcess beginning {}".format(self.problemType))
@@ -134,7 +142,8 @@ class BenchmarkProcess:
         self.multiValueParams = {}
         self.customKernels = []
         self.sizes = None
-        self.getConfigParameters(self.isBatched, problemSizeGroupConfig)
+        self.getConfigParameters(self.isBatched, problemSizeGroupConfig,
+                                 keyPathPrefix=keyPathPrefix, srcFile=srcFile)
 
         # convert parameter lists to steps
         # previously, multiple benchmark steps were possible
@@ -143,8 +152,17 @@ class BenchmarkProcess:
         self.benchmarkStepIdx = 0
         self.convertParametersToSteps()
 
-    def getConfigParameters(self, isbatched, config):
-        """Parse and validate benchmarking parameters in config"""
+    def getConfigParameters(self, isbatched, config, keyPathPrefix: str = "", srcFile: str = ""):
+        """Parse and validate benchmarking parameters in config.
+
+        ``keyPathPrefix`` is the YAML location of the surrounding
+        ``BenchmarkProblems[i][1+groupIdx]`` slice; per-section keypaths
+        (``.BenchmarkCommonParameters``, ``.ForkParameters``,
+        ``.ForkParameters.Groups[g][e]``) are appended by this method
+        when invoking ``checkParametersAreValid``. ``srcFile`` is
+        forwarded so error messages can include the YAML path and a
+        recovered line number.
+        """
         print2("")
         print2("####################################################################")
         print1("# Filling in Parameters With Defaults")
@@ -223,16 +241,54 @@ class BenchmarkProcess:
         self.factorDimArgs  = FactorDimArgs(self.problemType, factorDimConf)
         self.icacheFlushArgs = icacheFlush
 
-        # validate parameter values
-        configParams = {**benchmarkCommonParams, **forkParams}
-        for param in configParams.items():
-            checkParametersAreValid(param, validParameters)
+        # Validate parameter values. The legacy name/value checks raise
+        # immediately on the spot (unchanged); the new type check
+        # aggregates mismatches into typeMismatchCollector so a single
+        # ConfigTypeError covers every bad-typed key in this benchmark
+        # block (BenchmarkCommonParameters + ForkParameters + Groups).
+        from Tensile.Common.TypeValidationErrors import ConfigTypeError, getStrictMode
+        typeMismatchCollector = []
+
+        commonPrefix = f"{keyPathPrefix}.BenchmarkCommonParameters" if keyPathPrefix \
+                       else "BenchmarkCommonParameters"
+        forkPrefix = f"{keyPathPrefix}.ForkParameters" if keyPathPrefix else "ForkParameters"
+
+        for param in benchmarkCommonParams.items():
+            checkParametersAreValid(
+                param, validParameters,
+                keyPathPrefix=commonPrefix, srcFile=srcFile,
+                typeMismatchCollector=typeMismatchCollector,
+            )
+        for param in forkParams.items():
+            checkParametersAreValid(
+                param, validParameters,
+                keyPathPrefix=forkPrefix, srcFile=srcFile,
+                typeMismatchCollector=typeMismatchCollector,
+            )
 
         # TODO other checks on groups (same params for each entry? no dups between groups?)
-        for list in self.paramGroups:
-            for group in list:
+        for gIdx, list in enumerate(self.paramGroups):
+            for eIdx, group in enumerate(list):
+                groupsPrefix = f"{forkPrefix}.Groups[{gIdx}][{eIdx}]"
                 for k, v in group.items():
-                    checkParametersAreValid((k, [v]), validParameters)
+                    checkParametersAreValid(
+                        (k, [v]), validParameters,
+                        keyPathPrefix=groupsPrefix, srcFile=srcFile,
+                        typeMismatchCollector=typeMismatchCollector,
+                    )
+
+        if typeMismatchCollector:
+            strictMode = getStrictMode()
+            full = (
+                "Type validation failed in BenchmarkProblems section:\n  "
+                + "\n  ".join(typeMismatchCollector)
+                + "\n(Run utilities/fix_yaml_types.py to bulk-fix the tree.)"
+            )
+            if strictMode == "warn":
+                from Tensile.Common import printWarning
+                printWarning(full)
+            elif strictMode != "off":
+                raise ConfigTypeError(full)
 
         params = dict(itertools.chain(*[x.items() for x in defaultBenchmarkCommonParameters]))
         params.update(configParams)
