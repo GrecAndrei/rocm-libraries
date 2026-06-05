@@ -43,6 +43,11 @@ option(ENABLE_CLANG_FORMAT "Enable Clang-Format checks" ON)
 if(NOT ENABLE_CLANG_FORMAT)
     message(WARNING "Clang-Format checks are disabled. CI requires passing clang-format checks.")
 endif()
+if(WIN32)
+    option(ENABLE_CLANG_TIDY "Enable Clang-Tidy checks" OFF)
+else()
+    option(ENABLE_CLANG_TIDY "Enable Clang-Tidy checks" ON)
+endif()
 
 list(
     PREPEND
@@ -66,6 +71,7 @@ list(
     -Wunreachable-code # Warn about unreachable code
     -Wno-error=unused-command-line-argument # Disable error for unused command line arguments
     -Wswitch-default # Warn if a switch statement does not have a default case
+    -Wno-ignored-attributes # disable warning about unused declspec(dllexport)
 )
 
 # NOTE: Workaround until llvm & hip cmake modules fixes symlink logic in their config files;
@@ -86,6 +92,11 @@ endif()
 if(NOT TARGET hipdnn_plugin_sdk)
     find_package(hipdnn_plugin_sdk CONFIG REQUIRED)
 endif()
+
+include(ClangTidy)
+
+# Sanitizer support (Address Sanitizer, etc.)
+include(Sanitizers)
 
 # Setup testing dependencies, tests & clang format
 include(Dependencies)
@@ -144,12 +155,18 @@ dnn_provider_generate_version_header(hipblaslt_provider hipblaslt_plugin_private
 target_link_libraries(hipblaslt_plugin_private PUBLIC roc::hipblaslt hipdnn_data_sdk hipdnn_flatbuffers_sdk hipdnn_plugin_sdk hip::host)
 
 target_compile_options(hipblaslt_plugin_private PRIVATE ${HIPDNN_WARNING_COMPILE_OPTIONS})
+clang_tidy_check(hipblaslt_plugin_private)
 
 add_library(hipblaslt_plugin SHARED HipblasltPluginPublic.cpp)
 target_link_libraries(hipblaslt_plugin PRIVATE hipblaslt_plugin_private)
-target_link_libraries(
-    hipblaslt_plugin PRIVATE "-Xlinker --exclude-libs=ALL"
-) # Hide symbols from linked static libs
+clang_tidy_check(hipblaslt_plugin)
+
+if(NOT WIN32)
+    target_link_libraries(
+        hipblaslt_plugin PRIVATE "-Xlinker --exclude-libs=ALL"
+    ) # Hide symbols from linked static libs
+endif()
+
 target_compile_options(hipblaslt_plugin PRIVATE ${HIPDNN_WARNING_COMPILE_OPTIONS})
 set_target_properties(
     hipblaslt_plugin
