@@ -108,7 +108,6 @@ bool buildGfx1250Pipeline(PassManager& pm, StinkyAsmModule& module) {
         PassFeatureConfig passFeatureConfig;
         std::shared_ptr<DAGScheduleJsonCollector> snapshotCollector;
         if (runScheduler) {
-            passFeatureConfig.barrierConfig.unrollMovableBarrier = true;
             passFeatureConfig.loopConfig.unrollGemm = true;
             passFeatureConfig.dagFeatures.distributeGlobalRead = true;
             passFeatureConfig.passOrderSnapshot.jsonPath = moduleOptions.PassOrderSnapshotJson;
