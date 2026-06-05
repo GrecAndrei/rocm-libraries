@@ -332,7 +332,6 @@ TEST(TestAutotuneTypes, AutotuneConfigDefaults)
     EXPECT_EQ(config.maxIterations, 100);
     EXPECT_EQ(config.windowSize, 3);
     EXPECT_FLOAT_EQ(config.stabilityThreshold, 0.05f);
-    EXPECT_EQ(config.maxWorkspaceBytes, 0u);
     EXPECT_TRUE(config.engineIdFilter.empty());
     EXPECT_EQ(config.rankingFn, nullptr);
     EXPECT_FALSE(config.continueOnPrimingFailure);
@@ -348,7 +347,6 @@ TEST(TestAutotuneTypes, AutotuneConfigCustomValues)
     config.maxIterations = 200;
     config.windowSize = 10;
     config.stabilityThreshold = 0.02f;
-    config.maxWorkspaceBytes = static_cast<size_t>(1024) * 1024;
     config.engineIdFilter = {1, 2, 3};
     config.continueOnPrimingFailure = true;
 
@@ -359,7 +357,6 @@ TEST(TestAutotuneTypes, AutotuneConfigCustomValues)
     EXPECT_EQ(config.maxIterations, 200);
     EXPECT_EQ(config.windowSize, 10);
     EXPECT_FLOAT_EQ(config.stabilityThreshold, 0.02f);
-    EXPECT_EQ(config.maxWorkspaceBytes, 1024u * 1024u);
     EXPECT_EQ(config.engineIdFilter.size(), 3u);
     EXPECT_TRUE(config.continueOnPrimingFailure);
 }
@@ -536,7 +533,7 @@ TEST(TestAutotuneTypes, EngineConfigInfoDefaults)
     EXPECT_TRUE(info.engineName.empty());
     EXPECT_TRUE(info.knobs.empty());
     EXPECT_FALSE(info.supportsExhaustive);
-    EXPECT_EQ(info.workspaceSize, 0);
+    EXPECT_EQ(info.estimatedWorkspaceSize, 0);
 }
 
 // ============================================================================

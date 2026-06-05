@@ -132,7 +132,7 @@ TEST_F(IntegrationAutotuneEndToEnd, AutotuneAutoSingleShotThenExecute)
     ASSERT_EQ(result.code, ErrorCode::OK) << result.err_msg;
 
     int64_t maxWs = 0;
-    result = bundle.graph->get_max_workspace_size(maxWs);
+    result = bundle.graph->get_estimated_max_workspace_size(maxWs);
     ASSERT_EQ(result.code, ErrorCode::OK) << result.err_msg;
     ASSERT_GE(maxWs, 0);
 
@@ -172,7 +172,7 @@ TEST_F(IntegrationAutotuneEndToEnd, AutotuneAutoSingleShotThenExecute)
 }
 
 // Test: build graph -> get_engine_configs -> filter by workspace -> add_engine_configs
-//       -> autotune (maxWorkspaceBytes) -> verify workspace constraint -> execute
+//       -> autotune -> verify workspace constraint -> execute
 TEST_F(IntegrationAutotuneEndToEnd, FilteredAutotuneWithWorkspaceConstraint)
 {
     auto bundle = createConvGraph();
@@ -196,7 +196,7 @@ TEST_F(IntegrationAutotuneEndToEnd, FilteredAutotuneWithWorkspaceConstraint)
     std::vector<EngineConfigInfo> filteredConfigs;
     for(const auto& cfg : configs)
     {
-        if(cfg.workspaceSize <= workspaceLimit)
+        if(cfg.estimatedWorkspaceSize <= workspaceLimit)
         {
             filteredConfigs.push_back(cfg);
         }
@@ -210,17 +210,16 @@ TEST_F(IntegrationAutotuneEndToEnd, FilteredAutotuneWithWorkspaceConstraint)
 
     // Step 4: Allocate workspace (capped at the limit)
     int64_t maxWs = 0;
-    result = bundle.graph->get_max_workspace_size(maxWs);
+    result = bundle.graph->get_estimated_max_workspace_size(maxWs);
     ASSERT_EQ(result.code, ErrorCode::OK) << result.err_msg;
     const int64_t allocatedWs = std::min(maxWs, workspaceLimit);
     const Workspace workspace(static_cast<size_t>(allocatedWs));
 
-    // Step 5: Autotune with maxWorkspaceBytes set as a secondary guard
+    // Step 5: Autotune with pre-filtered engines
     AutotuneConfig config;
     config.mode = TuneMode::AUTO;
     config.strategy = AutotuneStrategy::SINGLE_SHOT;
     config.warmupIterations = 1;
-    config.maxWorkspaceBytes = static_cast<size_t>(workspaceLimit);
 
     std::vector<AutotuneResult> results;
     result = bundle.graph->autotune(
@@ -230,10 +229,10 @@ TEST_F(IntegrationAutotuneEndToEnd, FilteredAutotuneWithWorkspaceConstraint)
     // Step 6: Verify all results respect the workspace constraint
     for(const auto& r : results)
     {
-        EXPECT_LE(r.workspaceSize, static_cast<int64_t>(config.maxWorkspaceBytes))
+        EXPECT_LE(r.workspaceSize, workspaceLimit)
             << "Engine " << r.engineName << " (id=" << r.engineId
             << ") reported workspaceSize=" << r.workspaceSize
-            << " exceeding maxWorkspaceBytes=" << config.maxWorkspaceBytes;
+            << " exceeding workspace limit=" << workspaceLimit;
     }
 
     // Step 7: Execute with the autotuned plan

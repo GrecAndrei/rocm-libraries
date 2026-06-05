@@ -108,7 +108,7 @@ TEST(TestAutotune, BenchmarkingKnobStrippedFromPlanSpec)
 }
 
 // ============================================================================
-// get_max_workspace_size Logic Tests
+// get_estimated_max_workspace_size Logic Tests
 // ============================================================================
 
 TEST(TestAutotune, MaxWorkspaceFromPlanSpecs)
@@ -130,7 +130,7 @@ TEST(TestAutotune, MaxWorkspaceFromPlanSpecs)
     c.workspaceSize = 200;
     specs.push_back(c);
 
-    // Simulate get_max_workspace_size logic
+    // Simulate get_estimated_max_workspace_size logic
     int64_t maxSize = 0;
     for(const auto& spec : specs)
     {
@@ -169,7 +169,6 @@ TEST(TestAutotune, ConfigDefaultsAreValid)
     EXPECT_EQ(config.maxIterations, 100);
     EXPECT_EQ(config.windowSize, 3);
     EXPECT_FLOAT_EQ(config.stabilityThreshold, 0.05f);
-    EXPECT_EQ(config.maxWorkspaceBytes, 0u);
     EXPECT_TRUE(config.engineIdFilter.empty());
     EXPECT_EQ(config.rankingFn, nullptr);
     EXPECT_FALSE(config.continueOnPrimingFailure);
@@ -434,41 +433,6 @@ TEST(TestAutotune, EngineIdFilterSelectsSubset)
     EXPECT_EQ(filtered[1].engineId, 3);
 }
 
-TEST(TestAutotune, MaxWorkspaceBytesFiltering)
-{
-    std::vector<PlanSpec> planSpecs;
-
-    PlanSpec a;
-    a.engineId = 1;
-    a.workspaceSize = 100;
-    planSpecs.push_back(a);
-
-    PlanSpec b;
-    b.engineId = 2;
-    b.workspaceSize = 500;
-    planSpecs.push_back(b);
-
-    PlanSpec c;
-    c.engineId = 3;
-    c.workspaceSize = 200;
-    planSpecs.push_back(c);
-
-    // Limit workspace to 250
-    const size_t maxWorkspaceBytes = 250;
-    std::vector<PlanSpec> filtered;
-    for(const auto& spec : planSpecs)
-    {
-        if(spec.workspaceSize <= static_cast<int64_t>(maxWorkspaceBytes))
-        {
-            filtered.push_back(spec);
-        }
-    }
-
-    EXPECT_EQ(filtered.size(), 2u);
-    EXPECT_EQ(filtered[0].engineId, 1);
-    EXPECT_EQ(filtered[1].engineId, 3);
-}
-
 // ============================================================================
 // EXHAUSTIVE Priming Logic Tests
 // ============================================================================
@@ -499,7 +463,7 @@ TEST(TestAutotune, EngineConfigInfoDefaults)
     EXPECT_TRUE(info.engineName.empty());
     EXPECT_TRUE(info.knobs.empty());
     EXPECT_FALSE(info.supportsExhaustive);
-    EXPECT_EQ(info.workspaceSize, 0);
+    EXPECT_EQ(info.estimatedWorkspaceSize, 0);
 }
 
 // ============================================================================

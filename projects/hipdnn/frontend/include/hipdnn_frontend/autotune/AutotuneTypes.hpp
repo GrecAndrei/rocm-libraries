@@ -65,7 +65,7 @@ struct AutotuneResult
     int64_t engineId = -1; ///< Engine that was benchmarked
     std::string engineName; ///< Human-readable engine name
 
-    /// Knob settings used for this benchmark (composite key with engineId)
+    /// Informational, records knobs explicitly set on the engine.
     std::vector<KnobSetting> knobSettings;
 
     int rank = -1; ///< 0-based ranking (0 = fastest); -1 for failed engines
@@ -136,9 +136,6 @@ struct AutotuneConfig
 
     /// Coefficient of variation threshold for RUN_UNTIL_STABLE convergence (e.g. 0.05 = 5%)
     float stabilityThreshold = 0.05f;
-
-    /// Maximum workspace bytes (0 = no limit; plans exceeding this are skipped)
-    size_t maxWorkspaceBytes = 0;
 
     /// Engine filter: only benchmark candidates with these engine IDs (empty = all engines).
     /// Does not discover or add new candidates. Unmatched engine IDs are silently ignored.

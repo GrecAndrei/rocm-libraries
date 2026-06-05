@@ -149,7 +149,7 @@ static void demonstrateQuickAutotune(hipdnnHandle_t handle, bool largeMode)
 
     // Allocate workspace for the largest engine
     int64_t maxWs = 0;
-    HIPDNN_FE_CHECK(state.graph->get_max_workspace_size(maxWs));
+    HIPDNN_FE_CHECK(state.graph->get_estimated_max_workspace_size(maxWs));
     const utilities::Workspace workspace(static_cast<size_t>(maxWs));
 
     // Configure for speed: AUTO mode, SINGLE_SHOT, minimal warmup
@@ -196,7 +196,7 @@ static void demonstrateExhaustiveAutotune(hipdnnHandle_t handle, bool largeMode)
     HIPDNN_FE_CHECK(state.graph->add_all_engines());
 
     int64_t maxWs = 0;
-    HIPDNN_FE_CHECK(state.graph->get_max_workspace_size(maxWs));
+    HIPDNN_FE_CHECK(state.graph->get_estimated_max_workspace_size(maxWs));
     const utilities::Workspace workspace(static_cast<size_t>(maxWs));
 
     // EXHAUSTIVE mode with SINGLE_SHOT for speed in default mode
@@ -270,7 +270,7 @@ static void demonstrateFilteredAutotune(hipdnnHandle_t handle, bool largeMode)
     {
         const std::string name
             = cfg.engineName.empty() ? getEngineName(cfg.engineId) : cfg.engineName;
-        std::cout << "    " << name << " (workspace=" << cfg.workspaceSize
+        std::cout << "    " << name << " (workspace=" << cfg.estimatedWorkspaceSize
                   << ", exhaustive=" << (cfg.supportsExhaustive ? "yes" : "no")
                   << ", knobs=" << cfg.knobs.size() << ")\n";
     }
@@ -281,7 +281,7 @@ static void demonstrateFilteredAutotune(hipdnnHandle_t handle, bool largeMode)
     std::vector<EngineConfigInfo> filteredConfigs;
     for(const auto& cfg : configs)
     {
-        if(cfg.workspaceSize <= workspaceLimit)
+        if(cfg.estimatedWorkspaceSize <= workspaceLimit)
         {
             filteredConfigs.push_back(cfg);
         }
@@ -301,16 +301,15 @@ static void demonstrateFilteredAutotune(hipdnnHandle_t handle, bool largeMode)
 
     // Allocate workspace up to the limit
     int64_t maxWs = 0;
-    HIPDNN_FE_CHECK(state.graph->get_max_workspace_size(maxWs));
+    HIPDNN_FE_CHECK(state.graph->get_estimated_max_workspace_size(maxWs));
     const int64_t allocatedWs = std::min(maxWs, workspaceLimit);
     const utilities::Workspace workspace(static_cast<size_t>(allocatedWs));
 
-    // Step 4: Autotune with maxWorkspaceBytes as secondary guard
+    // Step 4: Autotune with pre-filtered engines
     AutotuneConfig config;
     config.mode = TuneMode::AUTO;
     config.strategy = AutotuneStrategy::SINGLE_SHOT;
     config.warmupIterations = 1;
-    config.maxWorkspaceBytes = static_cast<size_t>(workspaceLimit);
 
     HIPDNN_FE_CHECK(state.graph->autotune(handle, state.variantPack, workspace.get(), config));
 
@@ -333,7 +332,7 @@ static void demonstrateSaveToConfigFile(hipdnnHandle_t handle, bool largeMode)
     HIPDNN_FE_CHECK(state.graph->add_all_engines());
 
     int64_t maxWs = 0;
-    HIPDNN_FE_CHECK(state.graph->get_max_workspace_size(maxWs));
+    HIPDNN_FE_CHECK(state.graph->get_estimated_max_workspace_size(maxWs));
     const utilities::Workspace workspace(static_cast<size_t>(maxWs));
 
     AutotuneConfig config;

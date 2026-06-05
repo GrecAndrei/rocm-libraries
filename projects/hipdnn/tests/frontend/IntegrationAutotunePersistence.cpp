@@ -148,7 +148,7 @@ TEST_F(IntegrationAutotunePersistence, ConfigFileRoundTrip)
         ASSERT_EQ(result.code, ErrorCode::OK) << result.err_msg;
 
         int64_t maxWs = 0;
-        result = bundle.graph->get_max_workspace_size(maxWs);
+        result = bundle.graph->get_estimated_max_workspace_size(maxWs);
         ASSERT_EQ(result.code, ErrorCode::OK) << result.err_msg;
 
         const Workspace workspace(static_cast<size_t>(maxWs));

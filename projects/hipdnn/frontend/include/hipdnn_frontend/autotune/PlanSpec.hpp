@@ -29,6 +29,10 @@
 namespace hipdnn_frontend
 {
 
+// Read-only snapshot of an engine's configuration. Provided for inspection and
+// filtering only — do not modify fields directly. Use add_engine_*() to create
+// plan specs from selected configs.
+
 /**
  * @brief Rich engine metadata returned by get_engine_configs()
  *
@@ -38,12 +42,14 @@ namespace hipdnn_frontend
  */
 struct EngineConfigInfo
 {
-    int64_t engineId = -1; ///< Unique engine identifier
-    std::string engineName; ///< Human-readable engine name
-    std::vector<Knob> knobs; ///< Available configuration knobs and their constraints
-    bool supportsExhaustive
-        = false; ///< Whether this engine has a benchmarking knob for cache priming
-    int64_t workspaceSize = 0; ///< Workspace bytes required by this engine
+    int64_t engineId = -1; // Used by add_engine_configs() to create the plan spec
+    std::string engineName; // Informational, for filtering and logging
+    std::vector<Knob> knobs; // Informational, shows the engine's available knobs.
+        // Ignored by add_engine_*() functions. Use add_engine_variants()
+        // or add_engine() to set custom knobs on engines for autotune().
+    bool supportsExhaustive = false; // Informational. For filtering exhaustive-capable engines
+    int64_t estimatedWorkspaceSize
+        = 0; // Informational, pre-compile workspace estimate, for filtering.
 };
 
 /**

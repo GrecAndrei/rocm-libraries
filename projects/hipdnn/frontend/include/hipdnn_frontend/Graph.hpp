@@ -2409,7 +2409,7 @@ public:
                                                                &wsSize);
             if(wsStatus == HIPDNN_STATUS_SUCCESS)
             {
-                info.workspaceSize = wsSize;
+                info.estimatedWorkspaceSize = wsSize;
             }
 
             configs.push_back(std::move(info));
@@ -2455,7 +2455,7 @@ public:
         {
             PlanSpec spec;
             spec.engineId = config.engineId;
-            spec.workspaceSize = config.workspaceSize;
+            spec.workspaceSize = config.estimatedWorkspaceSize;
             // Default knob settings (empty — engine uses its defaults)
 
             addPlanSpecIfUnique(spec);
@@ -2820,7 +2820,7 @@ public:
     // ── Autotune: Workspace Query ───────────────────────────────────────
 
     /**
-     * @brief Get the maximum workspace size across all collected plan specs
+     * @brief Get the estimated maximum workspace size across all collected plan specs
      *
      * Iterates the plan specs added by add_engine_*() calls and returns
      * the maximum workspace requirement. Use this to allocate workspace
@@ -2830,7 +2830,7 @@ public:
      * @return ErrorCode::OK on success
      */
     // NOLINTNEXTLINE(readability-identifier-naming)
-    Error get_max_workspace_size(int64_t& maxSize) const
+    Error get_estimated_max_workspace_size(int64_t& maxSize) const
     {
         maxSize = 0;
         for(const auto& spec : _planSpecs)
@@ -2871,7 +2871,7 @@ public:
      * graph.build_operation_graph(handle);
      * graph.add_all_engines();
      * int64_t maxWs;
-     * graph.get_max_workspace_size(maxWs);
+     * graph.get_estimated_max_workspace_size(maxWs);
      * void* workspace;
      * hipMalloc(&workspace, maxWs);
      *
@@ -3032,22 +3032,13 @@ public:
                 {
                     continue;
                 }
-                if(config.maxWorkspaceBytes > 0
-                   && spec.workspaceSize > static_cast<int64_t>(config.maxWorkspaceBytes))
-                {
-                    HIPDNN_FE_LOG_INFO("Skipping engine " << spec.engineId << " (workspace "
-                                                          << spec.workspaceSize << " exceeds limit "
-                                                          << config.maxWorkspaceBytes << ")");
-                    continue;
-                }
                 filteredSpecs.push_back(spec);
             }
 
             if(filteredSpecs.empty())
             {
                 return {ErrorCode::INVALID_VALUE,
-                        "No plan specs remain after filtering. Check engineIdFilter and "
-                        "maxWorkspaceBytes."};
+                        "No plan specs remain after filtering. Check engineIdFilter."};
             }
 
             // ── EXHAUSTIVE priming phase ────────────────────────────────
@@ -3273,16 +3264,6 @@ public:
                     continue;
                 }
 
-                // Apply workspace limit
-                if(config.maxWorkspaceBytes > 0
-                   && plan.workspaceSize > static_cast<int64_t>(config.maxWorkspaceBytes))
-                {
-                    HIPDNN_FE_LOG_INFO("Skipping engine " << plan.engineId << " (workspace "
-                                                          << plan.workspaceSize << " exceeds limit "
-                                                          << config.maxWorkspaceBytes << ")");
-                    continue;
-                }
-
                 compiledPlanMap.push_back({i, i}); // identity mapping: planIndex == specIndex
             }
 
@@ -3290,7 +3271,7 @@ public:
             {
                 return {ErrorCode::INVALID_VALUE,
                         "No compiled plans remain after filtering. "
-                        "Check engineIdFilter and maxWorkspaceBytes."};
+                        "Check engineIdFilter."};
             }
         }
 
