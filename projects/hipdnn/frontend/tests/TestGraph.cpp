@@ -7891,7 +7891,7 @@ TEST_F(TestGraph, DeselectEnginesEmptyList)
     hipdnn_frontend::GraphTestUtils graph;
     graph.injectPlanSpec(1, 0);
 
-    auto& ref = graph.deselect_engines({});
+    auto& ref = graph.deselect_engines(std::vector<std::string>{});
     EXPECT_EQ(&ref, &graph);
     EXPECT_EQ(graph.getPlanSpecsCount(), 1u);
 }
@@ -8556,4 +8556,119 @@ TEST_F(TestGraph, AutotuneAcceptsExtraUidsInVariantPack)
         EXPECT_EQ(result.err_msg.find("missing"), std::string::npos)
             << "Extra UIDs should not cause UID validation failure: " << result.err_msg;
     }
+}
+
+// ============================================================================
+// Stage 18: add_engines() batch method tests
+// ============================================================================
+
+TEST_F(TestGraph, AddEnginesCreatesMultiplePlanSpecs)
+{
+    using hipdnn_data_sdk::utilities::HIPBLASLT_ENGINE_ID;
+    using hipdnn_data_sdk::utilities::MIOPEN_ENGINE_ID;
+
+    hipdnn_frontend::GraphTestUtils graph;
+    createBasicBatchnormGraph(graph);
+
+    auto buildResult = graph.build_operation_graph(_handle);
+    ASSERT_TRUE(buildResult.is_good()) << buildResult.err_msg;
+
+    // Mock engine knob queries so add_engine() validation passes
+    ON_CALL(*_mockBackend, backendGetAttribute(_, HIPDNN_ATTR_ENGINE_KNOB_INFO, _, _, _, _))
+        .WillByDefault([](hipdnnBackendDescriptor_t,
+                          hipdnnBackendAttributeName_t,
+                          hipdnnBackendAttributeType_t,
+                          int64_t,
+                          int64_t* elementCount,
+                          void*) {
+            if(elementCount)
+            {
+                *elementCount = 0;
+            }
+            return HIPDNN_STATUS_SUCCESS;
+        });
+
+    auto result = graph.add_engines({MIOPEN_ENGINE_ID, HIPBLASLT_ENGINE_ID});
+    EXPECT_TRUE(result.is_good()) << result.err_msg;
+    EXPECT_EQ(graph.getPlanSpecsCount(), 2u);
+}
+
+TEST_F(TestGraph, AddEnginesReturnsErrorOnInvalidId)
+{
+    hipdnn_frontend::GraphTestUtils graph;
+    createBasicBatchnormGraph(graph);
+
+    auto buildResult = graph.build_operation_graph(_handle);
+    ASSERT_TRUE(buildResult.is_good()) << buildResult.err_msg;
+
+    // Let the engine knob query fail for all engines to simulate invalid IDs
+    ON_CALL(*_mockBackend, backendGetAttribute(_, HIPDNN_ATTR_ENGINE_KNOB_INFO, _, _, _, _))
+        .WillByDefault(Return(HIPDNN_STATUS_NOT_SUPPORTED));
+
+    auto result = graph.add_engines({99999});
+    EXPECT_EQ(result.code, ErrorCode::INVALID_VALUE);
+}
+
+TEST_F(TestGraph, AddEnginesMutualExclusionGuard)
+{
+    hipdnn_frontend::GraphTestUtils graph;
+    graph.injectDummyCompiledPlan();
+    auto result = graph.add_engines({1, 2});
+    EXPECT_EQ(result.code, ErrorCode::INVALID_VALUE);
+    EXPECT_NE(result.err_msg.find("add_engines()"), std::string::npos)
+        << "Error message should mention add_engines(): " << result.err_msg;
+}
+
+// ============================================================================
+// Stage 18: deselect_engines() by ID tests
+// ============================================================================
+
+TEST_F(TestGraph, DeselectEnginesByIdRemovesFromPlanSpecs)
+{
+    hipdnn_frontend::GraphTestUtils graph;
+    graph.injectPlanSpec(10, 0);
+    graph.injectPlanSpec(20, 0);
+    graph.injectPlanSpec(30, 0);
+
+    auto& ref = graph.deselect_engines(std::vector<int64_t>{10, 30});
+    EXPECT_EQ(&ref, &graph);
+    EXPECT_EQ(graph.getPlanSpecsCount(), 1u);
+    auto ids = graph.getPlanSpecEngineIds();
+    EXPECT_EQ(ids, (std::vector<int64_t>{20}));
+}
+
+TEST_F(TestGraph, DeselectEnginesByIdRemovesFromCompiledPlans)
+{
+    hipdnn_frontend::GraphTestUtils graph;
+    graph.injectCompiledPlan(10, 0);
+    graph.injectCompiledPlan(20, 0);
+    graph.injectCompiledPlan(30, 0);
+
+    graph.deselect_engines(std::vector<int64_t>{20});
+    EXPECT_EQ(graph.getCompiledPlansCount(), 2u);
+    auto ids = graph.getCompiledPlanEngineIds();
+    EXPECT_EQ(ids, (std::vector<int64_t>{10, 30}));
+}
+
+TEST_F(TestGraph, DeselectEnginesByIdEmptyVector)
+{
+    hipdnn_frontend::GraphTestUtils graph;
+    graph.injectPlanSpec(1, 0);
+
+    auto& ref = graph.deselect_engines(std::vector<int64_t>{});
+    EXPECT_EQ(&ref, &graph);
+    EXPECT_EQ(graph.getPlanSpecsCount(), 1u);
+}
+
+// ============================================================================
+// Stage 18: Tier 3 autotune overload tests
+// ============================================================================
+
+TEST_F(TestGraph, Tier3AutotuneRequiresCompiledPlans)
+{
+    hipdnn_frontend::GraphTestUtils graph;
+    // No compiled plans injected — should fail with "No autotuning candidates"
+    std::unordered_map<int64_t, void*> pack = {{0, reinterpret_cast<void*>(0x1)}};
+    auto result = graph.autotune(_handle, pack, nullptr, nullptr);
+    EXPECT_TRUE(result.is_bad());
 }

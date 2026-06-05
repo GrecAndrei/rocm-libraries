@@ -2557,6 +2557,42 @@ public:
     }
 
     /**
+     * @brief Add multiple engines with default knob settings
+     *
+     * Convenience method that loops over the provided engine IDs and calls
+     * add_engine(id) for each one. Stops on the first error and returns it.
+     *
+     * @param engineIds Engine IDs to add (each uses default knob settings)
+     * @return ErrorCode::OK on success, or the first error encountered
+     */
+    // NOLINTNEXTLINE(readability-identifier-naming)
+    Error add_engines(const std::vector<int64_t>& engineIds)
+    {
+        if(!_compiledPlans.empty())
+        {
+            return {ErrorCode::INVALID_VALUE,
+                    "Cannot call add_engines() after create_execution_plans()/build(). "
+                    "The plan-spec path and compiled-plan path are mutually exclusive."};
+        }
+
+        if(!hasReadyGraphDesc())
+        {
+            return {ErrorCode::HIPDNN_BACKEND_ERROR,
+                    "Graph has not been built. Call build_operation_graph() first."};
+        }
+
+        for(const auto& id : engineIds)
+        {
+            auto err = add_engine(id);
+            if(err.is_bad())
+            {
+                return err;
+            }
+        }
+        return {ErrorCode::OK, ""};
+    }
+
+    /**
      * @brief Add multiple engine variants with explicit knob settings
      *
      * Each EngineVariant becomes one plan spec. Engines that are not valid
@@ -3752,6 +3788,204 @@ public:
         return autotune(handle, variantPack, workspace, config, storageConfig, results);
     }
 
+    // ── Autotune: Tier 2 (workspace-limited) ───────────────────────────
+
+    /**
+     * @brief Autotune with a workspace size limit (UID-based variant pack)
+     *
+     * Runs the primary autotune() to compile and benchmark all candidates,
+     * then filters out any compiled plan whose actual workspace exceeds
+     * @c workspaceSize. Filtered plans appear in @c results (if requested)
+     * with succeeded=false and an explanatory errorMessage.
+     *
+     * If the winning plan is filtered out, the next-best plan that fits
+     * is selected. If no plans fit, an error is returned.
+     *
+     * @param handle The hipDNN handle
+     * @param variantPack Map from tensor UID to device memory pointers
+     * @param workspace Pointer to workspace memory
+     * @param workspaceSize Maximum allowed workspace size in bytes
+     * @param config Autotuning configuration
+     * @param storageConfig File output parameters
+     * @param[out] results Per-engine benchmarking results (optional)
+     * @return ErrorCode::OK on success
+     */
+    Error autotune(hipdnnHandle_t handle,
+                   const std::unordered_map<int64_t, void*>& variantPack,
+                   void* workspace,
+                   int64_t workspaceSize,
+                   const AutotuneConfig& config = {},
+                   const AutotuneStorageConfig& storageConfig = {},
+                   std::vector<AutotuneResult>* results = nullptr)
+    {
+        // Run the primary (Tier 1) autotune to compile and benchmark all plans
+        std::vector<AutotuneResult> allResults;
+        auto err = autotune(handle, variantPack, workspace, config, storageConfig, &allResults);
+        if(err.is_bad())
+        {
+            if(results != nullptr)
+            {
+                *results = std::move(allResults);
+            }
+            return err;
+        }
+
+        // Build a set of engine IDs that exceed the workspace limit
+        std::unordered_set<int64_t> filteredEngineIds;
+        for(const auto& plan : _compiledPlans)
+        {
+            int64_t actualWs = plan.workspaceSize;
+            // Query workspace if not yet cached
+            if(actualWs < 0 && plan.executionPlanDesc && plan.executionPlanDesc->valid())
+            {
+                int64_t wsSize = 0;
+                detail::hipdnnBackend()->backendGetAttribute(
+                    plan.executionPlanDesc->get(),
+                    HIPDNN_ATTR_EXECUTION_PLAN_WORKSPACE_SIZE,
+                    HIPDNN_TYPE_INT64,
+                    1,
+                    nullptr,
+                    &wsSize);
+                actualWs = wsSize;
+            }
+            if(actualWs > workspaceSize)
+            {
+                filteredEngineIds.insert(plan.engineId);
+            }
+        }
+
+        // Remove plans that don't fit
+        if(!filteredEngineIds.empty())
+        {
+            _compiledPlans.erase(std::remove_if(_compiledPlans.begin(),
+                                                _compiledPlans.end(),
+                                                [&filteredEngineIds](const CompiledPlan& p) {
+                                                    return filteredEngineIds.count(p.engineId) > 0;
+                                                }),
+                                 _compiledPlans.end());
+
+            // Mark filtered plans in results
+            for(auto& r : allResults)
+            {
+                if(filteredEngineIds.count(r.engineId) > 0 && r.succeeded)
+                {
+                    r.succeeded = false;
+                    r.errorMessage = "Workspace size " + std::to_string(r.workspaceSize)
+                                     + " exceeds limit " + std::to_string(workspaceSize);
+                    HIPDNN_FE_LOG_WARN("autotune: engine " << r.engineId << " filtered — workspace "
+                                                           << r.workspaceSize << " > limit "
+                                                           << workspaceSize);
+                }
+            }
+
+            // Fix active plan index
+            if(_compiledPlans.empty())
+            {
+                _activePlanIndex = 0;
+                if(results != nullptr)
+                {
+                    *results = std::move(allResults);
+                }
+                return {ErrorCode::INVALID_VALUE,
+                        "No execution plans fit within the workspace limit of "
+                            + std::to_string(workspaceSize) + " bytes."};
+            }
+
+            // Select the best remaining plan (first in rank order that still exists)
+            _activePlanIndex = 0;
+        }
+
+        if(results != nullptr)
+        {
+            *results = std::move(allResults);
+        }
+        return {ErrorCode::OK, ""};
+    }
+
+    /**
+     * @brief Autotune with a workspace size limit (tensor-attribute variant pack)
+     *
+     * Convenience overload that converts the tensor-to-pointer map to
+     * a UID-based variant pack before calling the workspace-limited autotune.
+     */
+    Error autotune(hipdnnHandle_t handle,
+                   const std::unordered_map<std::shared_ptr<TensorAttributes>, void*>& tensorLookup,
+                   void* workspace,
+                   int64_t workspaceSize,
+                   const AutotuneConfig& config = {},
+                   const AutotuneStorageConfig& storageConfig = {},
+                   std::vector<AutotuneResult>* results = nullptr)
+    {
+        std::unordered_map<int64_t, void*> variantPack;
+        for(const auto& [tensor, ptr] : tensorLookup)
+        {
+            if(tensor && tensor->has_uid())
+            {
+                variantPack[tensor->get_uid()] = ptr;
+            }
+            else
+            {
+                return {ErrorCode::INVALID_VALUE,
+                        "Tensor in tensor lookup is null or does not have a valid uid."};
+            }
+        }
+        return autotune(
+            handle, variantPack, workspace, workspaceSize, config, storageConfig, results);
+    }
+
+    // ── Autotune: Tier 3 (cuDNN-compatible forwarding) ─────────────────
+
+    /**
+     * @brief cuDNN-compatible autotune overload (UID-based variant pack)
+     *
+     * Forwards to the primary (Tier 1) autotune with default configs.
+     * The @c user_impl parameter is accepted for cuDNN API compatibility
+     * but is ignored. The variant pack is accepted as a non-const reference
+     * to match the cuDNN signature; it is forwarded as const.
+     *
+     * This overload is intended for the compiled-plan path (callers used
+     * create_execution_plans() + build_plans() before calling).
+     *
+     * @param handle The hipDNN handle
+     * @param variantPack Map from tensor UID to device memory pointers
+     * @param workspace Pointer to workspace memory
+     * @param user_impl Ignored (cuDNN compatibility)
+     * @return ErrorCode::OK on success
+     */
+    Error autotune(hipdnnHandle_t handle,
+                   std::unordered_map<int64_t, void*>& variantPack,
+                   void* workspace,
+                   void* userImpl = nullptr)
+    {
+        (void)userImpl;
+        const auto& constPack = variantPack;
+        return autotune(handle, constPack, workspace);
+    }
+
+    /**
+     * @brief cuDNN-compatible autotune overload (tensor-attribute variant pack)
+     *
+     * Forwards to the Tier 1 tensor-attribute autotune with default configs.
+     * The @c user_impl parameter is accepted for cuDNN API compatibility
+     * but is ignored. The tensor lookup is accepted as a non-const reference
+     * to match the cuDNN signature; it is forwarded as const.
+     *
+     * @param handle The hipDNN handle
+     * @param tensorLookup Map from tensor attributes to device memory pointers
+     * @param workspace Pointer to workspace memory
+     * @param user_impl Ignored (cuDNN compatibility)
+     * @return ErrorCode::OK on success
+     */
+    Error autotune(hipdnnHandle_t handle,
+                   std::unordered_map<std::shared_ptr<TensorAttributes>, void*>& tensorLookup,
+                   void* workspace,
+                   void* userImpl = nullptr)
+    {
+        (void)userImpl;
+        const auto& constLookup = tensorLookup;
+        return autotune(handle, constLookup, workspace);
+    }
+
     // NOLINTBEGIN(readability-identifier-naming)
 
     /**
@@ -4105,6 +4339,66 @@ public:
         {
             return *this;
         }
+
+        if(!_planSpecs.empty())
+        {
+            auto before = _planSpecs.size();
+            _planSpecs.erase(std::remove_if(_planSpecs.begin(),
+                                            _planSpecs.end(),
+                                            [&barredIds](const PlanSpec& s) {
+                                                return barredIds.count(s.engineId) > 0;
+                                            }),
+                             _planSpecs.end());
+            HIPDNN_FE_LOG_INFO("deselect_engines(): removed " << (before - _planSpecs.size())
+                                                              << " of " << before << " plan specs");
+        }
+        else if(!_compiledPlans.empty())
+        {
+            auto before = _compiledPlans.size();
+            _compiledPlans.erase(std::remove_if(_compiledPlans.begin(),
+                                                _compiledPlans.end(),
+                                                [&barredIds](const CompiledPlan& p) {
+                                                    return barredIds.count(p.engineId) > 0;
+                                                }),
+                                 _compiledPlans.end());
+            HIPDNN_FE_LOG_INFO("deselect_engines(): removed " << (before - _compiledPlans.size())
+                                                              << " of " << before
+                                                              << " compiled plans");
+        }
+        else
+        {
+            HIPDNN_FE_LOG_WARN("deselect_engines() called with no plans or specs");
+        }
+
+        return *this;
+    }
+
+    /**
+     * @brief Deselect (remove) engines by ID from plan specs or compiled plans
+     *
+     * Removes any plan spec or compiled plan whose engine ID appears in
+     * @c engine_ids. Works on whichever path is active: @c _planSpecs
+     * (plan-spec path) or @c _compiledPlans (compiled-plan path).
+     *
+     * @note Calling this method invalidates any previously-saved plan indices.
+     *
+     * @param engine_ids Engine IDs to deselect
+     * @return Reference to @c *this for method chaining
+     */
+    Graph& deselect_engines(const std::vector<int64_t>& engine_ids)
+    {
+        if(engine_ids.empty())
+        {
+            return *this;
+        }
+
+        if(!_planSpecs.empty() && !_compiledPlans.empty())
+        {
+            HIPDNN_FE_LOG_ERROR("Both plan specs and compiled plans present (internal error)");
+            return *this;
+        }
+
+        std::unordered_set<int64_t> barredIds(engine_ids.begin(), engine_ids.end());
 
         if(!_planSpecs.empty())
         {
