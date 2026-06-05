@@ -1046,6 +1046,7 @@ def _unified_tiled_spec_from_problem(problem, knobs: dict, arch: str = "gfx950")
     use_mfma_32x32x8 = False
     use_transposed_qk_32x32_ovr = False
     use_conflict_free_v_ovr = False
+    use_conflict_free_v_store_ovr = False
     use_k_single_buffer_ovr = False
 
     # gfx942 flash pipeline: LEVELED flag-gated D128 fp16 wide-atom variant.
@@ -1127,6 +1128,14 @@ def _unified_tiled_spec_from_problem(problem, knobs: dict, arch: str = "gfx950")
     # nw>1). Default UNSET -> shipped L4 (WG=64), byte-identical. gfx942-L4-only.
     _flash_wide_env = os.environ.get("HIPDNN_GFX942_FLASH_WIDE", "")
     _flash_wide = int(_flash_wide_env) if _flash_wide_env in ("2", "4") else 0
+    # Stream 2 GRIND: store-path conflict-free V (vehicle (c)). A DEDICATED env
+    # (NOT overloading the 1-5 FLASH_PIPELINE level) toggles the new store
+    # vehicle on top of the wide (WG=256) transposed-x8 geometry. It rides the
+    # default level-4 + FLASH_WIDE=4 baseline and adds the in-register perm_b32
+    # V transpose. Distinct spec field -> distinct kernel name ("cfvst") -> no
+    # JitCache aliasing with the wide4 baseline. Default UNSET -> byte-identical.
+    _cfv_store_env = os.environ.get("HIPDNN_GFX942_CFV_STORE", "")
+    _cfv_store = _cfv_store_env in ("1", "true", "True")
     # FLASH_WIDE rides the default level-4 (transposed-x8 + k1buf) geometry for
     # the qualifying L4 shape (``_flash_level`` is already "4" there); it only
     # changes num_warps via the wide-tile chooser below, never the level.
@@ -1138,6 +1147,14 @@ def _unified_tiled_spec_from_problem(problem, knobs: dict, arch: str = "gfx950")
         # (default level 4 has no cfv); it is reachable ONLY via an explicit
         # HIPDNN_GFX942_FLASH_PIPELINE=3/5 testing override.
         use_conflict_free_v_ovr = _flash_level in ("3", "5")
+        # Store-path cfv (vehicle (c)) is reachable via the dedicated env only,
+        # and only on the transposed-x8 geometry (levels 2-5). Mutually
+        # exclusive with the vehicle-(a) cfv override above (spec asserts it).
+        use_conflict_free_v_store_ovr = (
+            _cfv_store
+            and _flash_level in ("2", "3", "4", "5")
+            and not use_conflict_free_v_ovr
+        )
         use_k_single_buffer_ovr = _flash_level in ("4", "5")
         block_m_per_warp = 32  # one M=32 atom per warp
         hd = int(problem.head_size)
@@ -1271,6 +1288,10 @@ def _unified_tiled_spec_from_problem(problem, knobs: dict, arch: str = "gfx950")
     # 3). Only pass it when requested, keeping gfx950 construction unchanged.
     if use_conflict_free_v_ovr:
         spec_kwargs["use_conflict_free_v"] = True
+    # ``use_conflict_free_v_store`` (vehicle (c)) is a gfx942-only spec field
+    # reached via HIPDNN_GFX942_CFV_STORE on the wide transposed-x8 geometry.
+    if use_conflict_free_v_store_ovr:
+        spec_kwargs["use_conflict_free_v_store"] = True
     # ``use_k_single_buffer`` is a gfx942-only spec field (flash level 4). Only
     # pass it when requested, keeping gfx950 construction byte-identical.
     if use_k_single_buffer_ovr:
