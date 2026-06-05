@@ -772,10 +772,12 @@ def validateProblemTypeParameterTypes(state, srcFile=""):
       state: The ProblemType state dict (parameter name -> value).
       srcFile: The YAML source file path, included in warning messages.
   """
-  # Import collector infrastructure from Solution inside the function to avoid
-  # circular dependency (Naming → Problem → Solution → Naming).
-  # The collector is shared between Solution and ProblemType validation.
-  from Tensile.SolutionStructs.Solution import _typeMismatchCollector, _skipTypeCheck
+  # _skipTypeCheck lives in Common/ValidParameters (Common -> Solution import
+  # direction), but the type-mismatch collector still lives in Solution.
+  # Import the collector inside the function to avoid the historical
+  # Naming -> Problem -> Solution -> Naming circular dependency.
+  from Tensile.SolutionStructs.Solution import _typeMismatchCollector
+  from Tensile.Common.ValidParameters import _skipTypeCheck
 
   for key, value in state.items():
     if key not in _expectedProblemTypeParamTypes or key in _skipTypeCheck:

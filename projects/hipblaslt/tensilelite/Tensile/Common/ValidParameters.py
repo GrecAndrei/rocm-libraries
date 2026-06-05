@@ -1096,6 +1096,58 @@ newMIValidParameters = {
     'WorkGroup': -1,
 }
 
+
+# Expected-type derivation for solution parameters --------------------------
+#
+# These helpers live here, next to `validParameters`, because that registry
+# is the source of truth for "what types this parameter is allowed to take".
+# Consumers (Solution.validateParameterTypes, and the input-YAML strict gate
+# in checkParametersAreValid) import them from this module. Keeping the
+# registry and its derived expected-types map co-located preserves the
+# Common -> Solution import direction; the prior layout (defined inside
+# Solution.py and imported back by ValidParameters extensions) would have
+# introduced a Common -> Solution reverse import.
+
+def _getExpectedTypes(validParams):
+    """Build a map from parameter name to the set of allowed Python types.
+
+    Uses the validParameters registry as the source of truth.  For each
+    parameter whose allowed-value list is not the sentinel ``-1``, we
+    collect the concrete ``type()`` of every allowed value.  Because
+    Python ``bool`` is a subclass of ``int``, we use ``type()`` (not
+    ``isinstance``) so that ``bool`` and ``int`` are kept distinct.
+
+    Returns:
+        dict[str, set[type]]: e.g. {"UseCustomMainLoopSchedule": {int},
+                                     "BufferLoad": {bool}, ...}
+    """
+    typeMap = {}
+    for name, allowedValues in validParams.items():
+        if allowedValues == -1:
+            continue
+        if isinstance(allowedValues, list) and len(allowedValues) > 0:
+            typeMap[name] = set(type(v) for v in allowedValues)
+    return typeMap
+
+# Pre-compute once at import time so the per-Solution cost is a dict lookup.
+_expectedParamTypes = _getExpectedTypes(validParameters)
+
+# Parameters to skip during type validation because YAML serialization
+# inherently produces a different type (e.g. [9, 0, 10] -> list) and the
+# conversion to the canonical type happens downstream in the pipeline.
+# Also skip DataType* parameters as they are converted from strings/ints to
+# DataType objects.
+_skipTypeCheck = {
+    "ISA",
+    "DataType", "DataTypeA", "DataTypeB", "DataTypeC", "DataTypeD", "DataTypeE",
+    "MacDataTypeA", "MacDataTypeB",
+    "DataTypeAmaxD", "DataTypeAmaxC", "DataTypeAmaxA", "DataTypeAmaxB",
+    "DataTypeMXSA", "DataTypeMXSB",
+    "DestDataType", "ComputeDataType",
+    "F32XdlMathOp",  # Also converted to DataType
+}
+
+
 def checkSpaceFillAlgoIsValid(name, value):
     if type(value) != list:
         msgBase = "Invalid parameter value: {} = {}\nMust be a list of values"
