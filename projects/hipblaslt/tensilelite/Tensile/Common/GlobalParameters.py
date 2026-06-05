@@ -650,6 +650,41 @@ def printCapabilitiesTable(isaInfoMap: Dict[str, IsaInfo]):
     printTable([headerRow] + asmCapRows + archCapRows)
 
 
+# Override table for globalParameters keys whose default value is None
+# (and therefore have no usable type to derive from type(default)). Each
+# entry is the set of permitted types for the user-supplied value.
+# Skipping None-defaulted keys wholesale was a coverage gap that allowed
+# e.g. RocProfCounter: 42 to pass silently.
+globalParameterTypeOverrides = {
+    "ClientExecutionLockPath": {type(None), str},   # path or unset
+    "ROCmSMIPath":             {type(None), str},   # path, populated at startup
+    "CmakeCxxCompiler":        {type(None), str},   # path, populated at startup
+    "RocProfCounter":          {type(None), str},   # counter spec or None
+}
+
+
+def _assertOverrideTableCovers(defaults_dict, override_dict):
+    """Module-init guard: every None-defaulted key has an override entry.
+
+    Run at module-import time against the literal defaults in
+    globalParameters. New None defaults added without an override
+    annotation must fail here so the coverage gap is caught locally,
+    not at the first Tensile invocation that happens to read the key.
+    """
+    missing = [k for k, v in defaults_dict.items()
+               if v is None and k not in override_dict]
+    if missing:
+        raise RuntimeError(
+            "globalParameterTypeOverrides is missing entries for the "
+            f"following None-defaulted globalParameters: {missing!r}. "
+            "Add type annotations for each to "
+            "Tensile/Common/GlobalParameters.py."
+        )
+
+
+_assertOverrideTableCovers(globalParameters, globalParameterTypeOverrides)
+
+
 def assignGlobalParameters(config, isaInfoMap: Dict[IsaVersion, IsaInfo]):
     """
     Assign Global Parameters
@@ -761,13 +796,63 @@ def assignGlobalParameters(config, isaInfoMap: Dict[IsaVersion, IsaInfo]):
         "Experimental",
         "GenSolTable",
     ]
+
+    # Step 5: strict gate for GlobalParameters. Promote unknown keys
+    # from a printWarning to a ConfigTypeError and type-check each
+    # user-supplied value against either the override table (for
+    # None-defaulted keys) or type(default). Aggregates all mismatches
+    # into one error so the user sees every bad key at once.
+    from .TypeValidationErrors import ConfigTypeError, formatMismatch, getStrictMode
+
+    strictMode = getStrictMode()
+    errors = []
+
+    # MinimumRequiredVersion is validated separately at the top of
+    # assignGlobalParameters; skip it in the type loop here.
+    typeCheckSkip = {"MinimumRequiredVersion"}
+
     for key in config:
         if key in ignoreKeys:
             continue
         value = config[key]
         if key not in globalParameters:
-            printWarning("Global parameter %s = %s unrecognised." % (key, value))
+            errors.append(
+                f"Unknown global parameter '{key}' = {value!r}. "
+                f"Add it to globalParameters in GlobalParameters.py if it is real, "
+                f"or remove it from the config."
+            )
+            globalParameters[key] = value
+            continue
+
+        if strictMode != "off" and key not in typeCheckSkip:
+            # Determine expected types.
+            if key in globalParameterTypeOverrides:
+                expectedTypes = globalParameterTypeOverrides[key]
+            else:
+                default = globalParameters[key]
+                # None default without override would have been caught
+                # by _assertOverrideTableCovers at module import time;
+                # this branch is dead defensive coding.
+                if default is None:
+                    globalParameters[key] = value
+                    continue
+                expectedTypes = {type(default)}
+
+            if type(value) not in expectedTypes:
+                errors.append(formatMismatch("", f"GlobalParameters.{key}", value, expectedTypes))
+
         globalParameters[key] = value
+
+    if errors:
+        full = (
+            "GlobalParameters validation failed:\n  "
+            + "\n  ".join(errors)
+            + "\n(Run utilities/fix_yaml_types.py to bulk-fix the tree.)"
+        )
+        if strictMode == "warn":
+            printWarning(full)
+        elif strictMode != "off":
+            raise ConfigTypeError(full)
 
 
 def setupRestoreClocks():
