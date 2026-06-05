@@ -181,6 +181,7 @@ _INTRINSIC_DECLS: Dict[str, str] = {
     "log2.f32": "declare float @llvm.log2.f32(float)",
     "sqrt.f32": "declare float @llvm.sqrt.f32(float)",
     "rsqrt.f32": "declare float @llvm.amdgcn.rsq.f32(float)",
+    "rcp.f32": "declare float @llvm.amdgcn.rcp.f32(float)",
     "tanh.f32": "declare float @llvm.tanh.f32(float)",
     "maxnum.f32": "declare float @llvm.maxnum.f32(float, float)",
     "maxnum.f16": "declare half @llvm.maxnum.f16(half, half)",
@@ -244,6 +245,32 @@ _INTRINSIC_DECLS: Dict[str, str] = {
     "wmma.f32.16x16x16.bf16": (
         "declare <8 x float> @llvm.amdgcn.wmma.f32.16x16x16.bf16.v8f32.v16i16("
         "<16 x i16>, <16 x i16>, <8 x float>)"
+    ),
+    # RDNA3/3.5 (gfx11) integer WMMA — wave32 16x16x16 iu8. Operands are
+    # <4 x i32> (16 int8 packed 4-per-i32), accumulator/result <8 x i32>. The
+    # signature carries i1 signedness flags (unsignedA/unsignedB) before each
+    # matrix operand and a trailing i1 clamp. Emission goes through
+    # Gfx11RdnaBackend.emit_wmma. LLVM-lowered to v_wmma_i32_16x16x16_iu8.
+    "wmma.i32.16x16x16.iu8": (
+        "declare <8 x i32> @llvm.amdgcn.wmma.i32.16x16x16.iu8.v8i32.v4i32("
+        "i1, <4 x i32>, i1, <4 x i32>, <8 x i32>, i1)"
+    ),
+    # RDNA3/3.5 (gfx11) integer WMMA — wave32 16x16x16 iu4. Operands are
+    # <2 x i32> (16 int4 packed 8-per-i32), accumulator/result <8 x i32>.
+    "wmma.i32.16x16x16.iu4": (
+        "declare <8 x i32> @llvm.amdgcn.wmma.i32.16x16x16.iu4.v8i32.v2i32("
+        "i1, <2 x i32>, i1, <2 x i32>, <8 x i32>, i1)"
+    ),
+    # RDNA4 (gfx12) WMMA — wave32 16x16x16. No cross-half operand duplication:
+    # A/B are <8 x half> / <8 x i16> per lane (vs <16 x ...> on gfx11). Emission
+    # goes through Gfx12RdnaBackend.emit_wmma.
+    "wmma.gfx12.f32.16x16x16.f16": (
+        "declare <8 x float> @llvm.amdgcn.wmma.f32.16x16x16.f16.v8f32.v8f16("
+        "<8 x half>, <8 x half>, <8 x float>)"
+    ),
+    "wmma.gfx12.f32.16x16x16.bf16": (
+        "declare <8 x float> @llvm.amdgcn.wmma.f32.16x16x16.bf16.v8f32.v8i16("
+        "<8 x i16>, <8 x i16>, <8 x float>)"
     ),
     "mfma.f32.16x16x16f16": (
         "declare <4 x float> @llvm.amdgcn.mfma.f32.16x16x16f16("
@@ -362,6 +389,16 @@ _INTRINSIC_DECLS: Dict[str, str] = {
         "declare void @llvm.amdgcn.raw.ptr.buffer.load.lds("
         "ptr addrspace(8) nocapture readonly, ptr addrspace(3) nocapture, "
         "i32, i32, i32, i32 immarg, i32 immarg)"
+    ),
+    # Flat/global direct-to-LDS DMA: streams bytes from a global pointer
+    # straight into LDS, bypassing the VGPR round-trip. Lowers to
+    # ``global_load_lds_dword{,x4}``. Signature (target-neutral, no LLVM22
+    # override needed): (ptr addrspace(1) src, ptr addrspace(3) lds,
+    # i32 size, i32 imm_offset, i32 aux); size/imm_offset/aux are immarg.
+    "global.load.lds": (
+        "declare void @llvm.amdgcn.global.load.lds("
+        "ptr addrspace(1) nocapture readonly, ptr addrspace(3) nocapture, "
+        "i32 immarg, i32 immarg, i32 immarg)"
     ),
     "raw.ptr.buffer.load.v2i32": (
         "declare <2 x i32> @llvm.amdgcn.raw.ptr.buffer.load.v2i32("
@@ -506,6 +543,21 @@ _INTRINSIC_DECLS: Dict[str, str] = {
         "declare <4 x float> @llvm.amdgcn.mfma.f32.16x16x96.fp6("
         "<3 x i32>, <3 x i32>, <4 x float>, i32 immarg, i32 immarg, i32 immarg)"
     ),
+    # L6: UNSCALED fp8 16x16x128 hero atom. gfx950 has no dense plain
+    # ``mfma.f32.16x16x128.fp8.fp8``; the dense wide-K f8 MFMA is the
+    # ``f8f6f4`` scale-MFMA, which on LLVM22 (ROCm 7.2) takes the 9-arg
+    # signature below: A/B as ``<8 x i32>`` (32 f8 bytes per lane), then
+    # ``cbsz`` / ``blgp`` (format selectors, 0 = fp8e4m3), then the
+    # ``op_sel`` + scale-byte pairs for A and B. We declare it under a
+    # dedicated additive key so the existing 11-arg
+    # ``mfma.scale.f32.16x16x128.f8f6f4`` decl (used by the MX-scaled
+    # path) is untouched; the lowering pins both scale bytes to 0
+    # (E8M0 exponent 0 => factor 1.0) for a true unscaled MFMA.
+    "mfma.f32.16x16x128.fp8.hero": (
+        "declare <4 x float> @llvm.amdgcn.mfma.scale.f32.16x16x128.f8f6f4("
+        "<8 x i32>, <8 x i32>, <4 x float>, i32 immarg, i32 immarg, "
+        "i32 immarg, i32, i32 immarg, i32)"
+    ),
 }
 
 
@@ -573,6 +625,29 @@ def _llvm_type(t: Type) -> str:
     if t.name == "f32":
         return "float"
     raise NotImplementedError(f"no LLVM mapping for type {t!r}")
+
+
+def _escape_llvm_asm_string(s: str) -> str:
+    r"""Escape a Python string for an LLVM IR asm/string literal.
+
+    LLVM textual string literals only allow printable ASCII verbatim; every
+    other byte (and ``"`` / ``\``) must be written as a ``\XX`` hex escape.
+    This matters for multi-statement inline-asm templates: a real newline
+    separating two instructions must become ``\0A`` (a literal newline char
+    would split the IR line; the AMDGPU ``;`` is a comment, not a separator).
+    """
+    out = []
+    for ch in s:
+        o = ord(ch)
+        if ch == "\\":
+            out.append("\\5C")
+        elif ch == '"':
+            out.append("\\22")
+        elif 0x20 <= o <= 0x7E:
+            out.append(ch)
+        else:
+            out.append(f"\\{o:02X}")
+    return "".join(out)
 
 
 def _smem_storage_type(t: SmemType) -> str:
@@ -979,6 +1054,22 @@ class _Lowerer:
             f"  {op.result.name} = xor {ty} {self._operand(a)}, {mask}"
         )
 
+    def _op_arith_smax(self, op: Op) -> None:
+        a, b = op.operands
+        self._need("smax.i32")
+        self._current().emit(
+            f"  {op.result.name} = call i32 @llvm.smax.i32(i32 {self._operand(a)}, "
+            f"i32 {self._operand(b)})"
+        )
+
+    def _op_arith_smin(self, op: Op) -> None:
+        a, b = op.operands
+        self._need("smin.i32")
+        self._current().emit(
+            f"  {op.result.name} = call i32 @llvm.smin.i32(i32 {self._operand(a)}, "
+            f"i32 {self._operand(b)})"
+        )
+
     def _op_arith_zext(self, op: Op) -> None:
         (v,) = op.operands
         self._current().emit(
@@ -990,6 +1081,13 @@ class _Lowerer:
         (v,) = op.operands
         self._current().emit(
             f"  {op.result.name} = sext {_llvm_type(v.type)} {self._operand(v)} "
+            f"to {_llvm_type(op.result.type)}"
+        )
+
+    def _op_arith_trunc(self, op: Op) -> None:
+        (v,) = op.operands
+        self._current().emit(
+            f"  {op.result.name} = trunc {_llvm_type(v.type)} {self._operand(v)} "
             f"to {_llvm_type(op.result.type)}"
         )
 
@@ -1357,6 +1455,14 @@ class _Lowerer:
         )
         self._current().emit(f"  {op.result.name} = trunc i32 {smin_v} to i8")
 
+    def _op_arith_rint_f32(self, op: Op) -> None:
+        """Round an f32 to nearest integer (still f32), round-to-nearest-even."""
+        (v,) = op.operands
+        self._need("rint.f32")
+        self._current().emit(
+            f"  {op.result.name} = call float @llvm.rint.f32(float {self._operand(v)})"
+        )
+
     def _op_math_exp2(self, op: Op) -> None:
         (v,) = op.operands
         if v.type.name != "f32":
@@ -1380,6 +1486,17 @@ class _Lowerer:
         one = _fp32_hex(1.0) if v.type.name == "f32" else "1.000000e+00"
         self._current().emit(
             f"  {op.result.name} = fdiv {_llvm_type(v.type)} {one}, {self._operand(v)}"
+        )
+
+    def _op_math_rcp_fast(self, op: Op) -> None:
+        (v,) = op.operands
+        if v.type.name != "f32":
+            raise NotImplementedError("math.rcp_fast currently supports f32")
+        # Single hardware reciprocal (~1 ulp), matching aiter's SiLU sigmoid.
+        self._need("rcp.f32")
+        self._current().emit(
+            f"  {op.result.name} = call float "
+            f"@llvm.amdgcn.rcp.f32(float {self._operand(v)})"
         )
 
     def _op_math_sqrt(self, op: Op) -> None:
@@ -1631,10 +1748,11 @@ class _Lowerer:
         )
 
     def _op_tile_smem_store_vN(self, op: Op) -> None:
-        """Vectorised LDS store: stores <vec x half> at the given index.
+        """Vectorised LDS store at the given index.
 
-        Lowers to `store <vec x half>, ptr addrspace(3) %p, align (vec*2)`
-        which the AMDGPU backend turns into ds_write_b{32,64,128}.
+        Lowers to `store <vec x elem>, ptr addrspace(3) %p, align ...`.
+        The AMDGPU backend turns naturally-aligned payloads into
+        ds_write_b{16,32,64,128} based on total byte width.
         """
         smem = op.operands[0]
         indices = op.operands[1:-1]
@@ -1648,8 +1766,18 @@ class _Lowerer:
             f"  {gep} = getelementptr inbounds {agg_ty}, ptr addrspace(3) {gname}, "
             f"{', '.join(gidx)}"
         )
-        align = int(op.attrs.get("align", vec * 2))
         elem_ty = _llvm_type(value.type.elem)  # type: ignore[attr-defined]
+        elem_bytes = {
+            "i8": 1,
+            "fp8e4m3": 1,
+            "bf8e5m2": 1,
+            "f16": 2,
+            "bf16": 2,
+            "i32": 4,
+            "f32": 4,
+            "i64": 8,
+        }.get(value.type.elem.name, 2)  # type: ignore[attr-defined]
+        align = int(op.attrs.get("align", vec * elem_bytes))
         self._current().emit(
             f"  store <{vec} x {elem_ty}> {self._operand(value)}, ptr addrspace(3) {gep}, "
             f"align {align}"
@@ -1943,6 +2071,60 @@ class _Lowerer:
             f"@llvm.amdgcn.mfma.f32.16x16x96.fp6(<3 x i32> {a_cast}, "
             f"<3 x i32> {b_cast}, <4 x float> {self._operand(c)}, "
             f"i32 0, i32 0, i32 0)"
+        )
+
+    def _op_tile_mfma_f32_16x16x128_fp8(self, op: Op) -> None:
+        """Lower the UNSCALED fp8 16x16x128 hero atom (L6).
+
+        gfx950 has no dense plain ``mfma.f32.16x16x128.fp8.fp8`` intrinsic;
+        the only dense wide-K f8 MFMA is the ``f8f6f4`` instruction exposed
+        as ``llvm.amdgcn.mfma.scale.f32.16x16x128.f8f6f4``. We reuse that
+        intrinsic with the in-instruction scale pinned to the neutral E8M0
+        value 0 (exponent 0 => 2^0 == 1.0), making it numerically a plain
+        unscaled fp8 MFMA. ``cbsz=0`` / ``blgp=0`` select fp8e4m3 for A and
+        B; ``op_sel`` scale-byte selectors are 0. This is ADDITIVE — it
+        reuses the existing scaled intrinsic decl and emits the same call
+        shape as :meth:`_op_tile_mfma_scale_f32_16x16x128_f8f6f4`, but with
+        constant zero scales (so no scale registers are loaded).
+
+        A / B arrive as ``<32 x fp8e4m3>`` (== ``<32 x i8>``, 32 f8 bytes
+        per lane) and are bitcast to the intrinsic's ``<8 x i32>``.
+        Output is ``<4 x float>``.
+        """
+        a, b, c = op.operands
+        # ADDITIVE: a dedicated decl key for the unscaled hero atom (the
+        # 9-arg LLVM22 f8f6f4 scale-MFMA signature). We do NOT touch the
+        # existing ``mfma.scale.f32.16x16x128.f8f6f4`` decl (different,
+        # frozen, 11-arg form used by the MX-scaled lowering).
+        self._need("mfma.f32.16x16x128.fp8.hero")
+        a_packed = self._fresh("a_fp8_128")
+        b_packed = self._fresh("b_fp8_128")
+        a_ty = _llvm_type(a.type)
+        b_ty = _llvm_type(b.type)
+        if a_ty != "<8 x i32>":
+            self._current().emit(
+                f"  {a_packed} = bitcast {a_ty} {self._operand(a)} to <8 x i32>"
+            )
+        else:
+            a_packed = self._operand(a)
+        if b_ty != "<8 x i32>":
+            self._current().emit(
+                f"  {b_packed} = bitcast {b_ty} {self._operand(b)} to <8 x i32>"
+            )
+        else:
+            b_packed = self._operand(b)
+        # f8f6f4 scale-MFMA, LLVM22 signature:
+        #   (A<8xi32>, B<8xi32>, C<4xf32>,
+        #    cbsz immarg, blgp immarg,      ; A/B format selectors (0 = fp8e4m3)
+        #    opsel_a immarg, scale_a,        ; A scale (E8M0 byte; 0 => 2^0 == 1.0)
+        #    opsel_b immarg, scale_b)        ; B scale (0 => 1.0)
+        # Pinning both scales to 0 makes this a plain unscaled fp8 MFMA.
+        self._current().emit(
+            f"  {op.result.name} = call <4 x float> "
+            f"@llvm.amdgcn.mfma.scale.f32.16x16x128.f8f6f4("
+            f"<8 x i32> {a_packed}, <8 x i32> {b_packed}, "
+            f"<4 x float> {self._operand(c)}, "
+            f"i32 0, i32 0, i32 0, i32 0, i32 0, i32 0)"
         )
 
     def _op_tile_register_p_from_qk_c(self, op: Op) -> None:
@@ -2389,6 +2571,55 @@ class _Lowerer:
             f"  {op.result.name} = bitcast <8 x i16> {raw} to <8 x {elem_ty}>"
         )
 
+    def _op_tile_inline_asm(self, op: Op) -> None:
+        """General AMDGPU inline-asm lowering (ADDITIVE).
+
+        Renders ``<ret> = call <ty> asm sideeffect[ convergent]
+        "<template>", "<constraints>"(<typed operands>)`` (void form when
+        the op has no result). Mirrors the ``ds_read_b64_tr_b8`` precedent
+        but parameterised by the op's ``template`` / ``constraints`` /
+        flag attributes so any machine instruction with explicit operand
+        register-class constraints (e.g. AGPR-source MFMA) can be emitted
+        deterministically.
+
+        The ``$N`` placeholders in the template refer to: ``$0`` = the
+        output (if any), then the inputs in ``op.operands`` order.
+        """
+        template = _escape_llvm_asm_string(op.attrs["template"])
+        constraints = op.attrs["constraints"]
+        flags = []
+        if op.attrs.get("sideeffect", True):
+            flags.append("sideeffect")
+        # NOTE: ``convergent`` is NOT a valid textual keyword on an LLVM
+        # inline-asm call expression (comgr rejects ``asm sideeffect
+        # convergent``); convergence for inline asm is carried by an
+        # operand bundle / the enclosing function's convergence, not the
+        # asm flag list. ``sideeffect`` already blocks DCE/duplication and
+        # ordering, which is what the MFMA needs. So the ``convergent``
+        # attr is accepted at the IR level (forward-compat) but is NOT
+        # rendered as a flag here.
+        flag_str = (" " + " ".join(flags)) if flags else ""
+        arglist = ", ".join(self._operand_with_type(v) for v in op.operands)
+        asm_expr = f'asm{flag_str} "{template}", "{constraints}"({arglist})'
+        if len(op.results) > 1:
+            # Multi-output asm: LLVM returns a literal struct; unpack each
+            # field with extractvalue (precedent: permlane32_swap's
+            # ``{ i32, i32 }`` asm). Used by the clustered MFMA helper so a
+            # whole MFMA burst is one asm node.
+            field_tys = [_llvm_type(r.type) for r in op.results]
+            struct_ty = "{ " + ", ".join(field_tys) + " }"
+            tmp = self._fresh("asmcl")
+            self._current().emit(f"  {tmp} = call {struct_ty} {asm_expr}")
+            for i, r in enumerate(op.results):
+                self._current().emit(
+                    f"  {r.name} = extractvalue {struct_ty} {tmp}, {i}"
+                )
+        elif op.results:
+            ret_ty = _llvm_type(op.result.type)
+            self._current().emit(f"  {op.result.name} = call {ret_ty} {asm_expr}")
+        else:
+            self._current().emit(f"  call void {asm_expr}")
+
     def _op_tile_ds_read_tr_b8(self, op: Op) -> None:
         """`ds_read_b64_tr_b8` -- gfx950 transpose-read of an 8-bit tile.
 
@@ -2823,6 +3054,35 @@ class _Lowerer:
             f"i32 {aux})"
         )
 
+    def _op_tile_global_load_lds(self, op: Op) -> None:
+        src_ptr, byte_off, lds_addr = op.operands
+        size_bytes = int(op.attrs["size_bytes"])
+        aux = int(op.attrs.get("aux", 0))
+        self._need("global.load.lds")
+        # Fold the per-lane byte offset into the source pointer as an i8
+        # GEP, mirroring how the memref.global_load handlers derive their
+        # element address (the intrinsic itself has no voffset operand --
+        # the per-lane address lives entirely in the source pointer).
+        gep = self._fresh("gld_src")
+        self._current().emit(
+            f"  {gep} = getelementptr inbounds i8, ptr addrspace(1) "
+            f"{self._operand(src_ptr)}, i32 {self._operand(byte_off)}"
+        )
+        # Convert the i64 LDS address to ptr addrspace(3), as the
+        # async_buffer_load_lds_addr handler does.
+        ptr_name = self._fresh("lds_ptr")
+        self._current().emit(
+            f"  {ptr_name} = inttoptr i64 {self._operand(lds_addr)} to ptr addrspace(3)"
+        )
+        self._current().emit(
+            f"  call void @llvm.amdgcn.global.load.lds("
+            f"ptr addrspace(1) {gep}, "
+            f"ptr addrspace(3) {ptr_name}, "
+            f"i32 {size_bytes}, "
+            f"i32 0, "
+            f"i32 {aux})"
+        )
+
     # ----- f32 LDS ops (cshuffle epilogue) -----
 
     def _op_tile_smem_store_vN_f32(self, op: Op) -> None:
@@ -3049,6 +3309,63 @@ class _Lowerer:
     def _op_vector_sub(self, op: Op) -> None:
         elem = op.result.type.elem.name  # type: ignore[attr-defined]
         self._vector_binop(op, "fsub" if elem in ("f16", "bf16", "f32") else "sub")
+
+    def _op_vector_and(self, op: Op) -> None:
+        self._vector_binop(op, "and")
+
+    def _op_vector_or(self, op: Op) -> None:
+        self._vector_binop(op, "or")
+
+    def _op_vector_shl(self, op: Op) -> None:
+        self._vector_binop(op, "shl")
+
+    def _op_vector_lshr(self, op: Op) -> None:
+        self._vector_binop(op, "lshr")
+
+    def _op_vector_cmp(self, op: Op) -> None:
+        pred = op.attrs.get("pred", "lt")
+        pmap = {
+            "lt": "slt",
+            "le": "sle",
+            "gt": "sgt",
+            "ge": "sge",
+            "eq": "eq",
+            "ne": "ne",
+        }
+        a, b = op.operands
+        self._current().emit(
+            f"  {op.result.name} = icmp {pmap[pred]} {_llvm_type(a.type)} "
+            f"{self._operand(a)}, {self._operand(b)}"
+        )
+
+    def _op_vector_smax(self, op: Op) -> None:
+        a, b = op.operands
+        cmp = self._fresh("vsmax.cmp")
+        self._current().emit(
+            f"  {cmp} = icmp sgt {_llvm_type(a.type)} {self._operand(a)}, {self._operand(b)}"
+        )
+        self._current().emit(
+            f"  {op.result.name} = select <{op.result.type.count} x i1> {cmp}, "
+            f"{_llvm_type(a.type)} {self._operand(a)}, {_llvm_type(b.type)} {self._operand(b)}"
+        )
+
+    def _op_vector_smin(self, op: Op) -> None:
+        a, b = op.operands
+        cmp = self._fresh("vsmin.cmp")
+        self._current().emit(
+            f"  {cmp} = icmp slt {_llvm_type(a.type)} {self._operand(a)}, {self._operand(b)}"
+        )
+        self._current().emit(
+            f"  {op.result.name} = select <{op.result.type.count} x i1> {cmp}, "
+            f"{_llvm_type(a.type)} {self._operand(a)}, {_llvm_type(b.type)} {self._operand(b)}"
+        )
+
+    def _op_vector_trunc(self, op: Op) -> None:
+        (v,) = op.operands
+        self._current().emit(
+            f"  {op.result.name} = trunc {_llvm_type(v.type)} {self._operand(v)} "
+            f"to {_llvm_type(op.result.type)}"
+        )
 
     def _op_vector_fma(self, op: Op) -> None:
         """Packed FMA via the ``llvm.fmuladd.v<N>x<elem>`` intrinsic.

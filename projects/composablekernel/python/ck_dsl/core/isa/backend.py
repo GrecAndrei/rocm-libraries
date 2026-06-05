@@ -155,6 +155,53 @@ _RDNA_WMMA = {
 }
 
 
+# Integer WMMA op -> (decl key, fully-mangled intrinsic, A/B operand vector
+# width, accumulator/result vector width). Integer WMMA differs from the float
+# path in two ways: (1) operands/accumulator are i32 vectors (A/B packed, C/D
+# the i32 accumulator), and (2) the intrinsic signature carries i1 signedness
+# flags before each matrix operand and a trailing i1 clamp. Operands arrive in
+# SSA already as <N x i32> (the kernel packs int8/int4 into i32), so no bitcast
+# is needed. Our quantized data is signed and within i32 range, so the flags are
+# emitted as (unsignedA=0, unsignedB=0, clamp=0). Verified on gfx1151/gfx11-generic
+# (ROCm 7.2.0): lowers to v_wmma_i32_16x16x16_iu8.
+#   iu8:  A/B = <4 x i32> (16 int8 packed 4-per-i32), C/D = <8 x i32>
+#   iu4:  A/B = <2 x i32> (16 int4 packed 8-per-i32), C/D = <8 x i32>
+_RDNA_WMMA_INT = {
+    "tile.wmma_i32_16x16x16_iu8": (
+        "wmma.i32.16x16x16.iu8",
+        "llvm.amdgcn.wmma.i32.16x16x16.iu8.v8i32.v4i32",
+        4,
+        8,
+    ),
+    "tile.wmma_i32_16x16x16_iu4": (
+        "wmma.i32.16x16x16.iu4",
+        "llvm.amdgcn.wmma.i32.16x16x16.iu4.v8i32.v2i32",
+        2,
+        8,
+    ),
+}
+
+
+# RDNA4 (gfx12) WMMA. Same instruction family as RDNA3/3.5 but the operand
+# fragments dropped the cross-half duplication: A/B are <8 x ...> per lane (not
+# <16 x ...>), so the intrinsic mangling is ``v8f16`` / ``v8i16``. The op_id is
+# distinct (``wmma_gfx12_*``) so the fragment/lane-map tables stay flat-keyed.
+_RDNA_GFX12_WMMA = {
+    "tile.wmma_gfx12_f32_16x16x16_f16": (
+        "wmma.gfx12.f32.16x16x16.f16",
+        "llvm.amdgcn.wmma.f32.16x16x16.f16.v8f32.v8f16",
+        "half",
+        "half",
+    ),
+    "tile.wmma_gfx12_f32_16x16x16_bf16": (
+        "wmma.gfx12.f32.16x16x16.bf16",
+        "llvm.amdgcn.wmma.f32.16x16x16.bf16.v8f32.v8i16",
+        "bfloat",
+        "i16",
+    ),
+}
+
+
 class Gfx11RdnaBackend(ISABackend):
     """RDNA3 / RDNA3.5 (gfx11, e.g. gfx1151 Strix Halo). **wave32**, **WMMA**
     (no MFMA), and a distinct ``s_waitcnt`` layout from gfx9/10. Datalayout +
@@ -193,11 +240,15 @@ class Gfx11RdnaBackend(ISABackend):
         self.emit_wmma(lowerer, legacy)
 
     def emit_wmma(self, lowerer, op) -> None:
+        int_spec = _RDNA_WMMA_INT.get(op.name)
+        if int_spec is not None:
+            self._emit_wmma_int(lowerer, op, int_spec)
+            return
         spec = _RDNA_WMMA.get(op.name)
         if spec is None:
             raise NotImplementedError(
                 f"WMMA op {op.name!r} not yet wired for {self.arch.gfx}; "
-                f"known: {sorted(_RDNA_WMMA)}"
+                f"known: {sorted(_RDNA_WMMA) + sorted(_RDNA_WMMA_INT)}"
             )
         decl_key, intrinsic, ssa_elt, call_elt = spec
         a, b, c = op.operands
@@ -223,6 +274,33 @@ class Gfx11RdnaBackend(ISABackend):
             f"<8 x float> {lowerer._operand(c)})"
         )
 
+    def _emit_wmma_int(self, lowerer, op, spec) -> None:
+        """Emit an integer WMMA (iu8/iu4) call.
+
+        The integer intrinsic signature is
+        ``(i1 signedA, <N x i32> A, i1 signedB, <N x i32> B, <8 x i32> C, i1 clamp)``
+        with an ``<8 x i32>`` result. The leading i1 per operand selects the
+        operand's *signedness*: ``1`` = signed, ``0`` = unsigned. This was
+        verified empirically on gfx11-generic (iu8 GEMM probe): passing ``0``
+        made the unit compute the **unsigned** dot product (all-positive
+        results matching ``A.view(uint8) @ B.view(uint8).T``). Our quantized
+        data is signed, so both flags are ``1``. Operands arrive as
+        ``<N x i32>`` in SSA (int8/int4 packed into i32), so no bitcast is
+        needed; values stay within i32 range -> ``clamp = 0`` (exact wrap).
+        """
+        decl_key, intrinsic, op_vec, acc_vec = spec
+        a, b, c = op.operands
+        lowerer._need(decl_key)
+        a_arg = lowerer._operand(a)
+        b_arg = lowerer._operand(b)
+        c_arg = lowerer._operand(c)
+        lowerer._current().emit(
+            f"  {op.result.name} = call <{acc_vec} x i32> @{intrinsic}("
+            f"i1 1, <{op_vec} x i32> {a_arg}, "
+            f"i1 1, <{op_vec} x i32> {b_arg}, "
+            f"<{acc_vec} x i32> {c_arg}, i1 0)"
+        )
+
     def encode_waitcnt(self, vmcnt: int, expcnt: int, lgkmcnt: int) -> int:
         # RDNA gfx11 uses a different s_waitcnt field layout than the gfx9/10
         # split the base encodes: contiguous expcnt[2:0] / lgkmcnt[9:4] /
@@ -234,6 +312,46 @@ class Gfx11RdnaBackend(ISABackend):
         return _encode_waitcnt_gfx11(vmcnt, expcnt, lgkmcnt)
 
 
+class Gfx12RdnaBackend(Gfx11RdnaBackend):
+    """RDNA4 (gfx12, e.g. gfx1201 Navi 48). **wave32**, **WMMA** with the gfx12
+    fragment ABI: A/B operands are ``<8 x ...>`` per lane (the RDNA3/3.5
+    cross-half duplication was removed) and the accumulator is column-distributed.
+    Datalayout / triple / buffer SRD word3 / s_waitcnt layout are inherited from
+    the RDNA3 backend (gfx11/gfx12 share the RDNA buffer word3 and contiguous
+    waitcnt layout). Only :meth:`emit_wmma` diverges (8-wide operands, gfx12
+    intrinsic mangling)."""
+
+    def emit_wmma(self, lowerer, op) -> None:
+        spec = _RDNA_GFX12_WMMA.get(op.name)
+        if spec is None:
+            raise NotImplementedError(
+                f"WMMA op {op.name!r} not yet wired for {self.arch.gfx}; "
+                f"known: {sorted(_RDNA_GFX12_WMMA)}"
+            )
+        decl_key, intrinsic, ssa_elt, call_elt = spec
+        a, b, c = op.operands
+        lowerer._need(decl_key)
+        a_arg = lowerer._operand(a)
+        b_arg = lowerer._operand(b)
+        if call_elt != ssa_elt:
+            # bf16: bitcast <8 x bfloat> -> <8 x i16> before the call.
+            a_cast = lowerer._fresh("wmma_a")
+            b_cast = lowerer._fresh("wmma_b")
+            lowerer._current().emit(
+                f"  {a_cast} = bitcast <8 x {ssa_elt}> {a_arg} to <8 x {call_elt}>"
+            )
+            lowerer._current().emit(
+                f"  {b_cast} = bitcast <8 x {ssa_elt}> {b_arg} to <8 x {call_elt}>"
+            )
+            a_arg, b_arg = a_cast, b_cast
+        lowerer._current().emit(
+            f"  {op.result.name} = call <8 x float> @{intrinsic}("
+            f"<8 x {call_elt}> {a_arg}, "
+            f"<8 x {call_elt}> {b_arg}, "
+            f"<8 x float> {lowerer._operand(c)})"
+        )
+
+
 # gfx -> backend class. Adding a CDNA gfx is one row here plus, when its codegen
 # actually diverges, a new subclass.
 BACKEND_REGISTRY: Dict[str, Callable[[ArchTarget], ISABackend]] = {
@@ -242,6 +360,8 @@ BACKEND_REGISTRY: Dict[str, Callable[[ArchTarget], ISABackend]] = {
     "gfx942": Gfx9MfmaBackend,
     "gfx950": Gfx950Backend,
     "gfx1151": Gfx11RdnaBackend,
+    "gfx1201": Gfx12RdnaBackend,
+    "gfx11-generic": Gfx11RdnaBackend,
 }
 
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import ctypes
+import os
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -131,11 +132,11 @@ def _gemm_problem(
     A = rng.integers(-5, 6, size=(M, K), dtype=np.int16).astype(np.float16)
     B = rng.integers(-5, 6, size=(N, K), dtype=np.int16).astype(np.float16)
     C = np.empty((M, N), dtype=np.float16)
-    grid = (
-        (N + int(manifest["block_n"]) - 1) // int(manifest["block_n"]),
-        (M + int(manifest["block_m"]) - 1) // int(manifest["block_m"]),
-        1,
-    )
+    gx = (N + int(manifest["block_n"]) - 1) // int(manifest["block_n"])
+    gy = (M + int(manifest["block_m"]) - 1) // int(manifest["block_m"])
+    if manifest.get("grid_order") == "MN":
+        gx, gy = gy, gx
+    grid = (gx, gy, 1)
     block = (int(manifest["threads_per_block"]), 1, 1)
     flop = 2.0 * M * N * K
     bytes_xfer = 2.0 * (M * K + N * K + M * N)
@@ -162,6 +163,209 @@ def _gemm_problem(
         return float(diff.max()), int(np.count_nonzero(diff > 0)), C.size
 
     return make_args, grid, block, flop, bytes_xfer, check
+
+
+def _gemm_iu8_problem(
+    manifest: dict, shape: Optional[Tuple[int, int, int]], verify: bool
+) -> tuple:
+    """Native integer WMMA GEMM (int8 in / i32 out): ``C = A @ B.T``, exact.
+
+    A (``M×K``) and B (``N×K``) are signed int8 row-major, packed 4-per-i32
+    along K (little-endian view: i32 slot ``j`` = K-bytes ``[4j..4j+3]``, which
+    is exactly the ``wmma_i32_16x16x16_iu8`` fragment slot order). The kernel
+    receives i32 pointers and the logical int8 ``K``. Integer WMMA does no
+    rounding, so verify expects ``max_abs_diff == 0`` against the int32 numpy
+    reference; random asymmetric inputs pin row vs col in the lane map.
+    """
+    np = _require_numpy()
+    if shape is None:
+        ds = manifest.get("default_shape", [256, 256, 256])
+        M, N, K = int(ds[0]), int(ds[1]), int(ds[2])
+    else:
+        M, N, K = shape
+    if K % 4:
+        raise ValueError(f"iu8 GEMM needs K multiple of 4 (i32 packing), got K={K}")
+    rng = np.random.default_rng(0xC0FFEE)
+    A = rng.integers(-128, 128, size=(M, K), dtype=np.int8)
+    B = rng.integers(-128, 128, size=(N, K), dtype=np.int8)
+    # Pack int8 rows into i32 (little-endian): K contiguous -> K//4 i32 columns.
+    A_p = np.ascontiguousarray(A).view(np.int32)
+    B_p = np.ascontiguousarray(B).view(np.int32)
+    C = np.empty((M, N), dtype=np.int32)
+    gx = (N + int(manifest["block_n"]) - 1) // int(manifest["block_n"])
+    gy = (M + int(manifest["block_m"]) - 1) // int(manifest["block_m"])
+    if manifest.get("grid_order") == "MN":
+        gx, gy = gy, gx
+    grid = (gx, gy, 1)
+    block = (int(manifest["threads_per_block"]), 1, 1)
+    flop = 2.0 * M * N * K
+    bytes_xfer = 1.0 * (M * K + N * K) + 4.0 * (M * N)
+
+    def make_args(rt: Runtime):
+        A_dev = rt.alloc(_nbytes(A_p))
+        B_dev = rt.alloc(_nbytes(B_p))
+        C_dev = rt.alloc(_nbytes(C))
+        rt.memcpy_h2d(A_dev, _as_u8_buffer(A_p), _nbytes(A_p))
+        rt.memcpy_h2d(B_dev, _as_u8_buffer(B_p), _nbytes(B_p))
+        rt.memset(C_dev, 0, _nbytes(C))
+        return struct.pack("<QQQiii", A_dev, B_dev, C_dev, M, N, K), (
+            A_dev,
+            B_dev,
+            C_dev,
+        )
+
+    def check(rt: Runtime, ptrs):
+        if not verify:
+            return 0.0, 0, C.size
+        rt.memcpy_d2h(_as_u8_buffer(C), ptrs[2], _nbytes(C))
+        ref = A.astype(np.int32) @ B.astype(np.int32).T
+        diff = np.abs(C.astype(np.int64) - ref.astype(np.int64))
+        return float(diff.max()), int(np.count_nonzero(diff > 0)), C.size
+
+    return make_args, grid, block, flop, bytes_xfer, check
+
+
+def _matmul_nbits_problem(
+    manifest: dict, shape: Optional[Tuple[int, int, int]], verify: bool
+) -> tuple:
+    """fp16-activation / packed-int4-weight matmul (gfx1151 ``matmul_nbits``).
+
+    ``C[M, N] = A[M, K] @ dequant(B, scales)^T`` with ``A`` / ``C`` fp16
+    row-major, ``B`` two signed int4 per byte (uint8 ``[N, K // 2]``, low nibble
+    = even ``k``), and one ``fp16``/``fp32`` scale per ``(n, k // group)`` group.
+
+    ``N`` / ``K`` are compile-time fields baked into the kernel; only ``M`` is a
+    runtime argument. The pack / dequant logic is inlined here (rather than
+    importing the instance host helpers) so the remote runner stays dependency
+    light. It mirrors
+    :func:`ck_dsl.instances.common._matmul_nbits_common.pack_i4_weights_for_matmul_nbits`.
+    """
+    np = _require_numpy()
+    N = int(manifest["N"])
+    K = int(manifest["K"])
+    group = int(manifest.get("group_size", 32))
+    scale_dtype = str(manifest.get("scale_dtype", "f16"))
+    if shape is None:
+        ds = manifest.get("default_shape", [128, N, K])
+        M = int(ds[0])
+    else:
+        sm, sn, sk = shape
+        if sn != N or sk != K:
+            raise ValueError(
+                f"matmul_nbits shape N/K ({sn},{sk}) != manifest ({N},{K})"
+            )
+        M = int(sm)
+    if K % 2:
+        raise ValueError(f"K ({K}) must be even to pack two int4 per byte")
+    if K % group:
+        raise ValueError(f"K ({K}) must be divisible by group_size ({group})")
+
+    np_scale = np.float16 if scale_dtype in ("f16", "fp16") else np.float32
+    rng = np.random.default_rng(0x4B17)
+    A = rng.integers(-4, 5, size=(M, K), dtype=np.int16).astype(np.float16)
+    W = rng.integers(-8, 8, size=(N, K), dtype=np.int16)  # signed int4 [-8, 7]
+    scales = (
+        rng.integers(1, 5, size=(N, K // group)).astype(np.float32) * 0.03125
+    ).astype(np_scale)
+    low = (W[:, 0::2] & 0x0F).astype(np.uint8)
+    high = (W[:, 1::2] & 0x0F).astype(np.uint8)
+    packed = (low | (high << 4)).astype(np.uint8)
+    C = np.empty((M, N), dtype=np.float16)
+
+    block_m = int(manifest["block_m"])
+    # The WMMA matmul_nbits kernels assume every tile_m row is in-bounds for the
+    # A loads; partial-M tail handling is not implemented. A non-multiple M would
+    # make the last tile read A out of bounds, so reject it here rather than
+    # launch a kernel that reads past the buffer.
+    if M % block_m:
+        raise ValueError(
+            f"M ({M}) must be divisible by block_m ({block_m}); partial-M tiles "
+            "are not supported by the matmul_nbits kernels"
+        )
+
+    grid = (
+        (N + int(manifest["block_n"]) - 1) // int(manifest["block_n"]),
+        (M + block_m - 1) // block_m,
+        1,
+    )
+    block = (int(manifest["threads_per_block"]), 1, 1)
+    flop = 2.0 * M * N * K
+    scale_bytes = np.dtype(np_scale).itemsize
+    bytes_xfer = (
+        2.0 * (M * K + M * N)  # A + C fp16
+        + float(N * (K // 2))  # packed B
+        + scale_bytes * float(N * (K // group))  # scales
+    )
+
+    def make_args(rt: Runtime):
+        A_dev = rt.alloc(_nbytes(A))
+        B_dev = rt.alloc(_nbytes(packed))
+        S_dev = rt.alloc(_nbytes(scales))
+        C_dev = rt.alloc(_nbytes(C))
+        rt.memcpy_h2d(A_dev, _as_u8_buffer(A), _nbytes(A))
+        rt.memcpy_h2d(B_dev, _as_u8_buffer(packed), _nbytes(packed))
+        rt.memcpy_h2d(S_dev, _as_u8_buffer(scales), _nbytes(scales))
+        rt.memset(C_dev, 0, _nbytes(C))
+        return struct.pack("<QQQQi", A_dev, B_dev, S_dev, C_dev, M), (
+            A_dev,
+            B_dev,
+            S_dev,
+            C_dev,
+        )
+
+    def check(rt: Runtime, ptrs):
+        if not verify:
+            return 0.0, 0, C.size
+        rt.memcpy_d2h(_as_u8_buffer(C), ptrs[3], _nbytes(C))
+        w = W.astype(np.float32) * np.repeat(scales.astype(np.float32), group, axis=1)
+        ref = (A.astype(np.float32) @ w.T).astype(np.float16)
+        Cf = C.astype(np.float32)
+        reff = ref.astype(np.float32)
+        diff = np.abs(Cf - reff)
+        if os.environ.get("CKDSL_NBITS_DEBUG"):
+            _nbits_debug_dump(np, Cf, reff, diff, M, N, K, group)
+        return float(diff.max()), int(np.count_nonzero(diff > 0)), C.size
+
+    return make_args, grid, block, flop, bytes_xfer, check
+
+
+def _nbits_debug_dump(np, Cf, reff, diff, M, N, K, group):
+    """Locate matmul_nbits mismatches: cluster bad elements by row/col and
+    inspect the C/ref relationship to see if a scale was dropped/misapplied."""
+    tol = 1e-2
+    bad = diff > tol
+    nbad = int(bad.sum())
+    print(
+        f"[nbits-debug] shape M={M} N={N} K={K} group={group} "
+        f"bad={nbad}/{Cf.size} max={float(diff.max()):.4g}"
+    )
+    if nbad == 0:
+        return
+    rows = np.where(bad.any(axis=1))[0]
+    cols = np.where(bad.any(axis=0))[0]
+    print(
+        f"[nbits-debug] bad rows (M): {rows[:32].tolist()}"
+        f"{' ...' if rows.size > 32 else ''} (count={rows.size})"
+    )
+    print(
+        f"[nbits-debug] bad cols (N): {cols[:32].tolist()}"
+        f"{' ...' if cols.size > 32 else ''} (count={cols.size})"
+    )
+    # Per-N-tile and per-M-tile histograms (16-wide WMMA tiles).
+    col_counts = bad.sum(axis=0)
+    nz_cols = np.where(col_counts > 0)[0]
+    print(
+        "[nbits-debug] bad-count by N col (nonzero): "
+        + ", ".join(f"n{c}:{int(col_counts[c])}" for c in nz_cols[:24])
+    )
+    # Inspect first few bad coords: ratio reveals dropped/extra scale factor.
+    bi, bj = np.where(bad)
+    print("[nbits-debug] sample bad coords (m,n): C, ref, ratio")
+    for k in range(min(12, bi.size)):
+        m, n = int(bi[k]), int(bj[k])
+        c, r = float(Cf[m, n]), float(reff[m, n])
+        ratio = (c / r) if r != 0 else float("inf")
+        print(f"  ({m:>4},{n:>4})  C={c:>10.4f}  ref={r:>10.4f}  C/ref={ratio:>8.4f}")
 
 
 def _batched_gemm_problem(
@@ -318,6 +522,150 @@ def _conv_problem(
         ref_h = ref.astype(np.float16)
         diff = np.abs(D.astype(np.float32) - ref_h.astype(np.float32))
         return float(diff.max()), int(np.count_nonzero(diff > 1e-2)), D.size
+
+    return make_args, grid, block, flop, bytes_xfer, check
+
+
+def _q_int_codes(np, scaled_f32, lo: float, hi: float):
+    """Clamp then round-to-nearest-even, matching the integer fusion kernels."""
+    return np.rint(np.clip(scaled_f32, lo, hi))
+
+
+def _pack_i4_rows(np, codes):
+    """Signed int4 codes ``(rows, cols)`` -> two codes per byte."""
+    lo = codes[:, 0::2].astype(np.int32) & 0xF
+    hi = codes[:, 1::2].astype(np.int32) & 0xF
+    return ((hi << 4) | lo).astype(np.uint8).view(np.int8)
+
+
+def _unpack_deep_fused_y(np, words, channels: int):
+    """``(pool_h, pool_w, words)`` int32 output -> signed int4 channel codes."""
+    ph, pw, _ = words.shape
+    out = np.empty((ph, pw, channels), dtype=np.int32)
+    for ch in range(channels):
+        word = words[:, :, ch // 8].astype(np.uint32)
+        nib = (word >> (4 * (ch % 8))) & 0xF
+        signed = nib.astype(np.int32)
+        out[:, :, ch] = np.where(signed >= 8, signed - 16, signed)
+    return out
+
+
+def _deep_fused_i8i4_reference(np, X, W0, W1_codes, manifest: dict):
+    """Integer-exact reference for gfx1151 deep fused conv0->conv1->pool."""
+    N, H, W, C, K0, R, S, sH, sW, pH, pW, dH, dW = [
+        int(x) for x in manifest["conv"][:13]
+    ]
+    K1 = int(manifest["conv1"]["K1"])
+    pool_y, pool_x, pool_s_h, pool_s_w = [int(x) for x in manifest["pool"]]
+    quant = manifest.get("quant", {})
+    m0 = np.float32(quant.get("m0", 0.0625))
+    m0b = np.float32(quant.get("m0b", 0.5))
+    m1 = np.float32(quant.get("m1", 0.25))
+    mf = np.float32(quant.get("mf", 1.0))
+    Ho = (H + 2 * pH - dH * (R - 1) - 1) // sH + 1
+    Wo = (W + 2 * pW - dW * (S - 1) - 1) // sW + 1
+    pool_ho = (Ho - pool_y) // pool_s_h + 1
+    pool_wo = (Wo - pool_x) // pool_s_w + 1
+
+    Xp = np.pad(
+        X.astype(np.int64),
+        ((0, 0), (pH, pH), (pW, pW), (0, 0)),
+    )
+    P0 = np.zeros((N, Ho, Wo, K0), dtype=np.int64)
+    for r in range(R):
+        for s in range(S):
+            x = Xp[
+                :,
+                r * dH : r * dH + Ho * sH : sH,
+                s * dW : s * dW + Wo * sW : sW,
+                :,
+            ]
+            w = W0[:, r, s, :].astype(np.int64)
+            P0 += np.einsum("nhwc,kc->nhwk", x, w, optimize=True)
+
+    q0 = _q_int_codes(np, P0.astype(np.float32) * m0, -127.0, 127.0)
+    q0_relu = np.maximum(q0, 0.0)
+    C0 = _q_int_codes(np, q0_relu * m0b, -8.0, 7.0)
+
+    P1 = np.einsum("nhwk,ok->nhwo", C0, W1_codes.astype(np.float32), optimize=True)
+    q1 = _q_int_codes(np, P1 * m1, -8.0, 7.0)
+    C1 = np.maximum(q1, 0.0)
+
+    ref = np.empty((pool_ho, pool_wo, K1), dtype=np.int32)
+    for ho in range(pool_ho):
+        for wo in range(pool_wo):
+            h0 = ho * pool_s_h
+            w0 = wo * pool_s_w
+            patch = C1[0, h0 : h0 + pool_y, w0 : w0 + pool_x, :]
+            pooled = patch.max(axis=(0, 1)).astype(np.float32)
+            ref[ho, wo, :] = _q_int_codes(np, pooled * mf, -8.0, 7.0).astype(np.int32)
+    return ref
+
+
+def _deep_fused_conv_pool_i8i4_problem(
+    manifest: dict, shape: Optional[Tuple[int, int, int]], verify: bool
+) -> tuple:
+    """gfx1151 deep-fused int8/int4 conv+pool runner.
+
+    The kernel ABI is four raw pointers: ``X, W0, Y, W1``. Shapes and quant
+    multipliers are compile-time-specialized by the example and repeated in the
+    manifest so this generic runner can build matching test tensors.
+    """
+    if shape is not None:
+        raise ValueError("deep_fused_conv_pool_i8i4 uses manifest shape, not --shape")
+    np = _require_numpy()
+    N, H, W, C, K0, R, S, sH, sW, pH, pW, dH, dW = [
+        int(x) for x in manifest["conv"][:13]
+    ]
+    K1 = int(manifest["conv1"]["K1"])
+    pool_y, pool_x, pool_s_h, pool_s_w = [int(x) for x in manifest["pool"]]
+    Ho = (H + 2 * pH - dH * (R - 1) - 1) // sH + 1
+    Wo = (W + 2 * pW - dW * (S - 1) - 1) // sW + 1
+    pool_ho = (Ho - pool_y) // pool_s_h + 1
+    pool_wo = (Wo - pool_x) // pool_s_w + 1
+
+    rng = np.random.default_rng(int(manifest.get("seed", 123)))
+    X = rng.integers(-3, 4, size=(N, H, W, C), dtype=np.int8)
+    W0 = rng.integers(-3, 4, size=(K0, R, S, C), dtype=np.int8)
+    W1_codes = rng.integers(-3, 4, size=(K1, K0), dtype=np.int8)
+    W1 = _pack_i4_rows(np, W1_codes)
+    Y = np.zeros((pool_ho, pool_wo, (K1 + 7) // 8), dtype=np.int32)
+
+    if "grid_explicit" in manifest:
+        grid = tuple(int(x) for x in manifest["grid_explicit"])
+    else:
+        pool_tile_h, pool_tile_w = [int(x) for x in manifest["pool_tile"]]
+        grid = (1, pool_ho // pool_tile_h, pool_wo // pool_tile_w)
+    block = (int(manifest["threads_per_block"]), 1, 1)
+    flop = 2.0 * (N * Ho * Wo * K0 * R * S * C + N * Ho * Wo * K1 * K0)
+    bytes_xfer = float(X.nbytes + W0.nbytes + W1.nbytes + Y.nbytes)
+    tol = int(manifest.get("verify_tol", 0))
+
+    def make_args(rt: Runtime):
+        X_dev = rt.alloc(_nbytes(X))
+        W0_dev = rt.alloc(_nbytes(W0))
+        Y_dev = rt.alloc(_nbytes(Y))
+        W1_dev = rt.alloc(_nbytes(W1))
+        rt.memcpy_h2d(X_dev, _as_u8_buffer(X), _nbytes(X))
+        rt.memcpy_h2d(W0_dev, _as_u8_buffer(W0), _nbytes(W0))
+        rt.memcpy_h2d(W1_dev, _as_u8_buffer(W1), _nbytes(W1))
+        rt.memset(Y_dev, 0, _nbytes(Y))
+        return struct.pack("<QQQQ", X_dev, W0_dev, Y_dev, W1_dev), (
+            X_dev,
+            W0_dev,
+            Y_dev,
+            W1_dev,
+        )
+
+    def check(rt: Runtime, ptrs):
+        if not verify:
+            return 0.0, 0, pool_ho * pool_wo * K1
+        rt.memcpy_d2h(_as_u8_buffer(Y), ptrs[2], _nbytes(Y))
+        got = _unpack_deep_fused_y(np, Y, K1)
+        ref = _deep_fused_i8i4_reference(np, X, W0, W1_codes, manifest)
+        diff = np.abs(got - ref)
+        max_diff = int(diff.max()) if diff.size else 0
+        return float(max_diff), int(np.count_nonzero(diff > tol)), got.size
 
     return make_args, grid, block, flop, bytes_xfer, check
 
@@ -588,6 +936,10 @@ def run_manifest(
         make_args, grid, block, flop, bytes_xfer, check = _gemm_problem(
             manifest, shape, verify
         )
+    elif kind == "gemm_iu8":
+        make_args, grid, block, flop, bytes_xfer, check = _gemm_iu8_problem(
+            manifest, shape, verify
+        )
     elif kind == "batched_gemm_fp16":
         make_args, grid, block, flop, bytes_xfer, check = _batched_gemm_problem(
             manifest, shape, verify
@@ -595,6 +947,14 @@ def run_manifest(
     elif kind == "conv_fp16":
         make_args, grid, block, flop, bytes_xfer, check = _conv_problem(
             manifest, shape, verify
+        )
+    elif kind == "matmul_nbits_fp16":
+        make_args, grid, block, flop, bytes_xfer, check = _matmul_nbits_problem(
+            manifest, shape, verify
+        )
+    elif kind == "deep_fused_conv_pool_i8i4":
+        make_args, grid, block, flop, bytes_xfer, check = (
+            _deep_fused_conv_pool_i8i4_problem(manifest, shape, verify)
         )
     elif kind in (
         "elementwise_fp16",

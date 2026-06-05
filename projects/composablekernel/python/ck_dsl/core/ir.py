@@ -89,10 +89,26 @@ _MMA_C_FRAG_LEN: Dict[str, int] = {
     "mfma_f32_4x4x4_f16": 4,
     "mfma_f32_16x16x128_fp4": 4,
     "mfma_f32_16x16x96_fp6": 4,
+    "mfma_f32_16x16x128_fp8": 4,
     "mfma_scale_f32_16x16x128_f8f6f4": 4,
     "wmma_f32_16x16x16_f16": 8,
     "wmma_f32_16x16x16_bf16": 8,
+    "wmma_i32_16x16x16_iu8": 8,
+    "wmma_i32_16x16x16_iu4": 8,
+    "wmma_gfx12_f32_16x16x16_f16": 8,
+    "wmma_gfx12_f32_16x16x16_bf16": 8,
 }
+
+# op_id -> accumulator/result *element* type. Float atoms accumulate in f32;
+# integer WMMA atoms (iu8/iu4) accumulate in i32. Used by ``IRBuilder.mma`` to
+# size the result vector element type when ``op`` is a bare op_id string; an
+# ``MmaOp`` object supplies its ``c_dtype`` directly and bypasses this table.
+_MMA_C_INT_OP_IDS = frozenset(
+    {
+        "wmma_i32_16x16x16_iu8",
+        "wmma_i32_16x16x16_iu4",
+    }
+)
 
 # op_id -> the ``result_name_hint`` the legacy ISA-named method used. Most atoms
 # used "acc"; a handful used distinct hints that must be preserved verbatim so
@@ -101,6 +117,7 @@ _MMA_RESULT_HINT: Dict[str, str] = {
     "mfma_f32_32x32x16_bf16": "acc32",
     "mfma_f32_16x16x128_fp4": "acc4",
     "mfma_f32_16x16x96_fp6": "acc6",
+    "mfma_f32_16x16x128_fp8": "acc128",
     "mfma_scale_f32_16x16x128_f8f6f4": "mxacc",
 }
 
@@ -516,6 +533,17 @@ class IRBuilder:
     def rcp(self, a: Value) -> Value:
         return self._op("math.rcp", [a], [a.type], result_name_hint="rcp").result
 
+    def rcp_fast(self, a: Value) -> Value:
+        """Fast (~1 ulp) hardware reciprocal: ``v_rcp_f32`` directly.
+
+        Unlike :meth:`rcp` (which lowers to an IEEE-correct ``fdiv 1.0, x`` and
+        gets expanded to the full ``v_div_scale``/``v_div_fmas``/``v_div_fixup``
+        sequence in the LLVM backend), this maps straight to
+        ``llvm.amdgcn.rcp.f32`` -- the same single-instruction reciprocal aiter
+        uses in its SiLU sigmoid. f32 only.
+        """
+        return self._op("math.rcp_fast", [a], [a.type], result_name_hint="rcpf").result
+
     def sqrt(self, a: Value) -> Value:
         return self._op("math.sqrt", [a], [a.type], result_name_hint="sqrt").result
 
@@ -537,11 +565,20 @@ class IRBuilder:
         """Bitwise-NOT. For an i1 input this is the logical negation."""
         return self._op("arith.not", [a], [a.type], result_name_hint="not").result
 
+    def smax(self, a: Value, b: Value) -> Value:
+        return self._op("arith.smax", [a, b], [a.type], result_name_hint="smax").result
+
+    def smin(self, a: Value, b: Value) -> Value:
+        return self._op("arith.smin", [a, b], [a.type], result_name_hint="smin").result
+
     def zext(self, v: Value, target: Type) -> Value:
         return self._op("arith.zext", [v], [target], result_name_hint="zx").result
 
     def sext(self, v: Value, target: Type) -> Value:
         return self._op("arith.sext", [v], [target], result_name_hint="sx").result
+
+    def trunc(self, v: Value, target: Type) -> Value:
+        return self._op("arith.trunc", [v], [target], result_name_hint="tr").result
 
     def select(self, cond: Value, lhs: Value, rhs: Value) -> Value:
         return self._op(
@@ -555,6 +592,19 @@ class IRBuilder:
         return self._op(
             "arith.trunc_f32_to_f16", [v], [F16], result_name_hint="t"
         ).result
+
+    def rint_f32(self, v: Value) -> Value:
+        """Round an f32 to the nearest integer (still f32), round-to-nearest-even.
+
+        Lowers to ``llvm.rint.f32`` (``rintf`` in HIP), which honours the
+        current rounding mode (RNE). Unlike :meth:`cvt_f32_to_i8_sat` this does
+        not narrow to i8, so it works for the full f32 integer range -- the
+        primitive an integer GEMM emulated via f16 WMMA needs to snap its
+        sub-ULP-noisy accumulator back to the exact integer before requant.
+        """
+        if v.type.name != "f32":
+            raise ValueError(f"rint_f32 expects f32 input, got {v.type.name}")
+        return self._op("arith.rint_f32", [v], [F32], result_name_hint="rint").result
 
     def cast_to_f32(self, v: Value) -> Value:
         if v.type.name == "f32":
@@ -1221,6 +1271,24 @@ class IRBuilder:
     def vector_mul(self, a: Value, b: Value) -> Value:
         return self.vector_binary("mul", a, b)
 
+    def vector_and(self, a: Value, b: Value) -> Value:
+        return self.vector_binary("and", a, b)
+
+    def vector_or(self, a: Value, b: Value) -> Value:
+        return self.vector_binary("or", a, b)
+
+    def vector_shl(self, a: Value, b: Value) -> Value:
+        return self.vector_binary("shl", a, b)
+
+    def vector_lshr(self, a: Value, b: Value) -> Value:
+        return self.vector_binary("lshr", a, b)
+
+    def vector_smax(self, a: Value, b: Value) -> Value:
+        return self.vector_binary("smax", a, b)
+
+    def vector_smin(self, a: Value, b: Value) -> Value:
+        return self.vector_binary("smin", a, b)
+
     def vector_max(self, a: Value, b: Value) -> Value:
         return self.vector_binary("max", a, b)
 
@@ -1271,6 +1339,28 @@ class IRBuilder:
             "vector.select", [mask, lhs, rhs], [lhs.type], result_name_hint="vsel"
         ).result
 
+    def vector_cmp(self, pred: str, a: Value, b: Value) -> Value:
+        if not isinstance(a.type, VectorType) or a.type != b.type:
+            raise ValueError("vector_cmp expects matching vector operands")
+        return self._op(
+            "vector.cmp",
+            [a, b],
+            [VectorType(I1, a.type.count)],
+            attrs={"pred": pred},
+            result_name_hint=f"vcmp_{pred}",
+        ).result
+
+    def vector_trunc(self, v: Value, target: Type) -> Value:
+        if not isinstance(v.type, VectorType):
+            raise ValueError("vector_trunc expects vector input")
+        return self._op(
+            "vector.trunc",
+            [v],
+            [VectorType(target, v.type.count)],
+            attrs={"target": target.name},
+            result_name_hint=f"vtr{v.type.count}",
+        ).result
+
     def smem_store_f16(
         self, smem: Value, indices: Sequence[Value], value: Value
     ) -> None:
@@ -1293,9 +1383,11 @@ class IRBuilder:
     def smem_store_vN(
         self, smem: Value, indices: Sequence[Value], value: Value, n: int
     ) -> None:
-        """Vectorised LDS store of N consecutive 16-bit values.
+        """Vectorised LDS store of N consecutive values.
 
-        Supports scalar 16-bit stores (`n=1`) and vector stores for f16/bf16.
+        Supports scalar stores (`n=1`) plus vector stores for the element types
+        accepted by :meth:`smem_load_vN`. For 8-bit element types, ``n=16`` maps
+        to a 16-byte LDS transaction, which is the native-int WMMA staging shape.
         """
         if n == 1:
             # Single-element store; route through the scalar `tile.smem_store`.
@@ -1305,14 +1397,33 @@ class IRBuilder:
                 attrs={"rank": len(indices), "elem_type": value.type.name},
             )
             return
-        if n not in (2, 4, 8):
-            raise ValueError(f"unsupported vector width for smem_store_vN: {n}")
         if not isinstance(value.type, VectorType):
             raise ValueError("smem_store_vN expects vector value for n > 1")
+        elem_name = value.type.elem.name
+        allowed_n = (
+            (2, 4, 8, 16) if elem_name in ("i8", "fp8e4m3", "bf8e5m2") else (2, 4, 8)
+        )
+        if n not in allowed_n:
+            raise ValueError(
+                f"unsupported vector width for smem_store_vN of {elem_name}: {n} "
+                f"(allowed: {allowed_n})"
+            )
+        elem_bytes = (
+            1
+            if elem_name in ("i8", "fp8e4m3", "bf8e5m2")
+            else 4
+            if elem_name in ("f32", "i32")
+            else 2
+        )
         self._op(
             "tile.smem_store_vN",
             [smem, *indices, value],
-            attrs={"rank": len(indices), "elem_type": value.type.elem.name, "vec": n},
+            attrs={
+                "rank": len(indices),
+                "elem_type": elem_name,
+                "vec": n,
+                "align": n * elem_bytes,
+            },
         )
 
     def smem_load_v4_f16(self, smem: Value, row: Value, col: Value) -> Value:
@@ -1404,11 +1515,19 @@ class IRBuilder:
             if hasattr(op, "c_frag_len") and op.c_frag_len
             else _mma_c_frag_len(op_id)
         )
+        # Accumulator element type: integer WMMA atoms (iu8/iu4) accumulate in
+        # i32; everything else in f32. Prefer the atom's own c_dtype when ``op``
+        # is an MmaOp, else fall back to the op_id table.
+        c_dtype = getattr(op, "c_dtype", None)
+        is_int_acc = (
+            c_dtype == "i32" if c_dtype is not None else op_id in _MMA_C_INT_OP_IDS
+        )
+        c_elem = I32 if is_int_acc else F32
         hint = _MMA_RESULT_HINT.get(op_id, "acc")
         return self._op(
             "tile.mma",
             [a, b, c, *extra],
-            [VectorType(F32, c_frag_len)],
+            [VectorType(c_elem, c_frag_len)],
             attrs={"op_id": op_id},
             result_name_hint=hint,
         ).result
@@ -1439,6 +1558,27 @@ class IRBuilder:
         this op. Thin wrapper over :meth:`mma`.
         """
         return self.mma("wmma_f32_16x16x16_bf16", a, b, c)
+
+    def wmma_gfx12_f32_16x16x16_f16(self, a: Value, b: Value, c: Value) -> Value:
+        """RDNA4 (gfx12) WMMA: D[16x16] += A[16x16] * B[16x16], f16 in / f32 acc.
+
+        Unlike RDNA3/3.5, gfx12 drops the cross-half operand duplication: per
+        lane ``a`` and ``b`` are ``<8 x half>`` and the accumulator ``c`` /
+        result are ``<8 x float>``. Fragment layout (lane ``l``): ``a`` = row
+        ``l%16`` K=``(l//16)*8 + i``, ``b`` = col ``l%16`` K=``(l//16)*8 + i``;
+        result is column-distributed, slot ``i`` = ``(row (l//16)*8 + i,
+        col l%16)``. Lowered via :meth:`ck_dsl.core.isa.Gfx12RdnaBackend.emit_wmma`
+        (intrinsic ``...v8f32.v8f16``). Thin wrapper over :meth:`mma`.
+        """
+        return self.mma("wmma_gfx12_f32_16x16x16_f16", a, b, c)
+
+    def wmma_gfx12_f32_16x16x16_bf16(self, a: Value, b: Value, c: Value) -> Value:
+        """RDNA4 (gfx12) WMMA bf16 variant. Same ``<8 x half>``-style fragment
+        layout as :meth:`wmma_gfx12_f32_16x16x16_f16` but with ``<8 x bfloat>``
+        operands bitcast to ``<8 x i16>`` for the intrinsic
+        ``llvm.amdgcn.wmma.f32.16x16x16.bf16.v8f32.v8i16``. Thin wrapper over
+        :meth:`mma`."""
+        return self.mma("wmma_gfx12_f32_16x16x16_bf16", a, b, c)
 
     def mfma_f32_16x16x16_f16(self, a: Value, b: Value, c: Value) -> Value:
         return self.mma("mfma_f32_16x16x16_f16", a, b, c)
@@ -1514,6 +1654,103 @@ class IRBuilder:
 
     def mfma_f32_32x32x16_bf8(self, a: Value, b: Value, c: Value) -> Value:
         return self.mma("mfma_f32_32x32x16_bf8", a, b, c)
+
+    def inline_asm(
+        self,
+        template: str,
+        constraints: str,
+        operands: "Sequence[Value]" = (),
+        result_type: Optional[Type] = None,
+        *,
+        sideeffect: bool = True,
+        convergent: bool = False,
+        result_name_hint: str = "asm",
+    ) -> Optional[Value]:
+        """General AMDGPU inline-asm IR op (ADDITIVE, golden-safe).
+
+        Emits an LLVM ``call <ty> asm sideeffect[ convergent] "<template>",
+        "<constraints>"(<typed operands>)`` at lowering time. This is the
+        deterministic way to pin a machine instruction's operand register
+        classes (e.g. force AGPR srcA/srcB on an MFMA via the ``a``
+        constraint) which the typed intrinsics do not let us control.
+
+        Args:
+          template: the asm text with ``$0`` (output, if any) then ``$1..$N``
+            inputs in the order they appear in ``operands`` (after the output).
+          constraints: LLVM constraint string, e.g. ``"=v,0,a,a"``. AMDGPU
+            letters: ``v``=VGPR, ``a``=AGPR, ``s``=SGPR in; ``=v``/``=a``/``=s``
+            outputs; a digit (``0``) ties an input to that output.
+          operands: the input Values, in constraint order (after the output).
+          result_type: result Type, or ``None`` for a void asm.
+          sideeffect: emit ``sideeffect`` (default True; prevents DCE/dup).
+          convergent: also emit ``convergent`` (cannot be moved across waves).
+
+        Returns the result Value, or ``None`` for a void asm.
+        """
+        rt = [result_type] if result_type is not None else []
+        op = self._op(
+            "tile.inline_asm",
+            list(operands),
+            rt,
+            attrs={
+                "template": str(template),
+                "constraints": str(constraints),
+                "sideeffect": bool(sideeffect),
+                "convergent": bool(convergent),
+            },
+            result_name_hint=result_name_hint,
+        )
+        return op.result if result_type is not None else None
+
+    def inline_asm_multi(
+        self,
+        template: str,
+        constraints: str,
+        operands: "Sequence[Value]" = (),
+        *,
+        result_types: "Sequence[Type]" = (),
+        sideeffect: bool = True,
+        convergent: bool = False,
+        result_name_hint: str = "asm",
+    ):
+        """Multi-output AMDGPU inline-asm op (ADDITIVE, golden-safe).
+
+        Same as :meth:`inline_asm` but for an asm with N (> 1) outputs, which
+        LLVM models as a *literal struct* return (``{ <ty0>, <ty1>, ... }``)
+        that the lowering unpacks with ``extractvalue`` (the precedent is
+        :meth:`permlane32_swap`'s ``{ i32, i32 }`` asm). Returns a list of N
+        result Values in declaration order. ``$0..$(N-1)`` are the outputs;
+        inputs follow in ``operands`` order starting at ``$N``.
+
+        Used by the nuclear clustered MFMA helper
+        (:func:`helpers.asm.mfma_f8f6f4_agpr_cluster`) so a whole gate/up
+        MFMA burst is one asm node (one schedule fence) rather than N.
+        """
+        rts = list(result_types)
+        if len(rts) <= 1:
+            r = self.inline_asm(
+                template,
+                constraints,
+                operands,
+                result_type=(rts[0] if rts else None),
+                sideeffect=sideeffect,
+                convergent=convergent,
+                result_name_hint=result_name_hint,
+            )
+            return [r] if rts else []
+        op = self._op(
+            "tile.inline_asm",
+            list(operands),
+            rts,
+            attrs={
+                "template": str(template),
+                "constraints": str(constraints),
+                "sideeffect": bool(sideeffect),
+                "convergent": bool(convergent),
+            },
+            result_name_hint=result_name_hint,
+        )
+        return list(op.results)
 
     def mfma_scale_f32_16x16x128_f8f6f4(
         self,
@@ -2475,6 +2712,66 @@ class IRBuilder:
             attrs={"dwords": int(dwords), "aux": int(coherency)},
         )
 
+    def global_load_lds(
+        self,
+        src_ptr: Value,
+        byte_off: Value,
+        lds_addr: Value,
+        size_bytes: int,
+        coherency: int = 0,
+    ) -> None:
+        """Direct DRAM->LDS DMA via ``llvm.amdgcn.global.load.lds``.
+
+        This is the *flat/global* (non-buffer-descriptor) sibling of
+        :meth:`async_buffer_load_lds`. It bypasses the VGPR round-trip
+        entirely: each lane issues ``global_load_lds_dword{,x4}`` which
+        streams ``size_bytes`` directly from ``src_ptr + byte_off`` (a
+        ``ptr addrspace(1)``) into the wave-uniform LDS address
+        ``lds_addr`` (an i64, biased per-wave by the caller). No buffer
+        resource descriptor is required.
+
+        Parameters
+        ----------
+        src_ptr
+            Global (``addrspace(1)``) base pointer.
+        byte_off
+            i32 per-lane byte offset into ``src_ptr``; folded as an i8
+            GEP so the lane's source address is ``src_ptr + byte_off``.
+        lds_addr
+            i64 LDS (``addrspace(3)``) destination address. The intrinsic
+            writes lane-contiguously starting here, so multi-wave kernels
+            MUST bias this by ``wave_id * wave_bytes`` (see
+            :meth:`smem_ptr_add`) or waves stomp each other.
+        size_bytes
+            Bytes per lane: 1, 2, 4 (``global_load_lds_dword``) or — on
+            gfx950 — 12 / 16 (``global_load_lds_dwordx3/x4``). 16-byte is
+            the wide direct-to-LDS path the pyisa reference uses.
+        coherency
+            AUX-bit cache-coherence hint (0..3): :data:`CACHE_ALL`,
+            :data:`CACHE_GLOBAL`, :data:`CACHE_STREAM`,
+            :data:`NON_TEMPORAL`. ``CACHE_ALL`` is the right hint for
+            reused weights so they stay resident in L2.
+
+        Completion is signalled via the VMEM counter, exactly like
+        :meth:`async_buffer_load_lds`; consumers must place an
+        ``s_waitcnt(vmcnt=0)`` before reading the LDS. This only WINS
+        when coupled to software-prefetch (the next-tile DMA must be in
+        flight during the current MFMAs); issued alone on a
+        barrier-bound loop it regresses.
+        """
+        if size_bytes not in (1, 2, 4, 12, 16):
+            raise ValueError(
+                f"global_load_lds size_bytes must be 1, 2, 4, 12, or 16 "
+                f"(got {size_bytes})"
+            )
+        if coherency not in (0, 1, 2, 3):
+            raise ValueError(f"coherency must be 0..3 (got {coherency})")
+        self._op(
+            "tile.global_load_lds",
+            [src_ptr, byte_off, lds_addr],
+            attrs={"size_bytes": int(size_bytes), "aux": int(coherency)},
+        )
+
     # ----- f32 LDS ops (cshuffle epilogue) -----
 
     def smem_alloc_f32(
@@ -2802,8 +3099,11 @@ PURE_OP_NAMES = {
     "arith.and",
     "arith.or",
     "arith.not",
+    "arith.smax",
+    "arith.smin",
     "arith.zext",
     "arith.sext",
+    "arith.trunc",
     "arith.trunc_f32_to_f16",
     "arith.cast_to_f32",
     "arith.cast_f32_to",
@@ -2812,6 +3112,7 @@ PURE_OP_NAMES = {
     "math.exp2",
     "math.log2",
     "math.rcp",
+    "math.rcp_fast",
     "math.sqrt",
     "math.rsqrt",
     "math.tanh",
@@ -2821,7 +3122,15 @@ PURE_OP_NAMES = {
     "vector.bitcast",
     "vector.add",
     "vector.mul",
+    "vector.and",
+    "vector.or",
+    "vector.shl",
+    "vector.lshr",
+    "vector.smax",
+    "vector.smin",
     "vector.max",
+    "vector.cmp",
+    "vector.trunc",
     "vector.sum",
     "vector.reduce_max",
     "vector.splat",
@@ -2851,6 +3160,7 @@ PURE_OP_NAMES = {
     "arith.cvt_f32_to_fp8",
     "arith.cvt_f32_to_bf8",
     "arith.cvt_f32_to_i8_sat",
+    "arith.rint_f32",
     "arith.cvt_pk_f32_fp8x4",
     "arith.cvt_pk_f32_bf8x4",
     "arith.cvt_pk_fp8_f32x4",

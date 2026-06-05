@@ -133,6 +133,7 @@ from .mfma_gemm_inner import (
     decode_mfma_lanes,
     load_a_row_major_contiguous,
     load_b_col_strided_scalars,
+    load_smem_frag_contiguous_f16,
     mfma_atom_for_dtype,
     mfma_k_loop,
     mfma_k_loop_dynamic_K,
@@ -299,7 +300,9 @@ from .sparse_iter import (
 from .pipeline import SoftwarePipeline
 from .i4_dequant import (
     dequant_i4_byte_to_bf8_pair,
+    dequant_i4_byte_to_f16_pair,
     dequant_i4_byte_to_fp8_pair,
+    unpack_i4_byte_to_pair_f16,
     unpack_i4_byte_to_pair_f32,
     unpack_i4_byte_to_pair_i32,
     unpack_i4_byte_to_pair_i8,
@@ -420,6 +423,7 @@ __all__ = [
     "decode_mfma_lanes",
     "load_a_row_major_contiguous",
     "load_b_col_strided_scalars",
+    "load_smem_frag_contiguous_f16",
     "mfma_atom_for_dtype",
     "mfma_k_loop",
     "mfma_k_loop_dynamic_K",
@@ -626,7 +630,9 @@ __all__ = [
     "quantize_scalar_f32",
     # i4 packed-weight dequant
     "dequant_i4_byte_to_bf8_pair",
+    "dequant_i4_byte_to_f16_pair",
     "dequant_i4_byte_to_fp8_pair",
+    "unpack_i4_byte_to_pair_f16",
     "unpack_i4_byte_to_pair_f32",
     "unpack_i4_byte_to_pair_i32",
     "unpack_i4_byte_to_pair_i8",

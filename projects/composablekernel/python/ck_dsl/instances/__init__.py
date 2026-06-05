@@ -84,6 +84,7 @@ from .common.conv_direct_grouped import (  # noqa: F401
     build_direct_conv_16c,
 )
 from .common.conv_implicit_gemm import (  # noqa: F401
+    ConvAccumulatorEpilogue,
     ConvProblem,
     ImplicitGemmConvSpec,
     build_implicit_gemm_conv,
@@ -155,6 +156,14 @@ from .gfx950.attention_tiled_3d import (  # noqa: F401
     build_unified_attention_3d_tiled,
     build_unified_attention_reduce_tiled,
     supports_tiled_3d,
+)
+from .gfx950.deep_fused_conv_pool import (  # noqa: F401
+    FusedConvPoolProblem,
+    Gfx950DeepFusedConvPoolSpec,
+    build_deep_fused_conv_pool,
+    deep_fused_conv_pool_grid,
+    deep_fused_conv_pool_signature,
+    is_valid_spec as is_valid_deep_fused_conv_pool_spec,
 )
 from .common.elementwise import (  # noqa: F401
     BinaryOp,
@@ -382,6 +391,18 @@ from .common.block_scale_gemm import (  # noqa: F401
     block_scale_gemm_signature,
     build_block_scale_gemm,
     is_valid_spec as is_valid_block_scale_gemm_spec,
+)
+from .common.matmul_nbits import (  # noqa: F401
+    MatMulNBitsFamily,
+    MatMulNBitsSpec,
+    build_matmul_nbits,
+    dequant_i4_weights as dequant_matmul_nbits_weights,
+    is_valid_spec as is_valid_matmul_nbits_spec,
+    matmul_nbits_grid,
+    matmul_nbits_outer_tiles,
+    matmul_nbits_reference,
+    matmul_nbits_signature,
+    pack_i4_weights_for_matmul_nbits,
 )
 from .common.mx_gemm import (  # noqa: F401
     MxGemmSpec,
