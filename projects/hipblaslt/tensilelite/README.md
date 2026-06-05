@@ -13,7 +13,18 @@ The standard workflow for running the entire test suite is to use `tox`. This co
 
 ```
 cd rocm-libraries/projects/hipblaslt/tensilelite
-tox -e py3 -- Tensile/Tests -m common
+tox -e py3 -- Tensile/Tests/common
+```
+
+To run only the smoke subset, use the `smoke` marker. The smoke suite is a
+small architecture-validation suite for TensileLite codegen: it builds
+`tensilelite-client`, runs YAML tests marked `smoke`, and checks that codegen
+plus GPU execution works at all on the target architecture without running the
+full common integration suite.
+
+```
+cd rocm-libraries/projects/hipblaslt/tensilelite
+tox -e py3 -- Tensile/Tests/common -m smoke
 ```
 
 Subsequently, you can run just the Tensile unit tests via:
@@ -134,10 +145,10 @@ specialized builds (e.g., Debug builds) and setting the architecture.
 ```
 # build the client using tox with custom CMake flags
 cd rocm-libraries/projects/hipblaslt/tensilelite
-TENSILELITE_CLIENT_ARGS="--build-type Debug --gpu-targets gfx90a --clean" tox -e py3 -- Tensile/Tests -m common
+TENSILELITE_CLIENT_ARGS="--build-type Debug --gpu-targets gfx90a --clean" tox -e py3 -- Tensile/Tests/common
 
 # run tests with a single pytest worker (useful for debugging)
-TENSILE_NUM_PYTEST_WORKERS=1 tox -e py3 -- Tensile/Tests -m common
+TENSILE_NUM_PYTEST_WORKERS=1 tox -e py3 -- Tensile/Tests/common
 ```
 
 `invoke build-client` follows the existing `tensilelite` CMake preset by default.
