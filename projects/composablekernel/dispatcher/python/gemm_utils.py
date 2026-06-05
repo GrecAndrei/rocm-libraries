@@ -148,6 +148,8 @@ class GemmKernelConfig:
             name += "_preshuffle"
         elif self.variant == "streamk":
             name += "_streamk"
+        elif self.variant == "grouped":
+            name += "_grouped"
         return name
 
     # ------------------------------------------------------------------ #
@@ -262,8 +264,57 @@ class GemmProblem:
 
 
 @dataclass
+class GroupedGemmProblem:
+    """A grouped GEMM problem: a list of independent (M, N, K) sub-problems
+    all run by a single grouped kernel launch.
+
+    Each group g computes C_g[M_g x N_g] = A_g[M_g x K_g] @ B_g[K_g x N_g].
+    """
+
+    groups: List[Tuple[int, int, int]]
+
+    @classmethod
+    def uniform(
+        cls, group_count: int, M: int, N: int, K: int
+    ) -> "GroupedGemmProblem":
+        """All groups share the same (M, N, K) shape."""
+        return cls(groups=[(int(M), int(N), int(K)) for _ in range(int(group_count))])
+
+    @property
+    def group_count(self) -> int:
+        return len(self.groups)
+
+    @property
+    def flops(self) -> float:
+        return sum(2.0 * m * n * k for (m, n, k) in self.groups)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"groups": [[int(m), int(n), int(k)] for (m, n, k) in self.groups]}
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "GroupedGemmProblem":
+        return cls(groups=[(int(m), int(n), int(k)) for (m, n, k) in d["groups"]])
+
+
+@dataclass
 class GemmResult:
     output: np.ndarray
+    time_ms: float
+    status: int
+    tflops: float
+    kernel_name: str
+
+    @property
+    def success(self) -> bool:
+        return self.status == 0
+
+
+@dataclass
+class GroupedGemmResult:
+    """Result of a grouped GEMM launch: one output per group plus aggregate
+    timing/throughput across the whole batch."""
+
+    outputs: List[np.ndarray]
     time_ms: float
     status: int
     tflops: float
@@ -291,6 +342,8 @@ class GemmDispatcherLib:
         self._path = Path(so_path)
         self._lib = ctypes.CDLL(str(self._path))
         self._has_indexed = hasattr(self._lib, "dispatcher_get_kernel_name_at")
+        self._has_grouped = hasattr(self._lib, "dispatcher_run_grouped_gemm")
+        self._has_single = hasattr(self._lib, "dispatcher_run_gemm")
         self._setup_functions()
 
     def _setup_functions(self) -> None:
@@ -313,16 +366,32 @@ class GemmDispatcherLib:
             ]
             lib.dispatcher_get_kernel_name_at.restype = ctypes.c_int
 
-        lib.dispatcher_run_gemm.argtypes = [
-            ctypes.c_void_p,  # A (host)
-            ctypes.c_void_p,  # B (host)
-            ctypes.c_void_p,  # C (host)
-            ctypes.c_int64,  # M
-            ctypes.c_int64,  # N
-            ctypes.c_int64,  # K
-            ctypes.POINTER(ctypes.c_float),  # time_ms
-        ]
-        lib.dispatcher_run_gemm.restype = ctypes.c_int
+        # Single-problem ABI (regular GEMM .so). Absent on grouped libs.
+        if self._has_single:
+            lib.dispatcher_run_gemm.argtypes = [
+                ctypes.c_void_p,  # A (host)
+                ctypes.c_void_p,  # B (host)
+                ctypes.c_void_p,  # C (host)
+                ctypes.c_int64,  # M
+                ctypes.c_int64,  # N
+                ctypes.c_int64,  # K
+                ctypes.POINTER(ctypes.c_float),  # time_ms
+            ]
+            lib.dispatcher_run_gemm.restype = ctypes.c_int
+
+        # Multi-problem ABI (grouped GEMM .so). Absent on regular libs.
+        if self._has_grouped:
+            lib.dispatcher_run_grouped_gemm.argtypes = [
+                ctypes.c_int,  # group_count
+                ctypes.POINTER(ctypes.c_int64),  # Ms[]
+                ctypes.POINTER(ctypes.c_int64),  # Ns[]
+                ctypes.POINTER(ctypes.c_int64),  # Ks[]
+                ctypes.POINTER(ctypes.c_void_p),  # A_ptrs[]
+                ctypes.POINTER(ctypes.c_void_p),  # B_ptrs[]
+                ctypes.POINTER(ctypes.c_void_p),  # C_ptrs[]
+                ctypes.POINTER(ctypes.c_float),  # time_ms
+            ]
+            lib.dispatcher_run_grouped_gemm.restype = ctypes.c_int
 
         lib.dispatcher_cleanup.argtypes = []
         lib.dispatcher_cleanup.restype = None
@@ -364,6 +433,51 @@ class GemmDispatcherLib:
             M,
             N,
             K,
+            ctypes.byref(time_ms),
+        )
+        return status, time_ms.value
+
+    def run_grouped(
+        self,
+        A_list: List[np.ndarray],
+        B_list: List[np.ndarray],
+        C_list: List[np.ndarray],
+        Ms: List[int],
+        Ns: List[int],
+        Ks: List[int],
+    ) -> Tuple[int, float]:
+        """Launch the grouped kernel over a batch of (M, N, K) sub-problems.
+
+        Each A/B/C entry is a host numpy array already laid out as the kernel
+        expects (A row-major MxK, B column-major stored as NxK contiguous, C
+        row-major MxN). Pointers are marshalled into ctypes pointer arrays.
+        """
+        if not self._has_grouped:
+            raise RuntimeError(
+                f"{self._path} does not expose dispatcher_run_grouped_gemm"
+            )
+
+        g = len(A_list)
+        c_int64_arr = (ctypes.c_int64 * g)
+        c_void_arr = (ctypes.c_void_p * g)
+
+        ms = c_int64_arr(*[int(m) for m in Ms])
+        ns = c_int64_arr(*[int(n) for n in Ns])
+        ks = c_int64_arr(*[int(k) for k in Ks])
+
+        a_ptrs = c_void_arr(*[A.ctypes.data_as(ctypes.c_void_p) for A in A_list])
+        b_ptrs = c_void_arr(*[B.ctypes.data_as(ctypes.c_void_p) for B in B_list])
+        c_ptrs = c_void_arr(*[C.ctypes.data_as(ctypes.c_void_p) for C in C_list])
+
+        time_ms = ctypes.c_float(0.0)
+        status = self._lib.dispatcher_run_grouped_gemm(
+            g,
+            ms,
+            ns,
+            ks,
+            a_ptrs,
+            b_ptrs,
+            c_ptrs,
             ctypes.byref(time_ms),
         )
         return status, time_ms.value
@@ -419,9 +533,82 @@ class GpuGemmRunner:
         )
 
 
+class GpuGroupedGemmRunner:
+    """High-level runner for the GROUPED variant: construct from a grouped .so
+    path, call run(A_list, B_list, problem).
+
+    Like GpuGemmRunner, the ctypes ABI takes HOST pointers and manages GPU
+    memory internally (per group), so this runner only marshals the host
+    operand arrays. B is transposed to column-major per group to match the rcr
+    layout, exactly as the single-problem runner does.
+    """
+
+    def __init__(self, lib_path: Path):
+        self.lib = GemmDispatcherLib(lib_path)
+        if not self.lib.initialize():
+            raise RuntimeError(
+                f"Failed to initialize grouped dispatcher .so: {lib_path}"
+            )
+        names = self.lib.kernel_names
+        self._kernel_name = names[0] if names else "unknown"
+
+    @property
+    def kernel_name(self) -> str:
+        return self._kernel_name
+
+    def run(
+        self,
+        A_list: List[np.ndarray],
+        B_list: List[np.ndarray],
+        problem: GroupedGemmProblem,
+    ) -> GroupedGemmResult:
+        groups = problem.groups
+        if len(A_list) != len(groups) or len(B_list) != len(groups):
+            raise ValueError(
+                "A_list/B_list length must match the number of groups "
+                f"({len(A_list)}/{len(B_list)} vs {len(groups)})"
+            )
+
+        Ms = [g[0] for g in groups]
+        Ns = [g[1] for g in groups]
+        Ks = [g[2] for g in groups]
+
+        A_h: List[np.ndarray] = []
+        B_h: List[np.ndarray] = []
+        C_h: List[np.ndarray] = []
+        for A, B, (M, N, _K) in zip(A_list, B_list, groups):
+            # A row-major MxK; B supplied KxN and stored column-major (rcr).
+            A_h.append(np.ascontiguousarray(A, dtype=np.float16))
+            B_h.append(np.ascontiguousarray(B.T, dtype=np.float16))
+            C_h.append(np.zeros((M, N), dtype=np.float16))
+
+        status, time_ms = self.lib.run_grouped(A_h, B_h, C_h, Ms, Ns, Ks)
+
+        tflops = (problem.flops / (time_ms * 1e-3)) / 1e12 if time_ms > 0 else 0.0
+        return GroupedGemmResult(
+            outputs=C_h,
+            time_ms=time_ms,
+            status=status,
+            tflops=tflops,
+            kernel_name=self._kernel_name,
+        )
+
+
 # ============================================================================
 # Build API: codegen + hipcc -> .so paths (no GPU)
 # ============================================================================
+
+
+def _ctypes_source_name(config: GemmKernelConfig) -> str:
+    """Pick the ctypes ABI source for a config's variant.
+
+    The grouped kernel has a multi-problem launch signature that the
+    single-problem ``gemm_ctypes_lib.cpp`` cannot express, so grouped configs
+    compile against the dedicated ``grouped_gemm_ctypes_lib.cpp``.
+    """
+    if config.variant == "grouped":
+        return "grouped_gemm_ctypes_lib.cpp"
+    return "gemm_ctypes_lib.cpp"
 
 
 def _build_compile_jobs(
@@ -432,7 +619,7 @@ def _build_compile_jobs(
     ck_root = root.parent
     build_dir = _cu.get_build_dir()
     output_dir = _cu.get_generated_kernels_dir()
-    ctypes_source = root / "bindings" / "ctypes" / "gemm_ctypes_lib.cpp"
+    ctypes_source = root / "bindings" / "ctypes" / _ctypes_source_name(config)
     static_lib = build_dir / "libck_tile_dispatcher.a"
 
     lib_path = build_dir / "examples" / f"lib{config.name}.so"
@@ -508,13 +695,13 @@ def setup_multiple_gemm_dispatchers(
     codegen_script = _cu.get_codegen_path()
     output_dir = _cu.get_generated_kernels_dir()
     static_lib = _cu.get_build_dir() / "libck_tile_dispatcher.a"
-    ctypes_source = (
-        _cu.get_dispatcher_root() / "bindings" / "ctypes" / "gemm_ctypes_lib.cpp"
-    )
-    if not static_lib.exists() or not ctypes_source.exists():
+    ctypes_dir = _cu.get_dispatcher_root() / "bindings" / "ctypes"
+    needed_sources = {ctypes_dir / _ctypes_source_name(c) for c in configs}
+    missing = [str(p) for p in needed_sources if not p.exists()]
+    if not static_lib.exists() or missing:
         raise FileNotFoundError(
             "Missing static lib or ctypes source required for compilation:\n"
-            f"  {static_lib}\n  {ctypes_source}\n"
+            f"  {static_lib}\n  " + "\n  ".join(missing) + "\n"
             "Build the dispatcher first (cmake + make)."
         )
 
@@ -533,6 +720,7 @@ def setup_multiple_gemm_dispatchers(
                 "gpu_target": c.gfx_arch,
                 "tile_config_json": c.to_codegen_json(),
                 "hpp_glob_pattern": f"{c.name}.hpp",
+                "variant": c.variant,
             }
         )
 
@@ -628,6 +816,7 @@ def expand_sweep(
     arch: str,
     dtype: str = "fp16",
     layout: str = "rcr",
+    variant: str = "standard",
 ) -> List[GemmKernelConfig]:
     """Expand a Tile Engine GEMM JSON sweep config into GemmKernelConfig list.
 
@@ -726,6 +915,7 @@ def expand_sweep(
             pad_k=bool(pk),
             persistent=bool(persist),
             gfx_arch=arch,
+            variant=variant,
         )
         if c.name in seen:
             continue

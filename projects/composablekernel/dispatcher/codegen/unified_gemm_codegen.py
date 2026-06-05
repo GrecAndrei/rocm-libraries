@@ -610,20 +610,18 @@ using AccDataType = float;
     }}"""
 
     def _launch_function_grouped(self, config: KernelConfig) -> str:
-        """Generate launch function for grouped GEMM"""
+        """Generate launch function for grouped GEMM.
+
+        Grouped GEMM is multi-problem: it takes a list of (M,N,K) sub-problems.
+        MakeKargs builds a host vector of per-group kernel args that must be
+        copied into a device workspace, then the non-persistent kernel is
+        launched once with (workspace_ptr, group_count) -- it iterates the
+        groups and handles the K hotloop internally (no TailHandler dance).
+        """
         return f"""
     static float launch(const std::vector<ck_tile::GroupedGemmHostArgs<>>& gemm_descs,
                         const stream_config& stream) {{
-        const index_t num_groups = gemm_descs.size();
-        if(num_groups == 0) return 0.0f;
-
-        const index_t k_grain = TileK;
-        const index_t K_split = (gemm_descs[0].K + k_grain - 1) / k_grain * TileK;
-        const index_t num_loop = TilePartitioner::GetLoopNum(K_split);
-        const bool has_hot_loop = BaseGemmPipeline::BlockHasHotloop(num_loop);
-        const TailNumber tail_num = BaseGemmPipeline::GetBlockLoopTailNum(num_loop);
-
-        float ave_time{{0}};
+        if(gemm_descs.empty()) return 0.0f;
 
         constexpr auto scheduler = {self.tm.SCHEDULER_TO_CK[config.trait.scheduler]};
 
@@ -640,24 +638,39 @@ using AccDataType = float;
 
         using GemmKernel = ck_tile::GroupedGemmKernel<TilePartitioner, GemmPipeline, GemmEpilogue>;
 
-        const auto Run = [&](const auto has_hot_loop_, const auto tail_number_) {{
-            auto kargs = GemmKernel::MakeKernelArgs(gemm_descs);
+        auto kargs = GemmKernel::MakeKargs(gemm_descs);
+        if(!GemmKernel::IsSupportedArgument(kargs)) {{
+            throw std::runtime_error("Arguments not supported!");
+        }}
 
-            if (!GemmKernel::IsSupportedArgument(kargs)) {{
-                throw std::runtime_error("Arguments not supported!");
-            }}
+        const dim3 blocks = GemmKernel::BlockSize();
+        const dim3 grids  = GemmKernel::GridSize(gemm_descs);
 
-            const dim3 grids  = GemmKernel::GridSize(gemm_descs);
-            const dim3 blocks = GemmKernel::BlockSize();
+        const std::size_t workspace_size = GemmKernel::GetWorkSpaceSize(gemm_descs);
+        void* kargs_ptr = nullptr;
+        if(hipMalloc(&kargs_ptr, workspace_size) != hipSuccess) {{
+            throw std::runtime_error("grouped gemm workspace hipMalloc failed");
+        }}
+        if(hipMemcpyWithStream(kargs_ptr,
+                               kargs.data(),
+                               workspace_size,
+                               hipMemcpyHostToDevice,
+                               stream.stream_id_) != hipSuccess) {{
+            (void)hipFree(kargs_ptr);
+            throw std::runtime_error("grouped gemm workspace hipMemcpy failed");
+        }}
 
-            constexpr int kBlockPerCu = {config.k_block_per_cu};
-            ave_time = launch_kernel(stream,
-                make_kernel<kBlockPerCu>(GemmKernel{{}}, grids, blocks, 0, kargs));
+        constexpr int kBlockPerCu = {config.k_block_per_cu};
+        float ave_time = launch_kernel(
+            stream,
+            make_kernel<kBlockPerCu>(GemmKernel{{}},
+                                     grids,
+                                     blocks,
+                                     0,
+                                     cast_pointer_to_constant_address_space(kargs_ptr),
+                                     gemm_descs.size()));
 
-            return ave_time;
-        }};
-
-        BaseGemmPipeline::TailHandler(Run, has_hot_loop, tail_num);
+        (void)hipFree(kargs_ptr);
         return ave_time;
     }}"""
 
@@ -1473,7 +1486,7 @@ def main():
     parser.add_argument(
         "--variants",
         nargs="+",
-        choices=["standard", "preshuffle", "multi_d"],
+        choices=["standard", "preshuffle", "multi_d", "grouped"],
         default=["standard"],
         help="Variants to generate",
     )
