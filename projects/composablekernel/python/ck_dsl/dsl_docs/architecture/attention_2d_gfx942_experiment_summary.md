@@ -453,3 +453,55 @@ made v1's L2 register-V transpose flat). This is an **active follow-on**, not ye
 - **D128 bf16: unchanged (~39% of flash)** — no wide x8 atom for bf16 yet; the v2 ladder is fp16-only.
 - **D64: unchanged (~55–64% of PyTorch)** — selection gap was already closed in Batch 1; the v2 rewrite
   is a D128-only effort.
+
+---
+
+## Batch 5 — conflict-free V: units-bug fix, the store bottleneck, the async-DMA target
+
+**Framing correction (supersedes Batch-4 "operand-role asymmetry / MFMA-A reshape" — that was a red
+herring; and there is NO gfx942/ISA ceiling).** The remaining ~38% to flash is an **implementation gap**,
+proven by two working kernels at ~290 TF (D128 fp16) on this exact silicon: **aotriton `attn_fwd`** (the
+PyTorch reference we profile) and **CK-Tile `block_fmha_pipeline_qr_ks_vs`** (in this monorepo). They use
+the primitives we already have (32x32x8 via 2× iterateK, register-resident operands, async DMA,
+`v_perm` register transpose). Flash-level is reachable — the task is to replicate the working kernels'
+V feed. Any "62% is the ceiling" reading (including this doc's Batch-3 "V-read bound extracted to its
+gfx942 ceiling" line) is **wrong**; these are existence proofs.
+
+### The cfv blocker was a units bug, not cross-lane geometry [FIXED, commit `73753189ad1`]
+
+cfv's D128 fp16 failure (4 shapes, head-dims≥8, ~45% wrong, sign-flipped finite) was traced — via the
+decisive isolate `cfv-scalar-read == cfv-wide-read` (rules out read width/addressing) + code audit — to a
+**byte-vs-element units bug in the cfv HBM gather**: `_issue_v_transposed` passed the paged-KV
+descriptor's **byte** offset to a *typed* `b.global_load(value=f16*, voff)`, which lowers to
+`getelementptr half` (an **element** index, auto-scaled ×2) → read `V[2·linear]`. Every other K/V loader
+uses `async_buffer_load_lds_addr` (raw byte offset) and was unaffected. Fix (+11 lines, gfx942/cfv-only):
+divide `voff` by `KV_BYTES`. **cfv is now CORRECT 16/2/0 on the full net** (independently reproduced;
+L0/L4 unchanged; gfx950 byte-identical). The Batch-4 `perm_b32` op (`5f5dd0c5be3`) + read-time reshape
+(`fc905546c70`) were built chasing the red-herring theory and are harmless gated-off dead code (the
+read-time path never fixed it — proof the bug was the store/gather, not the read or the operand role).
+
+### Correct cfv is perf-negative AS IMPLEMENTED — the bottleneck is the V *store*
+
+| config | TFLOPS (D128 fp16) | wg/CU | MFMA-util | bound |
+|---|---:|---:|---:|---|
+| L4 (shipped, naive V) | 148–178 | 2 | 8.3% | V-conflict / LDS |
+| cfv (correct, sync-gather store) | **~30** | 1 | 4.5% | **store / HBM-stall (VMEM +25%)** |
+| flash (aotriton / CK-Tile) | ~290 | 1 | 14% | HBM roofline |
+
+The conflict-free LDS **read** goal was achieved (rocprof: cfv LDS-inst halved, LDS-wait ≈0). But cfv's
+**store** transposes V via a **synchronous per-element `global_load` gather** — that VMEM gather stalls
+on HBM and is ~5× slower than L4's pipelined async HW DMA. So cfv-as-implemented is a net loss; **L4
+remains the shipped winner.** The conflict-free read is right; only the store vehicle is wrong.
+
+### The target = the working kernels' V feed: async-DMA + in-register transpose [ACTIVE — tackling now]
+
+flash/CK never gather V transposed and never sync-store. They **async-DMA V in NATURAL [token,dim]
+layout (pipelined HW DMA) → transpose in REGISTERS with `v_perm` (CK `shuffle_tile`, dispatched
+*in-thread* — no cross-lane, by arranging the V tile distribution so each lane already holds its
+head-dim's tokens) → store to LDS in the A-consumable layout → plain conflict-free `ds_read_b64`.** Port
+this: replace cfv's sync gather with async-DMA(natural) → `perm_b32` register transpose → LDS store.
+Budget: cfv pad → ~1 wg/CU, which is fine (flash is ~1 wg/CU on D128 — conflict-free, not occupancy, is
+the win). **Reference the working source directly** — CK-Tile `block_fmha_pipeline_qr_ks_vs.hpp` +
+`transpose_vectors.hpp` (`__builtin_amdgcn_perm`) + `warp_gemm_attribute_mfma_impl.hpp` (gfx942 2×-iterateK
+x8) — replicate its V distribution + transpose exactly; do not re-derive from theory and do not invoke an
+ISA ceiling (the working kernels disprove one). This is the active path to flash.
