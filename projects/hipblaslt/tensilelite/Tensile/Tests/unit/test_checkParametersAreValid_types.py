@@ -258,7 +258,12 @@ class TestLegacyChecksUnchanged:
         # ProblemSizes returns early -- any payload is accepted.
         checkParametersAreValid(("ProblemSizes", [[1, 2, 3]]), validParameters)
 
-    def test_internal_support_params_skipped(self):
-        # InternalSupportParams returns early in checkParametersAreValid;
-        # it has its own sibling validator (added in Step 7).
-        checkParametersAreValid(("InternalSupportParams", [{"x": 1}]), validParameters)
+    def test_internal_support_params_rejected_by_name(self):
+        # Step 7 deleted the dead early-return for InternalSupportParams
+        # in checkParametersAreValid; the dict-typed section is now
+        # validated by its own sibling validator
+        # (validateInternalSupportParams). Passing it through this
+        # function falls through to the unknown-name check.
+        with pytest.raises(Exception) as exc:
+            checkParametersAreValid(("InternalSupportParams", [{"x": 1}]), validParameters)
+        assert "Invalid parameter name" in str(exc.value)

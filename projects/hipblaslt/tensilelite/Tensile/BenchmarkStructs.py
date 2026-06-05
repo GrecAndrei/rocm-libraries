@@ -25,7 +25,7 @@
 from copy import deepcopy
 import itertools
 
-from Tensile.Common.ValidParameters import checkParametersAreValid
+from Tensile.Common.ValidParameters import checkParametersAreValid, validateInternalSupportParams
 from Tensile.Common import print1, print2, hasParam, printExit
 from Tensile.Common.GlobalParameters import defaultBenchmarkCommonParameters, globalParameters, \
                                             defaultBatchedBenchmarkFinalProblemSizes, \
@@ -202,6 +202,17 @@ class BenchmarkProcess:
         self.internalSupportParams = getNonNoneFromConfig("InternalSupportParams", {})
         if self.customKernels == [] and self.internalSupportParams != {}:
             printExit("InternalSupportParams only supports Custom Kernels")
+
+        # Step 7: validate InternalSupportParams as a sibling check
+        # (dict-typed, can't fold into checkParametersAreValid's
+        # (name, list) contract). Builds the keypath against the
+        # surrounding BenchmarkProblems slice when available.
+        ispPrefix = f"{keyPathPrefix}.InternalSupportParams" if keyPathPrefix \
+                    else "InternalSupportParams"
+        validateInternalSupportParams(
+            self.internalSupportParams,
+            srcFile=srcFile, keyPathPrefix=ispPrefix,
+        )
 
         activationConf = ""
         biasTypesConf  = ""

@@ -1232,8 +1232,6 @@ def checkParametersAreValid(
     (name, values) = param
     if name == "ProblemSizes":
         return
-    elif name == "InternalSupportParams":
-        return
 
     if name not in validParams:
         raise Exception(
@@ -1282,5 +1280,66 @@ def checkParametersAreValid(
                     printWarning(f"Type mismatch (warn-only): {msg}")
                 else:
                     raise ConfigTypeError(msg)
+
+
+def validateInternalSupportParams(
+    d,
+    srcFile: str = "",
+    keyPathPrefix: str = "InternalSupportParams",
+):
+    """Validate an InternalSupportParams dict against defaultInternalSupportParams.
+
+    Sibling to ``checkParametersAreValid`` rather than a fold-in (per the
+    plan's B3): ``checkParametersAreValid`` has a ``(name, list)``
+    contract and ``InternalSupportParams`` arrives as a dict, so folding
+    would break the function's signature.
+
+    Each key in ``d`` must exist in ``defaultInternalSupportParams`` and
+    have ``type(default)``. Mismatches and unknown-key errors are
+    aggregated and raised once via :class:`ConfigTypeError`. Honours
+    ``TENSILE_STRICT_TYPE_CHECK`` (``warn``/``off``).
+    """
+    if not d:
+        return
+
+    from .TypeValidationErrors import (
+        ConfigTypeError, formatMismatch, getStrictMode,
+    )
+    # defaultInternalSupportParams lives in Common/GlobalParameters; import
+    # lazily because that module pulls in a lot.
+    from .GlobalParameters import defaultInternalSupportParams
+
+    strictMode = getStrictMode()
+    if strictMode == "off":
+        return
+
+    errors = []
+    for key, value in d.items():
+        if key not in defaultInternalSupportParams:
+            errors.append(
+                f"{keyPathPrefix}.{key}: unknown key. "
+                f"Valid keys are {sorted(defaultInternalSupportParams.keys())}."
+            )
+            continue
+        default = defaultInternalSupportParams[key]
+        expectedTypes = {type(default)}
+        if type(value) not in expectedTypes:
+            errors.append(
+                formatMismatch(srcFile, f"{keyPathPrefix}.{key}", value, expectedTypes)
+            )
+
+    if not errors:
+        return
+
+    full = (
+        "InternalSupportParams validation failed:\n  "
+        + "\n  ".join(errors)
+        + "\n(Run utilities/fix_yaml_types.py to bulk-fix the tree.)"
+    )
+    if strictMode == "warn":
+        from .Utilities import printWarning
+        printWarning(full)
+        return
+    raise ConfigTypeError(full)
 
 
