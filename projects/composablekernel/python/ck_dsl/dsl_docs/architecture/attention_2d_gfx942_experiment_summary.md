@@ -7,6 +7,11 @@ gfx950 study `attention_2d_experiment_summary.md`; the gfx950 perf playbook larg
 transfer (the wide-K `16x16x32` / `32x32x16` atoms and the transposed/combo ladder are
 gfx942-illegal, rejected in `__post_init__`).
 
+The distilled, arch-specific lessons from this log (ISA constraints,
+no-transpose-read operand feed, occupancy + compile-time budgets) are promoted
+to `optimization/gfx942_playbook.md`; the kept/reverted-lever ledger is in
+`optimization/runbook_compliance.md`. This file is the full per-experiment log.
+
 **Status legend:** `KEPT` (merged, net-positive) · `REVERTED` (measured, net-negative) ·
 `IN PROGRESS` (under measurement) · `DEFERRED` (out of scope / blocked on a precondition).
 

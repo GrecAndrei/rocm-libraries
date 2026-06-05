@@ -180,8 +180,10 @@ gfx950 perf playbook largely does **not** transfer (the wide-K `16x16x32` /
 at 6 PASS / 2 SKIP (D256) / 0 FAIL throughout; gfx950 stays byte-identical (all
 edits in `instances/gfx942/`). Binding constraint: 64 KB LDS / CU, **2-CTA/CU
 threshold = ≤ 32,768 B/CTA**. Reference flash (aotriton / CK-Tile) ≈ 290 TF on
-D128 fp16. Full living log:
-`architecture/attention_2d_gfx942_experiment_summary.md`.
+D128 fp16. The arch-specific *why* behind these levers (ISA constraints, the
+no-transpose-read operand feed, the occupancy + compile-time budgets) lives in
+`optimization/gfx942_playbook.md`; this table is the results ledger. Full living
+log: `architecture/attention_2d_gfx942_experiment_summary.md`.
 
 ### Kept levers
 

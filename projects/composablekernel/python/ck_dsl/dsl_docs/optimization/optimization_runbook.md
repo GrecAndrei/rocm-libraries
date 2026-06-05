@@ -1383,8 +1383,8 @@ bottleneck class, and the kernel structure (§3, §11).
   per-element transpose (`vec_extract` / `vec_pack` over a whole tile)
   produces O(tile) straight-line IR. The DSL never re-rolls it, so a
   large tile explodes the LLVM IR handed to comgr and the
-  CODEGEN_BC_TO_RELOCATABLE stage runs for minutes — we hit a **45-min
-  JIT/comgr timeout** building a gfx942 register-V transpose this way.
+  CODEGEN_BC_TO_RELOCATABLE stage runs for minutes — a fully-unrolled
+  whole-tile register transpose can run comgr for tens of minutes.
   Fix: **loop-roll** — wrap the reshape in a runtime `scf_for` over
   micro-tiles and keep only the tiny inner block unrolled. The IR
   collapses and the build drops back to seconds with **identical
@@ -1393,7 +1393,10 @@ bottleneck class, and the kernel structure (§3, §11).
   correctness or scheduling; a per-element data reshape over a whole
   tile is a runtime loop. Watch `art.timings["comgr_bc"]` /
   `["reloc"]` — a multi-second jump on an otherwise unchanged kernel is
-  this signature. See `runtime/comgr_and_hipmodule.md` and
+  this signature. See `runtime/comgr_and_hipmodule.md`. For the concrete
+  gfx942-attention compile-time budget (cold-compile ~250–290 s
+  per-shape-signature; a 45-min timeout from a fully-unrolled transpose)
+  see `optimization/gfx942_playbook.md` and
   `architecture/attention_2d_gfx942_experiment_summary.md` (Batch 5).
 
 ### 10.4 Alias And Pointer Semantics

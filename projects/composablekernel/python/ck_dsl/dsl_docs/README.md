@@ -42,7 +42,7 @@ New to the DSL? Read in this order:
 16. `runtime/manifest_schema.md`
 17. `runtime/comgr_and_hipmodule.md`
 18. `runtime/limitations.md`
-19. `optimization/optimization_runbook.md` — long-form, section-by-section (includes the iteration loop, knob catalog, case studies, probe workflow, arch reference)
+19. `optimization/optimization_runbook.md` — long-form, section-by-section (includes the iteration loop, knob catalog, case studies, probe workflow, arch reference). For gfx942/CDNA3-specific levers that do **not** transfer to gfx950, see `optimization/gfx942_playbook.md`.
 20. `optimization/runbook_mapping.md`
 21. `optimization/measured_results.md`
 22. `fusion/overview.md`

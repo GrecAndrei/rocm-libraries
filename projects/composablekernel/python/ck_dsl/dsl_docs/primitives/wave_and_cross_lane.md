@@ -104,52 +104,17 @@ for off in (1, 2, 4, 8, 16, 32):
 
 `helpers/attention.py::warp_xor_reduce_max(b, v)` and `warp_xor_reduce_sum(b, v)` implement this for f32. Use them instead of hand-rolling unless your kernel needs a non-standard reduce.
 
-## Register-transpose-on-store (gfx942 / CDNA3, no `ds_read_tr_b16`)
+**`ds_swizzle` / `ds_bpermute` / `warp_shuffle_xor` are LDS-port ops.** They
+cost `lgkmcnt` and serialize against every other LDS read/write in flight, so
+they are a poor vehicle for an in-register data reshape (the `lgkmcnt`
+serialization can cost exactly what the reshape saves). Prefer VALU `v_perm` /
+`permlane32_swap` for in-register reshapes; reach for `ds_swizzle` /
+`ds_bpermute` only for genuine cross-lane traffic with no VALU equivalent.
 
-`ds_read_tr16_b64` (below) and the i8/fp8 `ds_read_tr_b8` are **gfx950-only**. On
-gfx942 (CDNA3 / MI300X) there is no transpose-read instruction at all, so a
-matmul that needs a transposed LDS operand (e.g. the V operand of the PV matmul
-in attention) cannot get it on the read side. The working pattern — the one CK
-and flash use — moves the transpose to the **store** side, in registers:
-
-```text
-buffer_load_vN (V in NATURAL [token, dim] layout, vectorized, pipelined HW DMA)
-  -> in-register 2x2 transpose with v_perm  (vec_extract / vec_pack;
-       __builtin_amdgcn_perm masks 0x01000504 and 0x03020706)
-  -> single smem_store of the now-A-consumable layout
-  -> plain conflict-free ds_read_b64 in the consumer
-```
-
-The transpose is `v_perm` (VALU), so it does **not** touch the LDS port. This is
-the only conflict-free transposed-operand path on gfx942.
-
-**Why `v_perm`, not `ds_swizzle` / `warp_shuffle_xor`, for in-register reshapes.**
-`ds_swizzle` and `warp_shuffle_xor` (and `ds_bpermute`, below) are **LDS-port
-ops**: they cost `lgkmcnt` and serialize against every other LDS read/write in
-flight. On the gfx942 attention path, a register-V transpose built from
-`ds_swizzle` measured the `lgkmcnt` wait climbing **18 → 234** and the kernel went
-flat — the swizzle serialization cost exactly what the conflict removal saved.
-CK's `shuffle_tile@store` dispatches the reshape **in-thread** (arranging the tile
-distribution so each lane already owns its head-dim's tokens) for precisely this
-reason. Use VALU `v_perm` / `permlane32_swap` for in-register reshapes; reach for
-`ds_swizzle` / `ds_bpermute` only for genuine cross-lane traffic with no VALU
-equivalent. See `architecture/attention_2d_gfx942_experiment_summary.md`
-(Batch 3 L2, Batch 5; commits `73753189ad1`, `9cff43bdd2d`).
-
-## The V-feed vehicle taxonomy (conflict-free transposed V on gfx942)
-
-When a kernel needs a transposed V operand that is also conflict-free, and the
-arch has no transposing async DMA and no `ds_read_tr_b16` (gfx942), there are
-three vehicles. Two are traps; record them so nobody re-walks them:
-
-| Vehicle | Correct? | Verdict | Why |
-|---|---|---|---|
-| (a) sync per-element `global_load` gather (transpose during the HBM read) | yes | ~5x slower | the synchronous VMEM gather stalls on HBM; not pipelined (measured ~30 TF vs L4's 148-178 on D128 fp16) |
-| (b) async-DMA into an LDS staging slab, then transpose | yes | LDS-budget wall | extra LDS hop on a 64 KB/CU arch already at the occupancy threshold |
-| (c) **register `buffer_load` + in-register `v_perm` transpose + single `smem_store`** | yes | **the win** | the CK / flash way: pipelined HW DMA in natural layout, VALU transpose (no LDS port), plain `ds_read_b64` consumer |
-
-Vehicle (c) is the register-transpose-on-store pattern above. Evidence and the
-units-bug that long masked (a)'s correctness: same summary doc, Batch 5.
+> **gfx942 / CDNA3:** for the no-transpose-read operand-feed pattern
+> (register-transpose-on-store with `v_perm`, and the V-feed vehicle taxonomy),
+> see `optimization/gfx942_playbook.md`. gfx942 has no `ds_read_tr_b16`, so the
+> `ds_read_tr16_b64` path below is gfx950-only.
 
 ## `ds_read_tr16_b64`
 
