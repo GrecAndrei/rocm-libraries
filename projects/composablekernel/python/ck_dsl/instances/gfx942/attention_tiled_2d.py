@@ -52,6 +52,7 @@ from ...core.ir import (
     PtrType,
     Type,
     Value,
+    VectorType,
 )
 from ...helpers.atoms import MfmaAtom, make_c_warp_dstr_encoding
 from ...helpers.attention import (
@@ -345,6 +346,27 @@ class UnifiedAttention2DTiledSpec:
     # is a KERNEL-SIGNATURE field (tagged "cfv" in kernel_name) so it produces a
     # distinct compiled/cached kernel -- a bare env var would alias the cache.
     use_conflict_free_v: bool = False
+    # Conflict-free transposed V feed, STORE-PATH vehicle (c) (Stream 2 GRIND).
+    # Same conflict-free ``V_lds[HD, T + pad]`` layout + ``ds_read_b64`` consumer
+    # as ``use_conflict_free_v`` above, but a DIFFERENT V *store* mechanism. The
+    # ``use_conflict_free_v`` store is vehicle (a) -- a SYNCHRONOUS token-strided
+    # ``global_load`` gather (V_T_VEC scalar loads at stride HD per item); that
+    # VMEM gather stalls on HBM and is ~5x slower (rocprof: ~30 TF vs wide4's
+    # 183). The conflict-free LDS read was already right; only the store vehicle
+    # was wrong. This field switches the store to the CK/flash way (gfx942
+    # playbook vehicle (c)): each lane ``global_load_vN``-reads V in its NATURAL
+    # ``[token, dim]`` layout (CONTIGUOUS dim run -> coalesced VMEM, pipelined),
+    # transposes 2x2 f16 blocks IN-REGISTER with ``perm_b32`` (``v_perm_b32``,
+    # in-thread, no cross-lane, no ``lgkmcnt``; CK ``transpose_vectors`` masks
+    # 0x01000504 / 0x03020706), then writes the now-A-consumable ``[HD,T+pad]``
+    # layout with ONE contiguous ``ds_write_b{32,64}`` per token group. The
+    # micro-tile loop is RUNTIME-rolled (a fully-unrolled transpose hit a 45-min
+    # JIT IR-explosion -- gfx942 playbook). f16-only, requires the transposed-x8
+    # orientation (same gate as use_conflict_free_v) and is MUTUALLY EXCLUSIVE
+    # with it. KERNEL-SIGNATURE field (tagged "cfvst" in kernel_name) so it
+    # produces a distinct compiled/cached kernel. DEFAULT OFF -> gfx950 and every
+    # existing kernel are byte-identical.
+    use_conflict_free_v_store: bool = False
     # K single-buffer (OCCUPANCY lever, gfx942). The default path double-buffers
     # K_lds (``[2, T, HD]``) so the next-tile async-DMA K[i+1] overlaps softmax+PV
     # of tile i. On the transposed-x8 D128 fp16 path that double buffer is the LDS
@@ -549,6 +571,19 @@ class UnifiedAttention2DTiledSpec:
             raise ValueError(
                 "use_conflict_free_v requires the transposed-x8 PV orientation "
                 "(use_mfma_32x32x8 + use_transposed_qk_32x32)"
+            )
+        if self.use_conflict_free_v_store and not (
+            self.use_mfma_32x32x8 and self.use_transposed_qk_32x32
+        ):
+            raise ValueError(
+                "use_conflict_free_v_store requires the transposed-x8 PV "
+                "orientation (use_mfma_32x32x8 + use_transposed_qk_32x32)"
+            )
+        if self.use_conflict_free_v_store and self.use_conflict_free_v:
+            raise ValueError(
+                "use_conflict_free_v_store and use_conflict_free_v are mutually "
+                "exclusive (they are two store vehicles for the same transposed "
+                "V_lds layout)"
             )
         if self.use_k_single_buffer:
             if not (self.use_mfma_32x32x8 and self.use_transposed_qk_32x32):
@@ -767,6 +802,7 @@ class UnifiedAttention2DTiledSpec:
             "fp8pv" if self.use_fp8_mfma_pv else "",
             "regpv" if self.use_register_pv else "",
             "cfv" if self.use_conflict_free_v else "",
+            "cfvst" if self.use_conflict_free_v_store else "",
             "k1buf" if self.use_k_single_buffer else "",
         )
 
@@ -1041,11 +1077,33 @@ def build_unified_attention_2d_tiled(
     REGISTER_PV = spec.use_register_pv
     TRANSPOSED_QK_32X32 = spec.use_transposed_qk_32x32
     CONFLICT_FREE_V = spec.use_conflict_free_v
+    # Store-path conflict-free V (vehicle (c)): reuses the SAME transposed
+    # ``V_lds[HD, T+pad]`` layout + conflict-free ``ds_read_b64`` consumer as
+    # ``CONFLICT_FREE_V`` (so ``TRANSPOSED_V`` below is driven by EITHER flag),
+    # but swaps the store fill from the sync HBM gather to register-load +
+    # ``perm_b32`` in-register transpose + contiguous LDS store.
+    CONFLICT_FREE_V_STORE = spec.use_conflict_free_v_store
     K_SINGLE_BUF = spec.use_k_single_buffer
     # DIAGNOSTIC ONLY (not signature-gated -- toggle re-JITs via env): read the
     # transposed cfv [HD,T+pad] V via 4 scalar n=1 reads instead of one n=4
     # ds_read_b64. Isolates whether the wide read lowering is the cfv fault.
     _CFV_SCALAR_READ = os.environ.get("HIPDNN_GFX942_CFV_SCALAR_READ", "0") == "1"
+    # DIAGNOSTIC: store-path vehicle (c) -- read the HBM dim-pair via 2 scalar
+    # loads + pack instead of one global_load_vN. Isolates the vectorized load.
+    _CFV_STORE_SCALAR_LOAD = (
+        os.environ.get("HIPDNN_GFX942_CFV_STORE_SCALAR_LOAD", "0") == "1"
+    )
+    # DIAGNOSTIC: store-path vehicle (c) -- element-wise scatter (no perm).
+    # Proves the (dim,token) mapping + coverage independent of the perm.
+    _CFV_STORE_SCATTER = (
+        os.environ.get("HIPDNN_GFX942_CFV_STORE_SCATTER", "0") == "1"
+    )
+    _CFV_STORE_PREZERO = (
+        os.environ.get("HIPDNN_GFX942_CFV_STORE_PREZERO", "0") == "1"
+    )
+    _CFV_STORE_SEPOFF = (
+        os.environ.get("HIPDNN_GFX942_CFV_STORE_SEPOFF", "0") == "1"
+    )
     KV_BYTES = 1 if KV_FP8 else 2
     kv_io_dtype = FP8E4M3 if KV_FP8 else dtype
 
@@ -1407,8 +1465,32 @@ def build_unified_attention_2d_tiled(
     _v_t_pad = 8
     _v_t_extra_bytes = HD * _v_t_pad * 2
     _v_t_fits = (_lds_natural + _v_t_extra_bytes) <= _LDS_CAP
+    # ACCURATE transposed-x8 footprint for the cfv-store gate. The generic
+    # ``_lds_natural`` above over-counts the transposed-x8 path (it assumes
+    # P_lds present, K always double-buffered, full Acc_lds) and walls the wide
+    # (nw=4 / T=128) geometry the FLASH_WIDE=4 baseline actually runs. On
+    # TRANSPOSED_X8: P_lds=0 (P^T in registers); Acc_lds aliases the loop-dead
+    # K/V region (~0 to the binding peak); Q_lds=0 when BLOCK_M<=2*T; K is single-
+    # buffered when BLOCK_M<=T else double. V_lds is the transposed [HD,T+pad].
+    # Mirrors compile_service's ``_lds_bytes_transposed_x8``.
+    _x8_k_slots = 1 if (BLOCK_M <= T) else 2
+    _x8_q_lds = 0 if (BLOCK_M <= 2 * T) else BLOCK_M * HD * 2
+    _v_t_fits_x8 = (
+        _x8_k_slots * T * HD * 2
+        + (T + _v_t_pad) * HD * 2
+        + _x8_q_lds
+    ) <= _LDS_CAP
+    # Both conflict-free-V vehicles share the SAME transposed [HD,T+pad] V_lds
+    # layout + consumer; they differ only in the STORE fill. TRANSPOSED_V gates
+    # the shared layout/consumer; TRANSPOSED_V_STORE picks the store vehicle
+    # (True = vehicle (c), register-load + perm_b32 transpose; False = the
+    # vehicle (a) sync gather of the original CONFLICT_FREE_V path).
+    # The store path (vehicle (c)) uses the accurate transposed-x8 footprint so
+    # the wide (nw=4 / T=128) baseline geometry is admitted; the legacy gather
+    # (vehicle (a)) keeps the original conservative ``_v_t_fits`` byte-identically.
+    _v_t_fits_eff = _v_t_fits_x8 if CONFLICT_FREE_V_STORE else _v_t_fits
     TRANSPOSED_V = (
-        CONFLICT_FREE_V
+        (CONFLICT_FREE_V or CONFLICT_FREE_V_STORE)
         and USE_MFMA_32X32X8
         and TRANSPOSED_QK_32X32
         and not FP8_MFMA_PV
@@ -1420,7 +1502,13 @@ def build_unified_attention_2d_tiled(
         and HD in (64, 128)
         and (HD % 8 == 0)
         and (T * HD) % THREADS == 0
-        and _v_t_fits
+        and _v_t_fits_eff
+    )
+    # Store-vehicle selector: vehicle (c) (register-load + in-register perm_b32
+    # transpose) when the store-path flag drove TRANSPOSED_V; the 2x2 f16
+    # transpose needs T and HD both even (HD%8==0 already; T%2 below).
+    TRANSPOSED_V_STORE = (
+        TRANSPOSED_V and CONFLICT_FREE_V_STORE and (T % 2 == 0)
     )
     SWIZZLE_VLDS = (
         os.environ.get("HIPDNN_GFX942_SWIZZLE_VLDS", "1") == "1"
@@ -2377,6 +2465,149 @@ def build_unified_attention_2d_tiled(
                 V_T_VEC,
             )
 
+    # ---- Stream 2 (GRIND): conflict-free V STORE-PATH vehicle (c) ----
+    # gfx942 playbook's only conflict-free transposed-operand vehicle. The
+    # vehicle (a) ``_issue_v_transposed`` above is correct but ~5x slower: its
+    # HBM read is a SYNCHRONOUS token-strided ``global_load`` gather (V_T_VEC
+    # scalar loads at stride HD per item) that stalls on HBM (rocprof: ~30 TF).
+    # The LDS *store* and the LDS *read* were already conflict-free; only the
+    # HBM access pattern was wrong.
+    #
+    # This loader makes the HBM read NATURAL and the transpose IN-REGISTER, the
+    # CK ``transpose_vectors`` / flash way:
+    #   * Partition the (token, dim) tile into 2x2 f16 blocks. Block (tg, dg)
+    #     covers tokens {2*tg, 2*tg+1} x dims {2*dg, 2*dg+1}.
+    #   * Read each of the 2 token rows as ONE 2-half vector load over a
+    #     CONTIGUOUS dim pair: ``x0 = (V[t0,d0], V[t0,d1])``,
+    #     ``x1 = (V[t1,d0], V[t1,d1])`` -- coalesced VMEM (adjacent lanes / the
+    #     dim axis are contiguous in HBM), no token-stride gather.
+    #   * Transpose the 2x2 with ``perm_b32`` (in-thread VALU ``v_perm_b32``, no
+    #     cross-lane, no lgkmcnt). With src0=x0(t0), src1=x1(t1) the 8 concat
+    #     bytes are [t1.d0, t1.d1, t0.d0, t0.d1]; the CK masks give:
+    #       perm(x0,x1, 0x01000504) -> (V[t0,d0], V[t1,d0])  = dim-row d0
+    #       perm(x0,x1, 0x03020706) -> (V[t0,d1], V[t1,d1])  = dim-row d1
+    #     i.e. each output i32 holds 2 CONSECUTIVE tokens at a fixed dim.
+    #   * Write each output as ONE contiguous 2-half ``ds_write_b32`` into
+    #     ``V_lds[0, d, 2*tg]`` (token is the inner/fast axis) -- conflict-free.
+    # The block loop is RUNTIME-rolled (``scf_for`` over block index, stride
+    # THREADS) so the IR stays O(1) regardless of tile size (gfx942 playbook:
+    # a fully-unrolled transpose hit a 45-min JIT IR-explosion).
+    if TRANSPOSED_V_STORE:
+        _v_t2_tok_pairs = T // 2
+        _v_t2_dim_pairs = HD // 2
+        _v_t2_total_blocks = _v_t2_tok_pairs * _v_t2_dim_pairs
+
+    def _issue_v_transposed_store(kv_tile_idx: Value) -> None:
+        """Register-load + ``perm_b32`` transpose + contiguous LDS store of V
+        into ``V_lds[0, dim, token]`` (vehicle (c), f16). See block comment."""
+        zero_h = b.cast_f32_to(b.const_f32(0.0), dtype)
+        zero_i32 = b.const_i32(0)
+        tile_tok_base = b.mul(kv_tile_idx, b.const_i32(T))
+        _tp = b.const_i32(_v_t2_tok_pairs)
+        if _CFV_STORE_PREZERO:
+            # DIAGNOSTIC: pre-zero every V_lds slot (dim x token) so any
+            # uncovered slot reads 0 instead of garbage. If this fixes the
+            # error, the store has a coverage gap.
+            _pz = b.scf_for(
+                tid, b.const_i32(HD * T), b.const_i32(THREADS), iv_name="vpz"
+            )
+            with _pz as pz:
+                _pd = b.div(pz, b.const_i32(T))
+                _ptk = b.mod(pz, b.const_i32(T))
+                b.smem_store_vN(V_lds, [zero_i32, _pd, _ptk], zero_h, 1)
+            b.sync()
+
+        def _load_token_row_pair(t_row: Value, d0: Value) -> Value:
+            """Load <2 x f16> = (V[t_row, d0], V[t_row, d0+1]) as i32, bounded.
+
+            Contiguous dim pair -> coalesced 2-half VMEM load. Out-of-range
+            tokens (past this CTA's valid KV length) are masked to 0 (matching
+            the bounded async DMA's hardware zero-fill) so masked P*V stays 0,
+            never P(0)*V(inf)=nan.
+            """
+            linear = b.add(b.mul(t_row, b.const_i32(HD)), d0)
+            voff, valid = paged_kv_desc.offset(
+                b,
+                tile_idx=kv_tile_idx,
+                linear_half=linear,
+                kv_head=kv_head_idx,
+            )
+            in_range = b.cmp_lt(b.add(tile_tok_base, t_row), max_seq_prefix_len)
+            if valid is not None:
+                in_range = b.land(in_range, valid)
+            safe_voff = b.select(in_range, voff, zero_i32)
+            if _CFV_STORE_SEPOFF:
+                # ISOLATION: compute the (t_row, d0+1) offset via a SEPARATE
+                # descriptor call instead of voff+1. Tests the dim-contiguity
+                # assumption (does the paged descriptor have dim element-stride
+                # 1?). Vehicle (a) always uses separate per-element offsets.
+                linear1 = b.add(b.mul(t_row, b.const_i32(HD)), b.add(d0, b.const_i32(1)))
+                voff1, valid1 = paged_kv_desc.offset(
+                    b, tile_idx=kv_tile_idx, linear_half=linear1, kv_head=kv_head_idx
+                )
+                safe_voff1 = b.select(in_range, voff1, zero_i32)
+                e0 = b.global_load(value, safe_voff, dtype, align=2)
+                e1 = b.global_load(value, safe_voff1, dtype, align=2)
+                e0 = b.select(in_range, e0, zero_h)
+                e1 = b.select(in_range, e1, zero_h)
+                v2 = b.vec_pack([e0, e1], dtype)
+            elif _CFV_STORE_SCALAR_LOAD:
+                # ISOLATION: read the 2 dims as 2 scalar n=1 loads + manual pack
+                # (rules out the vectorized global_load_vN lowering). Same values.
+                e0 = b.global_load(value, safe_voff, dtype, align=2)
+                e1 = b.global_load(
+                    value, b.add(safe_voff, b.const_i32(1)), dtype, align=2
+                )
+                e0 = b.select(in_range, e0, zero_h)
+                e1 = b.select(in_range, e1, zero_h)
+                v2 = b.vec_pack([e0, e1], dtype)
+            else:
+                v2 = b.global_load_vN(value, safe_voff, dtype, 2, align=4)
+                # Zero masked rows (whole pair belongs to one token).
+                zero_vec = b.vec_pack([zero_h, zero_h], dtype)
+                v2 = b.select(in_range, v2, zero_vec)
+            return b.bitcast(v2, I32)
+
+        blk_for = b.scf_for(
+            tid, b.const_i32(_v_t2_total_blocks), b.const_i32(THREADS),
+            iv_name="vcfvblk",
+        )
+        with blk_for as blk:
+            # block (tg, dg): tokens {2*tg, 2*tg+1}, dims {2*dg, 2*dg+1}
+            tg = b.mod(blk, _tp)
+            dg = b.div(blk, _tp)
+            t0 = b.mul(tg, b.const_i32(2))
+            t1 = b.add(t0, b.const_i32(1))
+            d0 = b.mul(dg, b.const_i32(2))
+            d1 = b.add(d0, b.const_i32(1))
+            x0 = _load_token_row_pair(t0, d0)  # (V[t0,d0], V[t0,d1])
+            x1 = _load_token_row_pair(t1, d0)  # (V[t1,d0], V[t1,d1])
+            if _CFV_STORE_SCATTER:
+                # DIAGNOSTIC: element-wise scatter (no perm) -- store each of the
+                # 4 loaded V values directly at its transposed slot V_lds[d,t].
+                # Proves the (dim,token) mapping + coverage independent of perm.
+                x0v = b.bitcast(x0, VectorType(dtype, 2))  # (V[t0,d0],V[t0,d1])
+                x1v = b.bitcast(x1, VectorType(dtype, 2))  # (V[t1,d0],V[t1,d1])
+                v_t0_d0 = b.vec_extract(x0v, 0)
+                v_t0_d1 = b.vec_extract(x0v, 1)
+                v_t1_d0 = b.vec_extract(x1v, 0)
+                v_t1_d1 = b.vec_extract(x1v, 1)
+                b.smem_store_vN(V_lds, [zero_i32, d0, t0], v_t0_d0, 1)
+                b.smem_store_vN(V_lds, [zero_i32, d0, t1], v_t1_d0, 1)
+                b.smem_store_vN(V_lds, [zero_i32, d1, t0], v_t0_d1, 1)
+                b.smem_store_vN(V_lds, [zero_i32, d1, t1], v_t1_d1, 1)
+            else:
+                # 2x2 transpose: each output i32 = 2 consecutive tokens at one dim.
+                row_d0 = b.perm_b32(x0, x1, b.const_i32(0x01000504))  # (t0,t1)@d0
+                row_d1 = b.perm_b32(x0, x1, b.const_i32(0x03020706))  # (t0,t1)@d1
+                # ONE contiguous 2-half ds_write per dim row (token is inner).
+                b.smem_store_vN(
+                    V_lds, [zero_i32, d0, t0], b.bitcast(row_d0, VectorType(dtype, 2)), 2
+                )
+                b.smem_store_vN(
+                    V_lds, [zero_i32, d1, t0], b.bitcast(row_d1, VectorType(dtype, 2)), 2
+                )
+
     # ---------------- FP8 K/V cache: async DMA loader (round 2) ----------------
     # Two-phase split that mirrors the bf16 path's HW DMA pipeline:
     #   1. `_issue_kv_fp8_async_load` issues `raw.ptr.buffer.load.lds`
@@ -2861,6 +3092,8 @@ def build_unified_attention_2d_tiled(
             _issue_v_fp8_mfma_stripe(tile_idx)
         elif KV_FP8:
             _issue_fp8_dequant_loads(tile_idx, b.const_i32(0), "V")
+        elif TRANSPOSED_V_STORE:
+            _issue_v_transposed_store(tile_idx)
         elif TRANSPOSED_V:
             _issue_v_transposed(tile_idx)
         else:
