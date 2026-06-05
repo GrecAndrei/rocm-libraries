@@ -1115,6 +1115,21 @@ def _unified_tiled_spec_from_problem(problem, knobs: dict, arch: str = "gfx950")
         _flash_level = "4"
     else:
         _flash_level = "0"
+    # Sub-lever 3 (flash-regime rewrite): experimental wide-tile (num_warps>1)
+    # for the L4 path. rocprof (job 354640) proved shipped L4 is latency-bound at
+    # WG=64 (1 wavefront/WG, 1 wg/CU) while PyTorch flash runs WG=256 (4 waves)
+    # to hide the 356-cyc LDS latency starving MFMA. L4 already keeps P in
+    # registers + acc in AGPR (Acc_lds epilogue-only), so the LDS is freed; the
+    # missing structural lever is more resident waves/WG. ``HIPDNN_GFX942_FLASH_WIDE``
+    # in {2,4} forces the L4 (transposed-x8 + k1buf) geometry AND widens to that
+    # many wave64 warps using an ACCURATE transposed-x8 LDS model (the default
+    # ``_lds_bytes`` over-counts P_lds + double-K + full Acc_lds and wrongly walls
+    # nw>1). Default UNSET -> shipped L4 (WG=64), byte-identical. gfx942-L4-only.
+    _flash_wide_env = os.environ.get("HIPDNN_GFX942_FLASH_WIDE", "")
+    _flash_wide = int(_flash_wide_env) if _flash_wide_env in ("2", "4") else 0
+    # FLASH_WIDE rides the default level-4 (transposed-x8 + k1buf) geometry for
+    # the qualifying L4 shape (``_flash_level`` is already "4" there); it only
+    # changes num_warps via the wide-tile chooser below, never the level.
     if _ships_l4 and _flash_level in ("1", "2", "3", "4", "5"):
         use_mfma_32x32x8 = True
         use_transposed_qk_32x32_ovr = _flash_level in ("2", "3", "4", "5")
@@ -1145,15 +1160,56 @@ def _unified_tiled_spec_from_problem(problem, knobs: dict, arch: str = "gfx950")
                 + bm * out_stripe * 2
             )
 
+        def _lds_bytes_transposed_x8(nw: int, t: int, k_single: bool) -> int:
+            # ACCURATE binding LDS for the transposed-x8 (L4) path, which the
+            # generic _lds_bytes over-counts (it assumes P_lds present, K always
+            # double-buffered, and full Acc_lds). On TRANSPOSED_X8:
+            #   * P_lds = 0 (P^T consumed from registers, never allocated).
+            #   * K_lds = (1 if k_single else 2) * T * HD * 2.
+            #   * Acc_lds is epilogue-only AND the AMDGPU LDS-coalescing pass
+            #     aliases it into the loop-dead K/V region (STEP-0 evidence), so
+            #     it contributes ~0 to the binding loop peak.
+            #   * Q_lds = 0 when BLOCK_M <= 2*T (aliases K_lds).
+            bm = nw * 32
+            k_slots = 1 if k_single else 2
+            q_lds = 0 if bm <= 2 * t else bm * hd * 2
+            return k_slots * t * hd * 2 + t * hd * 2 + q_lds
+
+        _LDS_CAP = 65536
+        chosen = None
+        # Sub-lever 3 wide-tile override: directly target the requested num_warps
+        # using the ACCURATE transposed-x8 LDS model (the generic chooser below
+        # walls nw>1 via its over-conservative footprint). K is single-buffered
+        # while BLOCK_M <= T (Q aliases the single slot) and double-buffered
+        # otherwise (nw=4 -> BLOCK_M=128 needs T=128, K+V = 64 KB at 1 wg/CU).
+        if _flash_wide in (2, 4):
+            _wnw = _flash_wide
+            _wbm = _wnw * 32
+            if _wbm % max(1, nqk) == 0:
+                for _mult in (1, 2, 4):
+                    _wt = _mult * bs
+                    if _wt % 32 != 0:
+                        continue
+                    if _wt * hd < _wnw * 64 * 8:
+                        continue
+                    if (64 * 8) // hd > bs:
+                        continue
+                    _ksingle = _wbm <= _wt
+                    if _lds_bytes_transposed_x8(_wnw, _wt, _ksingle) <= _LDS_CAP:
+                        chosen = (_wnw, _wt)
+                        # K single-buffer follows the BLOCK_M<=T relation for the
+                        # widened tile (drop it when BLOCK_M outgrows the tile).
+                        use_k_single_buffer_ovr = _ksingle
+                        break
         # Pick the largest-parallelism (num_warps, tile) the 32x32x8 D128 path
         # can run within gfx942's 64 KB LDS. The 32x32 atom doubles BLOCK_M and
         # HD=128 makes Acc_lds large, so the narrow-path geometry (nw=4 / T=64)
         # overflows; enumerate fitting candidates and prefer more KV-tile work
         # then more warps. Tile must be a multiple of 32 (tile_size_eff%32==0)
         # and of block_size; BLOCK_M must be divisible by num_queries_per_kv.
-        _LDS_CAP = 65536
-        chosen = None
         for nw in (4, 2, 1):
+            if chosen is not None:
+                break
             bm = nw * 32
             if bm % max(1, nqk) != 0:
                 continue
@@ -1174,8 +1230,6 @@ def _unified_tiled_spec_from_problem(problem, knobs: dict, arch: str = "gfx950")
                 if _lds_bytes(nw, t) <= _LDS_CAP:
                     chosen = (nw, t)
                     break
-            if chosen:
-                break
         if chosen is None:
             # Fall back to the safest geometry (nw=1, T>=32). For k1buf widen the
             # tile to >= BLOCK_M (=32) so the BLOCK_M<=tile gate holds.
