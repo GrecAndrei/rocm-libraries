@@ -2333,6 +2333,11 @@ public:
      * rich metadata about each engine, including available knobs, workspace
      * requirements, and whether the engine supports exhaustive cache priming.
      *
+     * The returned list may include engines not supported on the current
+     * hardware. Hardware applicability is checked at compile time inside
+     * autotune(), where engines that fail to compile are skipped with a
+     * warning (see § 6.2.4 in the Autotune RFC).
+     *
      * Requires build_operation_graph() to have been called first.
      *
      * @param[out] configs Output vector of EngineConfigInfo structs
@@ -2624,12 +2629,12 @@ public:
 
         for(const auto& variant : variants)
         {
-            // Silently skip engines that don't work for this graph (batch semantics)
+            // Skip engines that don't work for this graph (batch semantics)
             std::vector<Knob> knobs;
             auto err = get_knobs_for_engine(variant.engineId, knobs);
             if(err.is_bad())
             {
-                HIPDNN_FE_LOG_INFO("Skipping engine " << variant.engineId
+                HIPDNN_FE_LOG_WARN("Skipping engine " << variant.engineId
                                                       << " in add_engine_variants(): not valid "
                                                          "for this graph");
                 continue;
@@ -2705,7 +2710,7 @@ public:
             auto validateErr = get_knobs_for_engine(sweepSpec.engineId, knobs);
             if(validateErr.is_bad())
             {
-                HIPDNN_FE_LOG_INFO("Skipping engine " << sweepSpec.engineId
+                HIPDNN_FE_LOG_WARN("Skipping engine " << sweepSpec.engineId
                                                       << " in add_engine_sweep(): not valid "
                                                          "for this graph");
                 continue;

@@ -8417,6 +8417,46 @@ TEST_F(TestGraph, AddEngineSweepSkipsUnsupportedEngine)
         << result.err_msg;
 }
 
+TEST_F(TestGraph, AddEngineVariantsSkipsUnsupportedEngine)
+{
+    ::testing::FLAGS_gmock_verbose = "error";
+    Graph graph;
+    createBasicBatchnormGraph(graph);
+    EXPECT_TRUE(graph.validate().is_good());
+
+    // Allow all descriptor setup calls during build_operation_graph()
+    EXPECT_CALL(*_mockBackend, backendCreateDescriptor(_, _)).Times(AnyNumber());
+    EXPECT_CALL(*_mockBackend, backendSetAttribute(_, _, _, _, _)).Times(AnyNumber());
+    EXPECT_CALL(*_mockBackend, backendFinalize(_)).Times(AnyNumber());
+    EXPECT_CALL(*_mockBackend, backendGetAttribute(_, _, _, _, _, _)).Times(AnyNumber());
+
+    const auto buildResult = graph.build_operation_graph(_handle);
+    EXPECT_TRUE(buildResult.is_good()) << buildResult.get_message();
+
+    // After building the graph, make engine descriptor finalize fail.
+    // This causes get_knobs_for_engine() to fail for any engine, simulating
+    // an unsupported engine.  The last-added EXPECT_CALL takes priority
+    // over the generic backendFinalize(_) set above.
+    auto engineDesc = reinterpret_cast<hipdnnBackendDescriptor_t>(0xE001);
+    EXPECT_CALL(*_mockBackend, backendCreateDescriptor(HIPDNN_BACKEND_ENGINE_DESCRIPTOR, _))
+        .Times(AnyNumber())
+        .WillRepeatedly(
+            [engineDesc](hipdnnBackendDescriptorType_t, hipdnnBackendDescriptor_t* desc) {
+                *desc = engineDesc;
+                return HIPDNN_STATUS_SUCCESS;
+            });
+    EXPECT_CALL(*_mockBackend, backendFinalize(engineDesc))
+        .Times(AnyNumber())
+        .WillRepeatedly(Return(HIPDNN_STATUS_NOT_SUPPORTED));
+
+    const std::vector<EngineVariant> variants = {{99, {}}};
+    const auto result = graph.add_engine_variants(variants);
+    EXPECT_TRUE(result.is_good())
+        << "add_engine_variants() should skip unsupported engines (batch semantics), "
+           "but got error: "
+        << result.err_msg;
+}
+
 TEST_F(TestGraph, StabilityThresholdValidationOnlyForRunUntilStable)
 {
     hipdnn_frontend::GraphTestUtils graph;
