@@ -56,8 +56,8 @@ std::vector<std::vector<size_t>> adhoc_sizes = {
     // 3D_BLOCK_CR
     {336, 336, 56},
 
-    // AIFFT-457: real-Stockham fusion boundary cases.
-    // 768, 1536, 3072 newly fuse on > 64 KiB LDS chips (MI355/MI450) at sp/dp.
+    // real-Stockham fusion boundary cases.
+    // 768, 1536, 3072 newly fuse on more LDS at sp/dp.
     // 4096, 8192 verify the LDS-fit helper correctly refuses too-large fused
     // kernels (negative test).  param_generator covers complex_forward and
     // real_forward for each entry, and the round-trip in accuracy_test.h
