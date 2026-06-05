@@ -4,8 +4,8 @@
 # Pre-submit GPU emulation tests for TensileLite gfx1250 common GEMM tests.
 #
 # Dispatches to an external CI workflow that builds ROCm from the PR's commit
-# and runs GPU emulation tests on gfx1250. Test selection (e.g. "common GEMM")
-# is owned by the downstream psdb-trigger handler.
+# and runs GPU emulation tests on gfx1250. The downstream handler posts commit
+# statuses back to this PR automatically.
 #
 # Required secrets:
 #   GPU_EMU_DISPATCH_PAT  — GitHub PAT with `repo` scope on the target repo
@@ -14,12 +14,14 @@
 #
 # Required variable:
 #   GPU_EMU_DISPATCH_ENABLED — Set to "true" to enable dispatch (kill switch)
+#
+# Note: forked PRs cannot trigger dispatch (no access to secrets).
 
 name: Pre-Submit GPU Emulation Tests
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened]
     branches: [develop]
     paths:
       - "projects/hipblaslt/tensilelite/**"
