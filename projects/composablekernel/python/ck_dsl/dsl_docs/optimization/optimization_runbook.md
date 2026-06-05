@@ -1378,6 +1378,23 @@ bottleneck class, and the kernel structure (§3, §11).
   this by raising `TypeError` on `Value.__bool__`; you MUST use
   `IRBuilder.static_if(...)` for Python booleans and
   `IRBuilder.scf_if(...)` for runtime predicates.
+- **Fully-unrolled per-element reshape → IR explosion → comgr walltime
+  timeout.** A Python-time `static_for` / `unroll` that emits a
+  per-element transpose (`vec_extract` / `vec_pack` over a whole tile)
+  produces O(tile) straight-line IR. The DSL never re-rolls it, so a
+  large tile explodes the LLVM IR handed to comgr and the
+  CODEGEN_BC_TO_RELOCATABLE stage runs for minutes — we hit a **45-min
+  JIT/comgr timeout** building a gfx942 register-V transpose this way.
+  Fix: **loop-roll** — wrap the reshape in a runtime `scf_for` over
+  micro-tiles and keep only the tiny inner block unrolled. The IR
+  collapses and the build drops back to seconds with **identical
+  numerics** (the only change is straight-line vs looped emission). The
+  general rule: only `static_for` / `unroll` what must be unrolled for
+  correctness or scheduling; a per-element data reshape over a whole
+  tile is a runtime loop. Watch `art.timings["comgr_bc"]` /
+  `["reloc"]` — a multi-second jump on an otherwise unchanged kernel is
+  this signature. See `runtime/comgr_and_hipmodule.md` and
+  `architecture/attention_2d_gfx942_experiment_summary.md` (Batch 5).
 
 ### 10.4 Alias And Pointer Semantics
 

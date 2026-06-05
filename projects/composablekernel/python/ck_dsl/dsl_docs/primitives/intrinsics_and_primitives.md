@@ -129,6 +129,17 @@ safe = b.select(valid, off_bytes, b.const_i32((1 << 31) - 1))
 v = b.buffer_load_vN_f16(rsrc, safe, c0, dwords)
 ```
 
+> **Offset units differ between the two load families.** `buffer_load_*` and
+> `async_buffer_load_lds_addr` take a literal **byte** offset (above). The typed
+> `b.global_load(value=f16*, voff)` family lowers to `getelementptr half`, so `voff`
+> is an **element** index auto-scaled by `sizeof(elem)`. Handing the typed load a
+> byte offset (e.g. from a paged-KV descriptor with byte strides) reads
+> `V[2 * linear]` for fp16 — divide by the element size first. Because every other
+> K/V loader on the attention path is byte-based, this element-scaling is easy to
+> miss; it cost a multi-session debug. See
+> `architecture/attention_2d_gfx942_experiment_summary.md` (Batch 5, commit
+> `73753189ad1`) and `runtime/limitations.md:145`.
+
 For stores, the higher-level `view.store_vec_at(b, elem_off, value, n, mask=...)` from `helpers/tensor_view.py` handles the OOB-routing for false-mask lanes.
 
 ## Async DRAM-to-LDS

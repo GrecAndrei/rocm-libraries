@@ -97,6 +97,19 @@ Complete reference of operations recognized by `core/ir.py` and lowered by `core
 
 `masked_global_load(ptr, idx, mask, other, dtype)` clamps the false-lane index to 0 before loading, then selects `other` afterward.
 
+> **Element-index, not byte-offset.** The typed `b.global_load(value=f16*, voff)`
+> family (and `global_load_f16`/`_f32`/`_vN`) lowers to `getelementptr half` — `voff`
+> is an **element** index that LLVM auto-scales by `sizeof(elem)`. Passing a **byte**
+> offset (e.g. straight from a paged-KV descriptor that carries byte strides)
+> double-counts: it reads `V[2 * linear]` for fp16. Divide the byte offset by the
+> element size first. This is the **opposite** direction from the buffer-resource
+> raw-byte path — `buffer_load_*` / `async_buffer_load_lds_addr` take a literal byte
+> offset (`runtime/limitations.md:145`), so the two load families want offsets in
+> different units. Mixing them up cost a multi-session attention debug; the every-
+> other-loader-is-byte-based context made the typed-load element scaling easy to
+> miss. See `architecture/attention_2d_gfx942_experiment_summary.md` (Batch 5,
+> commit `73753189ad1`).
+
 ### LDS
 
 | Op name                | Builder                  | LLVM emission                                  |

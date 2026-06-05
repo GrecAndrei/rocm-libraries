@@ -171,6 +171,55 @@ the runbook's optimisation methodology — see
 `10_bake_off_direct_conv_4c/expected.json` for the gates, and
 `ck/dsl/ck_dsl_current_results.md` for the full results.
 
+## Empirical pass — gfx942 unified attention 2D (CDNA3)
+
+The performance push on `UnifiedAttention2DTiledSpec` for **gfx942 (CDNA3 /
+MI300X)**, fp16 prefill-2D SDPA-fwd. Companion to the gfx950 attention work; the
+gfx950 perf playbook largely does **not** transfer (the wide-K `16x16x32` /
+`32x32x16` atoms and `ds_read_tr_b16` are gfx942-illegal). Correctness gate held
+at 6 PASS / 2 SKIP (D256) / 0 FAIL throughout; gfx950 stays byte-identical (all
+edits in `instances/gfx942/`). Binding constraint: 64 KB LDS / CU, **2-CTA/CU
+threshold = ≤ 32,768 B/CTA**. Reference flash (aotriton / CK-Tile) ≈ 290 TF on
+D128 fp16. Full living log:
+`architecture/attention_2d_gfx942_experiment_summary.md`.
+
+### Kept levers
+
+| Lever | Family (§) | Result | Mechanism |
+|---|---|---|---|
+| S1 — D64 `mw=32` + 1x tile selector | dispatcher (§12) | 3 D64 shapes → oracle (1.33–1.96x) | the oracle-best D64 plain-atom candidate the analytic selector never picked |
+| S2 — D128 GQA early-V schedule selector | pipeline (§8.1) | +2–4% on 6 GQA D128 shapes | overlap V load with QK+softmax; gated GQA + `seqlen_q ≤ 4096` |
+| V_lds padding (`+8` halves) | LDS (§6.4) | +2–5% every D128 shape | drops the strided-V read 4-way → 2-way; only DMA-compatible lever (commit `a7dcd8af487`) |
+| **L4 — transposed-x8 (32x32x8, register-P^T) + K single-buffer** | atom + residency + occupancy (§7.2, §6.3) | **148–178 TF, +18–33% over baseline, ≈62% of flash, 2 wg/CU (SHIPPED)** | register-P^T eliminates the P_lds round-trip; K double→single buffer drops LDS 48→32 KB, crossing the 32 KB / 2-wg threshold (commit `9cff43bdd2d`, levers `a07e1f5`+`aa4b118`) |
+
+### Proven-negatives (do not re-try without new information)
+
+| Lever | Verdict | Why |
+|---|---|---|
+| X — P/Acc XOR swizzle | REVERTED | bf16 D64 −14.7% (VGPR 143→228); freed LDS doesn't cross the 2-CTA line |
+| A — async LDS-DMA width 1→2 dword | DEAD (architectural) | b64 IR-illegal (`dwords must be 1, 3, or 4`); b96/b128 comgr-abort on CDNA3 |
+| R — register-PV (bf16 D64) | MARGINAL, not shipped | reaches 2 CTA/CU but only +2.6% on one shape; reshape ALU eats the occupancy gain |
+| L1 — conflict-free V LDS layout | REVERTED | no design beats the committed pad; gfx942 has no `ds_read_tr_b16`; 2/bank floor is mathematical |
+| L2 — register-V + in-register `ds_swizzle` transpose | REVERTED (flat) | the +256 `ds_swizzle` are LDS-port ops, serialize on `lgkmcnt` (18→234); costs what conflict-removal saves |
+| FA-4 rescale-skip | REVERTED (flat) | DSL has no warp-ballot / predicated `scf.if`-with-results; the `o_acc *= alpha` still issues |
+| acc→AGPR / drop Acc_lds | REJECTED (moot) | backend LDS-coalescing already aliases Acc_lds into the loop-dead K/V region |
+
+### Conflict-free V (correctness-solved; perf in-flight)
+
+The remaining ~38% to flash is the conflict-free V read. **Correctness is
+solved** (commit `73753189ad1`): the failure was a byte-vs-element units bug in
+the typed `global_load` gather (passing a byte offset to an element-indexed
+`getelementptr half`), not cross-lane geometry — fixed by dividing the offset by
+`KV_BYTES`; now 16/2/0 on the full net. As-implemented (sync per-element gather
+store) it is perf-negative (~30 TF, store/HBM-stall bound). The active vehicle is
+the CK/flash V feed: async-DMA V in natural layout → in-register `v_perm`
+transpose (loop-rolled to avoid the comgr-timeout IR explosion) → conflict-free
+LDS read.
+
+> **PLACEHOLDER (fill when the perf job lands):** conflict-free-V (loop-rolled
+> register-transpose), D128 fp16 — `___ TF` (`__%` of flash, vs L4 148–178 TF).
+> Status: correctness-solved (`73753189ad1`); perf in-flight.
+
 ## CK Tile parity examples
 
 The `example/ck_tile/dsl/` tree now contains Python-generated CK DSL

@@ -272,6 +272,61 @@ This is an **algorithmic constraint**, not an implementation quality issue.
 
 ---
 
+## Case Study 7: Unified Attention 2D on gfx942 / CDNA3 (MI300X, D128 fp16)
+
+**Context**: Porting the `UnifiedAttention2DTiledSpec` perf push from gfx950 to
+**gfx942 (CDNA3 / MI300X)** — the CDNA3 sibling of the gfx950 unified-attention
+pass (runbook §17.4). Hardware-specific facts dominate here; the gfx950 playbook
+largely does **not** transfer.
+
+### The arc
+
+```text
+narrow 16x16x16 baseline (ship):       ~126 TF   (0.44x flash, 44%)
+plain-x8 (32x32x8, P_lds bridge):       ~60 TF   (0.21x — below baseline; naive V)
+transposed-x8 (register-P^T):           ~93 TF   (0.32x — recovers most of the deficit)
++ K single-buffer (L4, SHIPPED):     148–178 TF  (~0.62x flash, +18–33% over baseline)
+flash (aotriton / CK-Tile):            ~290 TF   (HBM roofline)
+```
+
+Conflict-free V (the last ~38% to flash) is **correctness-solved** (a
+byte-vs-element units bug in the typed `global_load` gather, not cross-lane
+geometry); perf is in-flight (loop-rolled register-transpose).
+
+### Architecture-specific facts (CDNA3, where gfx950 lessons break)
+
+| Fact | Consequence |
+|---|---|
+| **No `ds_read_tr_b16`** (gfx950-only) | cannot transpose a V LDS operand on the read side; must transpose on the **store** side in registers (`v_perm`) |
+| **b96 / b128 async-LDS-DMA comgr-abort** on CDNA3; b64 IR-illegal | async DRAM→LDS width is **stuck at 1 dword** — no widening lever exists |
+| **32x32x8 is THE gfx942 wide atom**; 32x32x16 / 16x16x32 are gfx950-only | the gfx950 wide-K ladder is rejected by the spec validator; the flash atom is reached via 2x iterateK on 32x32x8 |
+| **64 KB LDS / CU**, 2-CTA/CU threshold = **≤ 32,768 B/CTA** | the only D128 path to 2 wg/CU is cutting loop LDS (K single-buffer: 48→32 KB) — the L4 win |
+| `ds_swizzle` / `warp_shuffle_xor` are LDS-port ops | a register-V transpose built from them serializes on `lgkmcnt` (18→234) and goes flat — use VALU `v_perm` instead |
+
+### What didn't work (and why)
+
+| Lever | Outcome | Why |
+|---|---|---|
+| XOR swizzle (P/Acc) | bf16 D64 −14.7% | VGPR 143→228; freed LDS doesn't cross the 2-CTA line |
+| async LDS-DMA 1→2 dword | architecturally dead | b64 illegal, b96/b128 comgr-abort on CDNA3 |
+| register-PV (occupancy play) | only +2.6%, 1 shape | reshape ALU eats the 1→2 CTA/CU gain |
+| register-V via `ds_swizzle` | flat | `lgkmcnt` serialization (LDS-port ops) |
+| FA-4 rescale-skip | flat | DSL has no warp-ballot / predicated `scf.if`-with-results |
+
+### Diagnostic gotchas surfaced here
+
+- **byte-vs-element offset on typed `global_load`**: the typed
+  `b.global_load(value=f16*, voff)` lowers to `getelementptr half` (element
+  index); a byte offset reads `V[2*linear]`. Opposite units from `buffer_load_*`.
+  Cost a multi-session debug. (Bug signature: ~45% wrong, sign-flipped finite.)
+- **fully-unrolled per-element transpose → comgr walltime timeout** (45 min);
+  fix = loop-roll (runtime `scf_for` over micro-tiles), same numerics, seconds.
+
+Living log (commits `95b8af92e00`, `73753189ad1`, L4 `a07e1f5`+`aa4b118`,
+`9cff43bdd2d`): `architecture/attention_2d_gfx942_experiment_summary.md`.
+
+---
+
 ## Usage Guidelines
 
 ### Do:

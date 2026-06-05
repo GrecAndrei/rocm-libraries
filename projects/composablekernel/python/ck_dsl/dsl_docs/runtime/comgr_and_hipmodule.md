@@ -78,6 +78,25 @@ The COMGR backend respects standard clang options. The default `-O3` enables:
 
 For the kernels in `ck_dsl`, most performance comes from IR-level decisions (atom, tile, LDS, async, cshuffle), not from `-O*` flags. The runbook explicitly says: do not assume compiler flags explain a gap until ISA / resource evidence supports it.
 
+## IR Size And Compile Walltime
+
+COMGR compile time is roughly linear in the size of the LLVM IR text the DSL
+emits — the CODEGEN_BC_TO_RELOCATABLE stage dominates. The DSL does **not**
+re-roll loops, so a Python-time `static_for` / `unroll` that emits a per-element
+data reshape (e.g. a `vec_extract` / `vec_pack` transpose over a whole tile)
+produces O(tile) straight-line IR and can blow the compile up to minutes. A
+gfx942 register-V transpose built fully-unrolled this way hit a **45-minute
+comgr/JIT timeout**; loop-rolling it (a runtime `scf_for` over micro-tiles with
+only the tiny inner block unrolled) collapsed the IR and dropped the build back
+to seconds with bit-identical numerics.
+
+Watch `ComgrTimings` (the second element of the `build_hsaco_from_llvm_ir`
+return, surfaced as `art.timings["comgr_bc"]` / `["reloc"]`): a multi-second jump
+on an otherwise-unchanged kernel is the IR-explosion signature, not a toolchain
+regression. Only unroll what must be unrolled for correctness or scheduling;
+express a whole-tile reshape as a runtime loop. See the optimization runbook
+§10.3 and `architecture/attention_2d_gfx942_experiment_summary.md` (Batch 5).
+
 ## Adding Compiler Options
 
 `build_hsaco_from_llvm_ir(ir_text, options=[...])` passes any list of strings to `amd_comgr_action_info_set_option_list`. Useful examples:
