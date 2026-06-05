@@ -1440,6 +1440,51 @@ def generateLogic(
   print2("# LibraryLogic config: %s" % config)
   print2("# DefaultAnalysisParameters: " % defaultAnalysisParameters)
 
+  # Step 6: strict gate for the LibraryLogic section. The legacy
+  # assignParameterWithDefault loop below iterates the defaults dict,
+  # silently dropping any user-supplied key not in defaultAnalysisParameters.
+  # Validate the user config first: unknown keys raise, types are checked
+  # against type(default), and SolutionImportanceMin is range-checked to
+  # [0.0, 1.0]. LibraryType is NOT enum-checked -- per the plan's B2,
+  # anything other than FreeSize/Prediction becomes a distance-metric
+  # label on a Matching library, so the set is open-ended by design.
+  if config:
+    from Tensile.Common.TypeValidationErrors import (
+        ConfigTypeError, formatMismatch, getStrictMode,
+    )
+    strictMode = getStrictMode()
+    if strictMode != "off":
+      errors = []
+      for key, value in config.items():
+        if key not in defaultAnalysisParameters:
+          errors.append(
+              f"LibraryLogic.{key}: unknown key. "
+              f"Valid keys are {sorted(defaultAnalysisParameters.keys())}."
+          )
+          continue
+        default = defaultAnalysisParameters[key]
+        expectedTypes = {type(default)}
+        if type(value) not in expectedTypes:
+          errors.append(formatMismatch("", f"LibraryLogic.{key}", value, expectedTypes))
+          continue
+        if key == "SolutionImportanceMin":
+          # Range check is meaningful only once the type has passed.
+          if not (0.0 <= value <= 1.0):
+            errors.append(
+                f"LibraryLogic.SolutionImportanceMin = {value!r} "
+                f"is out of the allowed range [0.0, 1.0]."
+            )
+      if errors:
+        full = (
+            "LibraryLogic validation failed:\n  "
+            + "\n  ".join(errors)
+            + "\n(Run utilities/fix_yaml_types.py to bulk-fix the tree.)"
+        )
+        if strictMode == "warn":
+          printWarning(full)
+        else:
+          raise ConfigTypeError(full)
+
   # Assign Defaults
   analysisParameters = {}
   for parameter in defaultAnalysisParameters:
