@@ -428,8 +428,24 @@ class Solution(collections.abc.Mapping):
     printIndexAssignmentInfo: bool,
     assembler: Assembler,
     isaInfoMap: Dict[IsaVersion, IsaInfo],
-    srcName: str = ""
+    srcName: str = "",
+    strictTypeValidation: bool = True,
   ):
+    """Construct a Solution.
+
+    ``strictTypeValidation`` controls whether the post-construction
+    :func:`validateParameterTypes` call runs. Library-logic callers
+    (LibraryIO.parseSolutionsFile via LibraryIO) leave it True so the
+    type-mismatch collector still receives library-logic bool/int
+    collapses for the printTypeMismatchSummary report in
+    TensileCreateLibrary/Run.py. Input-YAML callers
+    (BenchmarkProblems._generate_single_solution,
+    _getCustomKernelSolutionObj) pass False because their state is
+    already type-checked by checkParametersAreValid in BenchmarkStructs
+    (Step 3) and by ProblemType.__init__'s raise-mode validator
+    (Step 4) -- a second pass would silently re-populate the warn-only
+    collector and produce a confusing duplicate-report at end of run.
+    """
 
     self._name = None
     self.assembler = assembler
@@ -459,8 +475,12 @@ class Solution(collections.abc.Mapping):
 
     # Validate parameter types against the validParameters registry.
     # Catches bool-vs-int mismatches (YAML false vs 0) that would cause
-    # std::bad_cast at C++ msgpack deserialization time.
-    validateParameterTypes(self._state, srcFile=srcName)
+    # std::bad_cast at C++ msgpack deserialization time. Skipped on the
+    # input-YAML path (Step 8 B4) because checkParametersAreValid in
+    # BenchmarkStructs already runs the same check upstream and would
+    # otherwise populate the warn-only collector with duplicate noise.
+    if strictTypeValidation:
+      validateParameterTypes(self._state, srcFile=srcName)
 
     if 'ISA' not in self._state:
       if 'ISA' in config:

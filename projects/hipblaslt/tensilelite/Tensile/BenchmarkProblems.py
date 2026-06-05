@@ -41,7 +41,7 @@ from Tensile.KernelWriter import DebugConfig
 from Tensile.KernelHelperNaming import KernelHelperEnum, initHelperKernelObjects
 from Tensile.Toolchain.Component import Assembler
 from Tensile.SolutionStructs.Problem import ProblemType, ProblemSizes
-from Tensile.SolutionStructs.Solution import Solution, printTypeMismatchSummary
+from Tensile.SolutionStructs.Solution import Solution
 from Tensile.Common.TypeValidationErrors import ConfigTypeError
 from Tensile.SolutionStructs.Validators.MatrixInstruction import matrixInstructionToMIParameters, \
                                                                  validateMIParameters
@@ -183,7 +183,8 @@ def _generate_single_solution(perm, problemType, constantParams, assembler, debu
                 debugConfig.printSolutionRejectionReason,
                 debugConfig.printIndexAssignmentInfo,
                 assembler,
-                isaInfoMap
+                isaInfoMap,
+                strictTypeValidation=False,  # input-YAML path: already validated upstream
             )
             if solutionObject["Valid"]:
                 return solutionObject
@@ -260,7 +261,8 @@ def _getCustomKernelSolutionObj(
                debugConfig.printSolutionRejectionReason,
                debugConfig.printIndexAssignmentInfo,
                assembler,
-               isaInfoMap
+               isaInfoMap,
+               strictTypeValidation=False,  # input-YAML / custom-kernel path
            )
 
     return sol
@@ -784,8 +786,12 @@ def main(
                 print1("# {}_{:02d} already benchmarked; skipping." \
                         .format(str(problemTypeObj), idx) )
 
-    # Print summary of any parameter type mismatches found during ProblemType creation
-    printTypeMismatchSummary()
+    # Step 8 (B4): the warn-only printTypeMismatchSummary call site was
+    # deleted here. The input-YAML path now type-checks each value at
+    # the upstream validators (Steps 3-7), so the collector this would
+    # have printed is provably empty on the input-YAML path. The
+    # library-logic path still calls printTypeMismatchSummary from
+    # TensileCreateLibrary/Run.py for its own collector population.
 
     if globalParameters["ExitOnFails"] and totalTestFails:
         sys.exit(1)
