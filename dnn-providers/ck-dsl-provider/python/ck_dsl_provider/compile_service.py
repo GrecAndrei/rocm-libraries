@@ -1115,20 +1115,42 @@ def _unified_tiled_spec_from_problem(problem, knobs: dict, arch: str = "gfx950")
         _flash_level = "4"
     else:
         _flash_level = "0"
-    # Sub-lever 3 (flash-regime rewrite): experimental wide-tile (num_warps>1)
-    # for the L4 path. rocprof (job 354640) proved shipped L4 is latency-bound at
-    # WG=64 (1 wavefront/WG, 1 wg/CU) while PyTorch flash runs WG=256 (4 waves)
-    # to hide the 356-cyc LDS latency starving MFMA. L4 already keeps P in
-    # registers + acc in AGPR (Acc_lds epilogue-only), so the LDS is freed; the
-    # missing structural lever is more resident waves/WG. ``HIPDNN_GFX942_FLASH_WIDE``
-    # in {2,4} forces the L4 (transposed-x8 + k1buf) geometry AND widens to that
-    # many wave64 warps using an ACCURATE transposed-x8 LDS model (the default
-    # ``_lds_bytes`` over-counts P_lds + double-K + full Acc_lds and wrongly walls
-    # nw>1). Default UNSET -> shipped L4 (WG=64), byte-identical. gfx942-L4-only.
-    _flash_wide_env = os.environ.get("HIPDNN_GFX942_FLASH_WIDE", "")
-    _flash_wide = int(_flash_wide_env) if _flash_wide_env in ("2", "4") else 0
-    # FLASH_WIDE rides the default level-4 (transposed-x8 + k1buf) geometry for
-    # the qualifying L4 shape (``_flash_level`` is already "4" there); it only
+    # Sub-lever 3 (flash-regime rewrite): wide-tile (num_warps>1) on the L4 path
+    # SHIPS as the gfx942 D128 fp16 DEFAULT (WG=256 / num_warps=4). rocprof (job
+    # 354640) proved shipped L4 is latency-bound at WG=64 (1 wavefront/WG, 1
+    # wg/CU) while PyTorch flash runs WG=256 (4 waves) to hide the 356-cyc LDS
+    # latency starving MFMA. L4 already keeps P in registers + acc in AGPR
+    # (Acc_lds epilogue-only), so the LDS is freed; the missing structural lever
+    # was more resident waves/WG. Measured +19.7% (153.6 -> 183.8 TF, 53% ->
+    # 63% of flash; job 354653) with correctness 16/2/0 (job 354658) and the
+    # mechanism rocprof-confirmed (wave-slot fill 4.59% -> 7.59%, job 354659).
+    #
+    # The default fires the wide-tile chooser at num_warps=4 with NO env var: the
+    # chooser uses an ACCURATE transposed-x8 LDS model (``_lds_bytes_transposed_x8``;
+    # the generic ``_lds_bytes`` over-counts P_lds + double-K + full Acc_lds and
+    # wrongly walls nw>1). ``HIPDNN_GFX942_FLASH_WIDE`` is now a TESTING / REVERT
+    # override, not the enable gate:
+    #   * unset  -> shipped default = wide4 (WG=256) for the qualifying shape.
+    #   * 0 (or "off"/"disable") -> KILL-SWITCH: fall back to the L4 WG=64 kernel
+    #     (num_warps=1, k1buf) -- a one-env revert if the wide kernel ever
+    #     regresses on a deployment.
+    #   * 2 / 4 -> force that wave64 width explicitly (A/B testing).
+    # The C++ analytic selector (SdpaCandidateSelector.analyticTarget) mirrors
+    # this default by picking the num_warps=4 / mw=32 / tile=64 geometry for this
+    # shape, so the folded cache key (GraphSignature folds knobs.num_warps) stays
+    # coherent with the wide kernel actually built here. gfx942-D128-fp16-only;
+    # D64 / bf16 / gfx950 paths are untouched.
+    _flash_wide_env = os.environ.get("HIPDNN_GFX942_FLASH_WIDE", "").strip().lower()
+    if _flash_wide_env in ("2", "4"):
+        _flash_wide = int(_flash_wide_env)  # explicit width (testing)
+    elif _flash_wide_env in ("0", "off", "disable", "disabled", "no", "false"):
+        _flash_wide = 0  # kill-switch -> L4 WG=64 fallback
+    elif _ships_l4:
+        _flash_wide = 4  # shipped DEFAULT: wide4 (WG=256) for gfx942 D128 fp16
+    else:
+        _flash_wide = 0  # not a qualifying shape; never widen
+    # FLASH_WIDE rides the default level-4 (transposed-x8) geometry for the
+    # qualifying L4 shape (``_flash_level`` is already "4" there); it only
     # changes num_warps via the wide-tile chooser below, never the level.
     if _ships_l4 and _flash_level in ("1", "2", "3", "4", "5"):
         use_mfma_32x32x8 = True

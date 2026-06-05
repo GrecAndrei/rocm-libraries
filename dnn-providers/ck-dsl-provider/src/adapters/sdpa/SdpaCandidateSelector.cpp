@@ -173,12 +173,44 @@ SupportsResult supportsTiled2d(const SdpaSelectionProblem& problem, const SdpaPe
         const std::int64_t blockM =
             static_cast<std::int64_t>(knobs.num_warps) * knobs.block_m_per_warp;
         const std::int64_t outStripe = hd <= 64 ? 32 : hd;
-        const std::int64_t kLds = 2 * tEff * hd * kBytesPerElem;
-        const std::int64_t vLds = tEff * hd * kBytesPerElem;
-        const std::int64_t pLds = blockM * (tEff + 8) * kBytesPerElem;
-        const std::int64_t qLds = (blockM <= 2 * tEff) ? 0 : blockM * hd * kBytesPerElem;
-        const std::int64_t accLds = blockM * outStripe * kBytesPerElem;
-        const std::int64_t ldsBytes = kLds + vLds + pLds + qLds + accLds;
+
+        // gfx942 D128 fp16 plain-mw32: the SHIPPED kernel is the transposed-x8
+        // wide-tile L4 (the Python compile path adds use_mfma_32x32x8 +
+        // use_transposed_qk_32x32 to this plain candidate). That path's BINDING
+        // LDS is much smaller than the generic model above assumes, so the
+        // generic count wrongly walls the wide (num_warps=4 / BLOCK_M=128 /
+        // tile=64) geometry (100352 B > 64 KB) that measures +19.7%. Mirror the
+        // Python ``_lds_bytes_transposed_x8`` accurate model here so the wide
+        // candidate survives enumeration and the analytic argmax can pick it:
+        //   * P_lds = 0   (P^T is consumed from registers, never staged in LDS).
+        //   * K_lds = (1 if BLOCK_M<=T else 2) * T * hd * bpe  (K is single-
+        //             buffered while BLOCK_M<=tile; double otherwise -- exactly
+        //             the wide chooser's use_k_single_buffer relation).
+        //   * V_lds = T * hd * bpe.
+        //   * Q_lds = 0 when BLOCK_M <= 2*T (aliases K_lds).
+        //   * Acc_lds ~ 0: epilogue-only and the AMDGPU LDS-coalescing pass
+        //     aliases it into the loop-dead K/V region (STEP-0 evidence).
+        // Gated to gfx942 + D128 + fp16 + plain mw32 (use_mfma_32x32=false): the
+        // mfma32 / D64 / bf16 / gfx950 candidates keep the conservative generic
+        // model, so their admit/reject set is byte-identical to before.
+        const bool gfx942WideL4 = problem.arch == "gfx942" && hd == 128 &&
+                                  problem.dtype == "fp16" && knobs.block_m_per_warp == 32 &&
+                                  !knobs.use_mfma_32x32;
+        std::int64_t ldsBytes;
+        if (gfx942WideL4) {
+            const std::int64_t kSlots = (blockM <= tEff) ? 1 : 2;
+            const std::int64_t kLds = kSlots * tEff * hd * kBytesPerElem;
+            const std::int64_t vLds = tEff * hd * kBytesPerElem;
+            const std::int64_t qLds = (blockM <= 2 * tEff) ? 0 : blockM * hd * kBytesPerElem;
+            ldsBytes = kLds + vLds + qLds;  // P_lds = 0, Acc_lds aliased ~ 0
+        } else {
+            const std::int64_t kLds = 2 * tEff * hd * kBytesPerElem;
+            const std::int64_t vLds = tEff * hd * kBytesPerElem;
+            const std::int64_t pLds = blockM * (tEff + 8) * kBytesPerElem;
+            const std::int64_t qLds = (blockM <= 2 * tEff) ? 0 : blockM * hd * kBytesPerElem;
+            const std::int64_t accLds = blockM * outStripe * kBytesPerElem;
+            ldsBytes = kLds + vLds + pLds + qLds + accLds;
+        }
         if (ldsBytes > kLdsCapacityBytes) {
             return {false, "tiled 2D kernel: estimated LDS " + std::to_string(ldsBytes) +
                                " B exceeds the " + problem.arch + " " +
@@ -435,27 +467,39 @@ AnalyticTarget analyticTarget(const SdpaSelectionProblem& problem) {
         return {numWarps, /*block_m_per_warp=*/32, tileSize};
     }
 
-    // gfx942 (CDNA3 / MI300X) head_size=128 fp16: SHIP the validated L4 kernel
-    // (transposed-x8 + K single-buffer). L4 measured +18-33% over the narrow
-    // baseline (up to 178.9 TF, ~62% of flash), correct, gfx950 byte-identical.
-    // The Python compile path (_unified_tiled_spec_from_problem) adds the two
-    // L4 knobs that do NOT travel on the wire -- ``use_mfma_32x32x8`` and
-    // ``use_k_single_buffer`` -- plus ``use_transposed_qk_32x32`` for every
-    // gfx942 D128 fp16 build by default; the C++ selector's only job is to pick
-    // the matching GEOMETRY so the launch grid stays coherent with the kernel.
-    // The level-4 fitter (compile_service.py) collapses to a single geometry on
-    // EVERY D128 fp16 shape (block_size / GQA-independent): the K single-buffer
-    // BLOCK_M<=tile gate plus the 64 KB LDS cap force num_warps=1,
-    // block_m_per_warp=32 (BLOCK_M=32), tile_size=64. We mirror exactly that
-    // here, with the PLAIN flags (use_mfma_32x32=false): the wire's
-    // ``use_mfma_32x32`` is the gfx950 32x32x16 atom and would BLOCK the Python
-    // L4 branch (it gates on ``not use_mfma_32x32``), so the analytic pick must
-    // be the plain nw1/mw32/t64 candidate. ``analyticCloseness`` already
-    // penalises the mfma/transposed-bundled candidate (+8), so the plain combo
-    // wins the argmax. bf16 D128 (32x32x8 is fp16-only) and all D64 are left to
-    // the branches above/below -- unchanged. cfv is never selected here.
+    // gfx942 (CDNA3 / MI300X) head_size=128 fp16: SHIP the validated wide-tile L4
+    // kernel (transposed-x8, WG=256 / num_warps=4). Sub-lever 3 of the
+    // flash-regime rewrite measured +19.7% over the WG=64 L4 baseline (153.6 ->
+    // 183.8 TF, 53% -> 63% of PyTorch flash; job 354653), correct 16/2/0 (job
+    // 354658), gfx950 byte-identical. rocprof (job 354659) pinned the win as the
+    // latency-hider the WG=64 kernel lacked: 4 resident waves/WG raise wave-slot
+    // fill 4.59% -> 7.59% so the LDS latency that starved MFMA at WG=64 is now
+    // overlapped. The Python compile path (_unified_tiled_spec_from_problem)
+    // adds the L4 knobs that do NOT travel on the wire -- ``use_mfma_32x32x8`` +
+    // ``use_transposed_qk_32x32`` (K is double-buffered at this width since
+    // BLOCK_M=128 > tile=64, so ``use_k_single_buffer`` is dropped by the wide
+    // chooser) -- for every gfx942 D128 fp16 build by default; the C++ selector's
+    // only job is to pick the matching GEOMETRY so the launch grid AND the folded
+    // cache key (GraphSignature folds knobs.num_warps) stay coherent with the
+    // wide kernel.
+    //
+    // num_warps=4 / block_m_per_warp=32 (BLOCK_M=128) / tile_size=64 mirrors the
+    // wide chooser's pick exactly. We return the PLAIN flags (use_mfma_32x32=
+    // false): the wire's ``use_mfma_32x32`` is the gfx950 32x32x16 atom and would
+    // BLOCK the Python wide/L4 branch (it gates on ``not use_mfma_32x32``), so
+    // the analytic pick must be the plain nw4/mw32/t64 candidate.
+    // ``analyticCloseness`` penalises the mfma/transposed-bundled candidate (+8)
+    // and minimises |num_warps - 4|, so the plain nw4 combo wins the argmax. This
+    // plain candidate survives enumeration because supportsTiled2d now scores the
+    // gfx942 D128 fp16 plain-mw32 path with the ACCURATE transposed-x8 LDS model
+    // (P_lds=0 / Acc_lds aliased), which the wide kernel actually realises. The
+    // Python ``HIPDNN_GFX942_FLASH_WIDE=0`` kill-switch can still revert the BUILT
+    // kernel to WG=64 (a debug/revert escape hatch, same class as
+    // HIPDNN_GFX942_FLASH_PIPELINE); the production default is fully coherent.
+    // bf16 D128 (32x32x8 is fp16-only) and all D64 are left to the branches
+    // above/below -- unchanged. cfv is never selected here.
     if (problem.arch == "gfx942" && problem.head_size == 128 && problem.dtype == "fp16") {
-        return {/*num_warps=*/1, /*block_m_per_warp=*/32, /*tile_size=*/64};
+        return {/*num_warps=*/4, /*block_m_per_warp=*/32, /*tile_size=*/64};
     }
 
     std::int32_t tileSize = 2 * bs;
