@@ -252,9 +252,43 @@ static void demonstrateExhaustiveAutotune(hipdnnHandle_t handle, bool largeMode)
 
 // ─── Scenario 3: Filtered Autotune ─────────────────────────────────────────
 
-/// Demonstrates engine discovery and workspace-constrained autotuning.
-/// Inspects EngineConfigInfo entries, filters by workspace, then autotunes
-/// only the selected engines.
+/// Demonstrates engine discovery and workspace-constrained autotuning using
+/// pre-filtering by estimated workspace size.
+///
+/// This scenario shows the recommended pattern for workspace-constrained
+/// autotune when you want to avoid compiling engines that are too large:
+///   1. Call get_engine_configs() to inspect EngineConfigInfo entries
+///   2. Filter by estimatedWorkspaceSize before adding to the graph
+///   3. Call add_engine_configs() with only the engines that fit
+///   4. Run autotune() on the pre-filtered set
+///
+/// This avoids compiling engines whose estimated workspace exceeds the budget,
+/// saving time compared to the Tier 2 overload (which compiles all engines
+/// first, then filters by actual compiled workspace size).
+///
+/// Alternative: Tier 2 autotune with workspace limit parameter
+/// ─────────────────────────────────────────────────────────────
+/// Instead of pre-filtering, you can use the Tier 2 autotune() overload that
+/// takes a workspaceSize parameter. This compiles and benchmarks all candidates,
+/// then filters out any plan whose actual (compiled) workspace exceeds the limit:
+///
+///   graph->add_all_engines();
+///   int64_t maxWs = 0;
+///   graph->get_estimated_max_workspace_size(maxWs);
+///   Workspace workspace(maxWs);
+///
+///   AutotuneConfig config;
+///   config.mode = TuneMode::AUTO;
+///
+///   int64_t workspaceBudget = 256 * 1024 * 1024;  // 256 MB limit
+///   std::vector<AutotuneResult> results;
+///   // Tier 2 overload: pass workspaceBudget as the 4th argument
+///   graph->autotune(handle, variantPack, workspace.get(),
+///                   workspaceBudget, config, {}, &results);
+///
+/// In the Tier 2 overload, plans exceeding the workspace limit appear in
+/// results with succeeded=false. If the fastest plan is too large, the
+/// next-best plan that fits is selected automatically.
 static void demonstrateFilteredAutotune(hipdnnHandle_t handle, bool largeMode)
 {
     std::cout << "\n=== Scenario 3: Filtered Autotune (Workspace Constrained) ===\n";
