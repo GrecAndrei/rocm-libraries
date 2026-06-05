@@ -1,24 +1,34 @@
 #!/usr/bin/env python3
-"""Fix YAML parameter type mismatches in library logic files.
+"""Fix YAML parameter type mismatches in TensileLite YAML files.
 
 Usage:
-    python3 fix_yaml_types.py <directory>
+    python3 fix_yaml_types.py [--mode {logic,input,both}] <directory> [<directory> ...]
 
-Recursively finds all *.yaml files under <directory> and applies targeted
+Recursively finds all *.yaml files under each <directory> and applies targeted
 regex substitutions to correct bool/int/float type mismatches.  These
-mismatches cause std::bad_cast at C++ msgpack deserialization time because
-msgpack serializes bool and int as different wire types.
+mismatches cause std::bad_cast at C++ msgpack deserialization time (library-
+logic path) and now also fail input-YAML validation in TensileLite itself.
 
-Idempotent — safe to run multiple times.
+Modes:
+    logic   Library-logic YAMLs (TensileLite-generated output).
+    input   Input YAMLs (human-authored test/benchmark configs).
+    both    Both (default).
+
+The mismatch patterns are derived from Tensile.Common.ValidParameters and apply
+in both logic and input contexts; the mode flag documents intent and lets
+callers limit the sweep when only one tree needs touching.
+
+Idempotent -- safe to run multiple times.
 """
 
+import argparse
 import os
 import re
 import sys
 import glob
 
 
-# ── Known mismatch patterns ──────────────────────────────────────────────────
+# Known mismatch patterns ----------------------------------------------------
 #
 # Derived from Tensile.Common.ValidParameters.validParameters.  Each group
 # lists parameters whose YAML values have the wrong Python type after
@@ -158,21 +168,74 @@ def find_yaml_files(directory):
     return sorted(glob.glob(os.path.join(directory, "**/*.yaml"), recursive=True))
 
 
-def main():
-    if len(sys.argv) != 2:
-        print(f"Usage: {sys.argv[0]} <directory>")
-        print("  Recursively fixes YAML parameter type mismatches under <directory>")
+def find_yaml_files_in_roots(directories):
+    """Recursively find all *.yaml files under each directory in directories.
+
+    De-duplicates results so overlapping roots do not double-process files.
+    """
+    seen = set()
+    out = []
+    for d in directories:
+        for path in find_yaml_files(d):
+            real = os.path.realpath(path)
+            if real in seen:
+                continue
+            seen.add(real)
+            out.append(path)
+    return out
+
+
+def parse_args(argv):
+    p = argparse.ArgumentParser(
+        prog="fix_yaml_types.py",
+        description=(
+            "Fix YAML parameter type mismatches in TensileLite library-logic "
+            "and/or input YAMLs."
+        ),
+    )
+    p.add_argument(
+        "--mode",
+        choices=("logic", "input", "both"),
+        default="both",
+        help=(
+            "Which YAML tree(s) the directories represent. The mismatch "
+            "patterns apply identically in both contexts; this flag documents "
+            "intent and is reflected in the report. Default: both."
+        ),
+    )
+    p.add_argument(
+        "directory",
+        nargs="+",
+        help="One or more directories to scan recursively for *.yaml files.",
+    )
+    return p.parse_args(argv)
+
+
+def main(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
+
+    # Backward-compat: an empty argv prints usage and exits non-zero so the
+    # existing test_no_args_exits_nonzero test still passes.
+    if not argv:
+        print(
+            "Usage: fix_yaml_types.py [--mode {logic,input,both}] "
+            "<directory> [<directory> ...]"
+        )
+        print("  Recursively fixes YAML parameter type mismatches under each <directory>")
         return 1
 
-    target_dir = sys.argv[1]
+    args = parse_args(argv)
 
-    if not os.path.isdir(target_dir):
-        print(f"Error: '{target_dir}' is not a directory")
-        return 1
+    for d in args.directory:
+        if not os.path.isdir(d):
+            print(f"Error: '{d}' is not a directory")
+            return 1
 
-    yaml_files = find_yaml_files(target_dir)
+    yaml_files = find_yaml_files_in_roots(args.directory)
     print(f"=== fix_yaml_types.py ===")
-    print(f"Target directory: {target_dir}")
+    print(f"Mode: {args.mode}")
+    print(f"Target directories: {', '.join(args.directory)}")
     print(f"YAML files found: {len(yaml_files)}")
     print()
 

@@ -331,3 +331,66 @@ class TestCLI:
         assert "Group A (bool->int):   1" in result.stdout
         assert "Group B (int->bool):   1" in result.stdout
         assert "Group C (int->float):  1" in result.stdout
+
+    def test_mode_flag_input(self, tmp_path):
+        """--mode input is reported in the output."""
+        subdir = tmp_path / "arch"
+        subdir.mkdir()
+        (subdir / "test.yaml").write_text("    DirectToLds: 0\n")
+        result = subprocess.run(
+            [sys.executable, self.SCRIPT, "--mode", "input", str(tmp_path)],
+            capture_output=True, text=True)
+        assert result.returncode == 0
+        assert "Mode: input" in result.stdout
+
+    def test_mode_flag_logic(self, tmp_path):
+        subdir = tmp_path / "arch"
+        subdir.mkdir()
+        (subdir / "test.yaml").write_text("    DirectToLds: 0\n")
+        result = subprocess.run(
+            [sys.executable, self.SCRIPT, "--mode", "logic", str(tmp_path)],
+            capture_output=True, text=True)
+        assert result.returncode == 0
+        assert "Mode: logic" in result.stdout
+
+    def test_mode_defaults_to_both(self, tmp_path):
+        subdir = tmp_path / "arch"
+        subdir.mkdir()
+        (subdir / "test.yaml").write_text("    DirectToLds: 0\n")
+        result = subprocess.run(
+            [sys.executable, self.SCRIPT, str(tmp_path)],
+            capture_output=True, text=True)
+        assert result.returncode == 0
+        assert "Mode: both" in result.stdout
+
+    def test_mode_invalid_rejected(self, tmp_path):
+        result = subprocess.run(
+            [sys.executable, self.SCRIPT, "--mode", "bogus", str(tmp_path)],
+            capture_output=True, text=True)
+        assert result.returncode != 0
+
+    def test_multiple_directories(self, tmp_path):
+        """Multiple directories on the CLI are all scanned."""
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        a.mkdir()
+        b.mkdir()
+        (a / "x.yaml").write_text("    DirectToLds: false\n")
+        (b / "y.yaml").write_text("    ExpandPointerSwap: 0\n")
+        result = subprocess.run(
+            [sys.executable, self.SCRIPT, str(a), str(b)],
+            capture_output=True, text=True)
+        assert result.returncode == 0
+        assert (a / "x.yaml").read_text() == "    DirectToLds: 0\n"
+        assert (b / "y.yaml").read_text() == "    ExpandPointerSwap: false\n"
+
+    def test_duplicate_directories_not_double_processed(self, tmp_path):
+        """Passing the same directory twice does not double-count files."""
+        subdir = tmp_path / "arch"
+        subdir.mkdir()
+        (subdir / "test.yaml").write_text("    DirectToLds: false\n")
+        result = subprocess.run(
+            [sys.executable, self.SCRIPT, str(tmp_path), str(tmp_path)],
+            capture_output=True, text=True)
+        assert result.returncode == 0
+        assert "YAML files found: 1" in result.stdout

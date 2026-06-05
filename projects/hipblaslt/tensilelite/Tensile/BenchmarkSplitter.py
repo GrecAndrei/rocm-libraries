@@ -27,6 +27,8 @@ import copy
 import yaml
 import math
 
+from Tensile import LibraryIO
+
 class BenchmarkSplitter(object):
 
     """
@@ -38,9 +40,10 @@ class BenchmarkSplitter(object):
 
     @staticmethod
     def __readConfigFile(benchmarkConfigFile):
-        with open(benchmarkConfigFile) as f:
-            data = yaml.safe_load(f)
-        return data
+        # Use LibraryIO.read so the input YAML is parsed by StrictTypeLoader
+        # (preserves 0/1 as int vs True/False as bool). Bare yaml.safe_load
+        # collapses them at parse time and defeats downstream type validation.
+        return LibraryIO.read(benchmarkConfigFile)
 
     # data: a loaded .yaml file
     # returns: a list of yaml files that
