@@ -678,7 +678,12 @@ class ArchTarget:
 
 @lru_cache(maxsize=1)
 def _load_specs() -> Dict[str, dict]:
-    with open(_DATA_FILE) as fh:
+    # Force UTF-8: the provider loads this via the embedded C++ Python
+    # interpreter (no locale -> ASCII default codec), so any non-ASCII byte in
+    # arch_specs.json (e.g. an em-dash in a _comment) would raise
+    # UnicodeDecodeError. The standalone interpreter defaults to UTF-8; pin it
+    # here so both paths agree.
+    with open(_DATA_FILE, encoding="utf-8") as fh:
         doc = json.load(fh)
     return doc["arches"]
 
