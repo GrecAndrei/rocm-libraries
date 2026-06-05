@@ -302,7 +302,7 @@ class BenchmarkProcess:
                 raise ConfigTypeError(full)
 
         params = dict(itertools.chain(*[x.items() for x in defaultBenchmarkCommonParameters]))
-        params.update(configParams)
+        params.update({**benchmarkCommonParams, **forkParams})
         self.singleValueParams, self.multiValueParams = separateParameters(params)
 
         # print summary of parameter values
