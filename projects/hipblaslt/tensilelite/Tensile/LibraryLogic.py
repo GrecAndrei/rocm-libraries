@@ -29,7 +29,7 @@ from . import SolutionSelectionLibrary
 from Tensile.Common import print1, print2, HR, printExit, \
   assignParameterWithDefault, ProgressBar, printWarning, ensurePath, \
   LIBRARY_LOGIC_DIR, BENCHMARK_DATA_DIR, getVerbosity, IsaInfo
-from Tensile.Common.GlobalParameters import defaultAnalysisParameters, globalParameters, startTime
+from Tensile.Common.GlobalParameters import defaultAnalysisParameters, globalParameters, startTime, libraryLogicTypeOverrides
 from Tensile.Common.TimingInstrumentation import timing_context
 from Tensile.SolutionStructs.Naming import getKernelNameMin, getSolutionNameMin, getSolutionNameFull
 
@@ -1462,8 +1462,11 @@ def generateLogic(
               f"Valid keys are {sorted(defaultAnalysisParameters.keys())}."
           )
           continue
-        default = defaultAnalysisParameters[key]
-        expectedTypes = {type(default)}
+        if key in libraryLogicTypeOverrides:
+          expectedTypes = libraryLogicTypeOverrides[key]
+        else:
+          default = defaultAnalysisParameters[key]
+          expectedTypes = {type(default)}
         if type(value) not in expectedTypes:
           errors.append(formatMismatch("", f"LibraryLogic.{key}", value, expectedTypes))
           continue

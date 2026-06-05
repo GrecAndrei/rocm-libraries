@@ -167,36 +167,48 @@ class TestCountMismatches:
 
     def test_no_mismatches(self):
         content = "    UseCustomMainLoopSchedule: 0\n    ExpandPointerSwap: true\n"
-        assert count_mismatches(content) == (0, 0, 0)
+        assert count_mismatches(content) == (0, 0, 0, 0)
 
     def test_group_a_counts(self):
         content = "    DirectToLds: false\n    DirectToLds: true\n"
-        a, b, c = count_mismatches(content)
+        a, b, c, d = count_mismatches(content)
         assert a == 2
         assert b == 0
         assert c == 0
+        assert d == 0
 
     def test_group_b_counts(self):
         content = "    ExpandPointerSwap: 0\n    SourceSwap: 1\n"
-        a, b, c = count_mismatches(content)
+        a, b, c, d = count_mismatches(content)
         assert a == 0
         assert b == 2
         assert c == 0
+        assert d == 0
 
     def test_group_c_counts(self):
         content = "    GlobalReadPerMfma: 1\n"
-        a, b, c = count_mismatches(content)
+        a, b, c, d = count_mismatches(content)
         assert a == 0
         assert b == 0
         assert c == 1
+        assert d == 0
+
+    def test_group_d_counts(self):
+        content = "    CodeObjectVersion: 4\n"
+        a, b, c, d = count_mismatches(content)
+        assert a == 0
+        assert b == 0
+        assert c == 0
+        assert d == 1
 
     def test_mixed_groups(self):
         content = textwrap.dedent("""\
             DirectToLds: false
             ExpandPointerSwap: 0
             GlobalReadPerMfma: 1
+            CodeObjectVersion: 4
         """)
-        assert count_mismatches(content) == (1, 1, 1)
+        assert count_mismatches(content) == (1, 1, 1, 1)
 
 
 # ── Tests for fix_file ───────────────────────────────────────────────────────

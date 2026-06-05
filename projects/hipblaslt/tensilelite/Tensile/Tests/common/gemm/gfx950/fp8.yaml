@@ -43,8 +43,8 @@ BenchmarkProblems:
       DestDataType: h
       ComputeDataType: S
       HighPrecisionAccumulate: True
-      TransposeA: 1
-      TransposeB: 1
+      TransposeA: true
+      TransposeB: true
       UseBeta: True
       Batched: True
       #Activation:    True
@@ -81,7 +81,7 @@ BenchmarkProblems:
         - GlobalReadVectorWidthB: [4, 16]
         - ScheduleIterAlg: [3]
         - InnerUnroll: [1]
-        - ExpandPointerSwap: [1]
+        - ExpandPointerSwap: [true]
         - LdsBlockSizePerPadA: [-1]
         - LdsBlockSizePerPadB: [-1]
         - TransposeLDS: [1]
@@ -95,7 +95,7 @@ BenchmarkProblems:
         #- LocalWritePerMfma: [-1]
         - LocalReadVectorWidth: [4,8,16]
         - StoreVectorWidth: [-1]
-        - SourceSwap: [1]
+        - SourceSwap: [true]
         #- NumElementsPerBatchStore: [0]
         #- StorePriorityOpt: [0]
       BenchmarkJoinParameters:
@@ -125,8 +125,8 @@ BenchmarkProblems:
       DestDataType: h
       ComputeDataType: S
       HighPrecisionAccumulate: True
-      TransposeA: 1
-      TransposeB: 0
+      TransposeA: true
+      TransposeB: false
       UseBeta: True
       Batched: True
       #Activation:    True
@@ -163,7 +163,7 @@ BenchmarkProblems:
         - GlobalReadVectorWidthB: [4, 16]
         - ScheduleIterAlg: [3]
         #- InnerUnroll: [1]
-        - ExpandPointerSwap: [1]
+        - ExpandPointerSwap: [true]
         - LdsBlockSizePerPadA: [-1]
         - LdsBlockSizePerPadB: [-1]
         - TransposeLDS: [1]
@@ -173,13 +173,13 @@ BenchmarkProblems:
         - 1LDSBuffer: [-1]
         - GlobalSplitU: [1, 2]
         - GlobalSplitUAlgorithm: ["MultipleBuffer"]
-        - GlobalReadPerMfma: [1]
+        - GlobalReadPerMfma: [1.0]
         - LocalWritePerMfma: [-1]
         - LocalReadVectorWidth: [4,8,16]
         - StoreVectorWidth: [-1]
-        - SourceSwap: [1]
+        - SourceSwap: [true]
         - NumElementsPerBatchStore: [0]
-        - StorePriorityOpt: [0]
+        - StorePriorityOpt: [false]
       BenchmarkJoinParameters:
       BenchmarkFinalParameters:
         - ProblemSizes:
@@ -206,8 +206,8 @@ BenchmarkProblems:
       DestDataType: h
       ComputeDataType: S
       HighPrecisionAccumulate: True
-      TransposeA: 0
-      TransposeB: 1
+      TransposeA: false
+      TransposeB: true
       UseBeta: True
       Batched: True
       #Activation:    True
@@ -242,7 +242,7 @@ BenchmarkProblems:
         - GlobalReadVectorWidthB: [4, 16]
         - ScheduleIterAlg: [3]
         - InnerUnroll: [1]
-        - ExpandPointerSwap: [1]
+        - ExpandPointerSwap: [true]
         - LdsBlockSizePerPadA: [-1]
         - LdsBlockSizePerPadB: [-1]
         - TransposeLDS: [0]
@@ -256,9 +256,9 @@ BenchmarkProblems:
         #- LocalWritePerMfma: [-1]
         - LocalReadVectorWidth: [4,8,16]
         - StoreVectorWidth: [-1]
-        - SourceSwap: [1]
+        - SourceSwap: [true]
         - NumElementsPerBatchStore: [0]
-        - StorePriorityOpt: [0]
+        - StorePriorityOpt: [false]
       BenchmarkJoinParameters:
       BenchmarkFinalParameters:
         - ProblemSizes:
@@ -285,8 +285,8 @@ BenchmarkProblems:
       DestDataType: h
       ComputeDataType: S
       HighPrecisionAccumulate: True
-      TransposeA: 0
-      TransposeB: 0
+      TransposeA: false
+      TransposeB: false
       UseBeta: True
       Batched: True
       #Activation:    True
@@ -321,7 +321,7 @@ BenchmarkProblems:
         - GlobalReadVectorWidthB: [4, 16]
         - ScheduleIterAlg: [3]
         - InnerUnroll: [1]
-        - ExpandPointerSwap: [1]
+        - ExpandPointerSwap: [true]
         - LdsBlockSizePerPadA: [-1]
         - LdsBlockSizePerPadB: [-1]
         - TransposeLDS: [1]
@@ -331,13 +331,13 @@ BenchmarkProblems:
         - 1LDSBuffer: [-1]
         - GlobalSplitU: [1, 2]
         - GlobalSplitUAlgorithm: ["MultipleBuffer"]
-        - GlobalReadPerMfma: [1]
+        - GlobalReadPerMfma: [1.0]
         - LocalWritePerMfma: [-1]
         - LocalReadVectorWidth: [4,8,16]
         - StoreVectorWidth: [-1]
-        - SourceSwap: [1]
+        - SourceSwap: [true]
         - NumElementsPerBatchStore: [0]
-        - StorePriorityOpt: [0]
+        - StorePriorityOpt: [false]
       BenchmarkJoinParameters:
       BenchmarkFinalParameters:
         - ProblemSizes:

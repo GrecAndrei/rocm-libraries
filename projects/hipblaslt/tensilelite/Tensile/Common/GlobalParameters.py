@@ -593,6 +593,17 @@ defaultAnalysisParameters = {
     "SolutionImportanceMin": 0.01,  # = 0.01=1% total time saved by keeping this solution
 }
 
+# Per-key expected-type overrides for the LibraryLogic block. The
+# defaults map gives a single example value per key; for keys that
+# legitimately accept multiple Python types (e.g. DeviceNames can be a
+# single str like the default "fallback" OR a list of strings naming
+# multiple ASIC device IDs that share the same library logic), the
+# override widens the accepted type set. Without this widening the
+# strict gate in generateLogic() rejects the common list form.
+libraryLogicTypeOverrides = {
+    "DeviceNames": {str, list},
+}
+
 
 ################################################################################
 # Is query version compatible with current version

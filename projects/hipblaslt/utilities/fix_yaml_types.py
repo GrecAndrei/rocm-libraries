@@ -35,26 +35,34 @@ import glob
 # yaml.safe_load().
 
 # Group A: Bool -> Int
-# validParameters declares these as int (e.g. [-1, 0, 1]) but YAMLs have
-# false/true which yaml.safe_load() returns as Python bool.
+# Declared as int (e.g. [-1, 0, 1] in validParameters, or int defaults in
+# globalParameters) but YAMLs have false/true.
 BOOL_TO_INT_PARAMS = [
+    # validParameters (solution-side)
     "ClusterLocalRead",
     "DirectToLds",
+    "PrefetchGlobalRead",
+    "PrefetchLocalRead",
     "SwapGlobalReadOrder",
     "TransposeLDS",
     "TransposeLDSMetadata",
     "UseCustomMainLoopSchedule",
     "UsePLRPack",
+    # globalParameters (int defaults)
+    "BoundsCheck",
 ]
 
 # Group B: Int -> Bool
-# validParameters declares these as bool (e.g. [False, True]) but YAMLs have
-# 0/1 which yaml.safe_load() returns as Python int.
+# Declared as bool (e.g. [False, True] in validParameters, _defaultProblemType
+# bool defaults, or globalParameters bool defaults) but YAMLs have 0/1.
 INT_TO_BOOL_PARAMS = [
+    # validParameters (solution-side)
+    "ActivationAlt",
     "ActivationFuncCall",
     "ConvertAfterDS",
     "DirectToVgprA",
     "DirectToVgprB",
+    "DirectToVgprSparseMetadata",
     "ExpandPointerSwap",
     "ForceDisableShadowInit",
     "GroupLoadStore",
@@ -67,52 +75,83 @@ INT_TO_BOOL_PARAMS = [
     "SuppressNoLoadLoop",
     "TailloopInNll",
     "Use64bShadowLimit",
+    "Use64bShadowLimitMX",
+    "UseSubtileImpl",
     "WaveSplitK",
+    # _defaultProblemType (bool defaults)
+    "TransposeA",
+    "TransposeB",
+    # globalParameters (bool defaults)
+    "CSVExportWinner",
+    "CSVMergeSameProblemID",
+    "PreciseKernelTime",
 ]
 
 # Group C: Int -> Float
-# validParameters declares these as float but YAMLs have bare integers.
+# Declared as float but YAMLs have bare integers.
 INT_TO_FLOAT_PARAMS = [
     "GlobalReadPerMfma",
+]
+
+# Group D: Int -> Str
+# globalParameters string defaults (e.g. CodeObjectVersion default is "4")
+# but YAMLs have bare integers.
+INT_TO_STR_PARAMS = [
+    "CodeObjectVersion",
 ]
 
 
 def _build_patterns():
     """Build compiled regex patterns and their replacements.
 
-    Returns a list of (compiled_regex, replacement_string) tuples.
-    Each regex matches a full line with the parameter at end-of-line.
+    Returns a list of (compiled_regex, replacement_string) tuples. Each
+    pattern matches a full line with the parameter at end-of-line,
+    tolerating an optional ``- `` YAML-list-element prefix and an
+    optional ``# comment`` trailer. The trailer is captured in group 2
+    and emitted back so user comments survive the rewrite.
     """
     patterns = []
 
-    # Group A: false -> 0, true -> 1
+    def _add(re_str, replacement):
+        patterns.append((re.compile(re_str, re.MULTILINE), replacement))
+
+    # Group A: false/False -> 0, true/True -> 1.
+    # Both scalar (Key: false) and single-element-list (Key: [false]).
     for param in BOOL_TO_INT_PARAMS:
-        patterns.append((
-            re.compile(rf"^(\s*{param}: )false$", re.MULTILINE),
-            rf"\g<1>0",
-        ))
-        patterns.append((
-            re.compile(rf"^(\s*{param}: )true$", re.MULTILINE),
-            rf"\g<1>1",
-        ))
+        head = rf"^(\s*(?:-\s+)?{param}: )"
+        tail = r"(\s*(?:#.*)?)$"
+        _add(head + r"(?:false|False)" + tail, r"\g<1>0\g<2>")
+        _add(head + r"(?:true|True)" + tail, r"\g<1>1\g<2>")
+        _add(head + r"\[\s*(?:false|False)\s*\]" + tail, r"\g<1>[0]\g<2>")
+        _add(head + r"\[\s*(?:true|True)\s*\]" + tail, r"\g<1>[1]\g<2>")
 
-    # Group B: 0 -> false, 1 -> true
+    # Group B: 0 -> false, 1 -> true. Scalar, single-element-list,
+    # and the common [0,1] / [0, 1] two-element form for value
+    # enumeration.
     for param in INT_TO_BOOL_PARAMS:
-        patterns.append((
-            re.compile(rf"^(\s*{param}: )0$", re.MULTILINE),
-            rf"\g<1>false",
-        ))
-        patterns.append((
-            re.compile(rf"^(\s*{param}: )1$", re.MULTILINE),
-            rf"\g<1>true",
-        ))
+        head = rf"^(\s*(?:-\s+)?{param}: )"
+        tail = r"(\s*(?:#.*)?)$"
+        _add(head + r"0" + tail, r"\g<1>false\g<2>")
+        _add(head + r"1" + tail, r"\g<1>true\g<2>")
+        _add(head + r"\[\s*0\s*\]" + tail, r"\g<1>[false]\g<2>")
+        _add(head + r"\[\s*1\s*\]" + tail, r"\g<1>[true]\g<2>")
+        # [0,1] / [0, 1] / [1, 0] -- the typical two-value enumeration.
+        _add(head + r"\[\s*0\s*,\s*1\s*\]" + tail, r"\g<1>[false, true]\g<2>")
+        _add(head + r"\[\s*1\s*,\s*0\s*\]" + tail, r"\g<1>[true, false]\g<2>")
 
-    # Group C: 1 -> 1.0
+    # Group C: 1 -> 1.0. Scalar and single-element-list.
     for param in INT_TO_FLOAT_PARAMS:
-        patterns.append((
-            re.compile(rf"^(\s*{param}: )1$", re.MULTILINE),
-            rf"\g<1>1.0",
-        ))
+        head = rf"^(\s*(?:-\s+)?{param}: )"
+        tail = r"(\s*(?:#.*)?)$"
+        _add(head + r"1" + tail, r"\g<1>1.0\g<2>")
+        _add(head + r"\[\s*1\s*\]" + tail, r"\g<1>[1.0]\g<2>")
+
+    # Group D: bare integer -> quoted string. Only rewrites unquoted
+    # ints; already-quoted values pass through unchanged.
+    for param in INT_TO_STR_PARAMS:
+        head = rf"^(\s*(?:-\s+)?{param}: )"
+        tail = r"(\s*(?:#.*)?)$"
+        _add(head + r"(\d+)" + tail, r'\g<1>"\g<2>"\g<3>')
 
     return patterns
 
@@ -123,21 +162,28 @@ PATTERNS = _build_patterns()
 def count_mismatches(content):
     """Count how many lines in content match any mismatch pattern.
 
-    Returns (group_a_count, group_b_count, group_c_count).
+    Returns (group_a_count, group_b_count, group_c_count, group_d_count).
     """
-    counts = [0, 0, 0]
+    counts = [0, 0, 0, 0]
 
     for param in BOOL_TO_INT_PARAMS:
         counts[0] += len(re.findall(
-            rf"^\s*{param}: (?:false|true)$", content, re.MULTILINE))
+            rf"^\s*(?:-\s+)?{param}: (?:false|true|False|True|\[\s*(?:false|true|False|True)\s*\])\s*(?:#.*)?$",
+            content, re.MULTILINE))
 
     for param in INT_TO_BOOL_PARAMS:
         counts[1] += len(re.findall(
-            rf"^\s*{param}: [01]$", content, re.MULTILINE))
+            rf"^\s*(?:-\s+)?{param}: "
+            rf"(?:[01]|\[\s*[01]\s*\]|\[\s*[01]\s*,\s*[01]\s*\])"
+            rf"\s*(?:#.*)?$", content, re.MULTILINE))
 
     for param in INT_TO_FLOAT_PARAMS:
         counts[2] += len(re.findall(
-            rf"^\s*{param}: 1$", content, re.MULTILINE))
+            rf"^\s*(?:-\s+)?{param}: (?:1|\[\s*1\s*\])\s*(?:#.*)?$", content, re.MULTILINE))
+
+    for param in INT_TO_STR_PARAMS:
+        counts[3] += len(re.findall(
+            rf"^\s*(?:-\s+)?{param}: \d+\s*(?:#.*)?$", content, re.MULTILINE))
 
     return tuple(counts)
 
@@ -240,14 +286,15 @@ def main(argv=None):
     print()
 
     # Count mismatches before
-    before = [0, 0, 0]
+    before = [0, 0, 0, 0]
     for filepath in yaml_files:
         with open(filepath, "r") as f:
             content = f.read()
-        a, b, c = count_mismatches(content)
+        a, b, c, d = count_mismatches(content)
         before[0] += a
         before[1] += b
         before[2] += c
+        before[3] += d
 
     before_total = sum(before)
 
@@ -255,6 +302,7 @@ def main(argv=None):
     print(f"  Group A (bool->int):   {before[0]}")
     print(f"  Group B (int->bool):   {before[1]}")
     print(f"  Group C (int->float):  {before[2]}")
+    print(f"  Group D (int->str):    {before[3]}")
     print(f"  Total:                 {before_total}")
     print()
 
@@ -272,14 +320,15 @@ def main(argv=None):
     print()
 
     # Count mismatches after (verification)
-    after = [0, 0, 0]
+    after = [0, 0, 0, 0]
     for filepath in yaml_files:
         with open(filepath, "r") as f:
             content = f.read()
-        a, b, c = count_mismatches(content)
+        a, b, c, d = count_mismatches(content)
         after[0] += a
         after[1] += b
         after[2] += c
+        after[3] += d
 
     after_total = sum(after)
 
@@ -287,6 +336,7 @@ def main(argv=None):
     print(f"  Group A (bool->int):   {after[0]}")
     print(f"  Group B (int->bool):   {after[1]}")
     print(f"  Group C (int->float):  {after[2]}")
+    print(f"  Group D (int->str):    {after[3]}")
     print(f"  Total:                 {after_total}")
     print()
 
