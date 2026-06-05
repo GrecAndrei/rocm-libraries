@@ -757,34 +757,53 @@ _expectedProblemTypeParamTypes = {
 }
 
 
-def validateProblemTypeParameterTypes(state, srcFile=""):
+def validateProblemTypeParameterTypes(state, srcFile="", *, raiseOnMismatch: bool = True,
+                                       keyPathPrefix: str = "ProblemType"):
   """Validate that every ProblemType parameter has the correct Python type.
 
-  Similar to validateParameterTypes (in Solution.py), but checks ProblemType
-  parameters against the types implied by ``_defaultProblemType``.  A ``bool``
-  where ``int`` is expected (or vice versa) is the most common error.
+  Checks ProblemType parameters against ``_defaultProblemType``. ``bool``
+  where ``int`` is expected (or vice versa) is the canonical YAML
+  collapse this gate targets; ``type()`` (not ``isinstance``) keeps the
+  two distinct.
 
-  Mismatches are collected into the module-level ``_typeMismatchCollector``
-  dict (shared with Solution validation). Call ``printTypeMismatchSummary()``
-  at the end of the build to emit a consolidated warning.
+  Two consumption modes:
+
+  - ``raiseOnMismatch=True`` (default, input-YAML path): aggregates all
+    per-instance mismatches, then raises a single
+    :class:`ConfigTypeError` listing each. Honours
+    ``TENSILE_STRICT_TYPE_CHECK`` (``warn`` -> printWarning, ``off`` ->
+    skip).
+  - ``raiseOnMismatch=False`` (library-logic path): mismatches are only
+    appended to the module-level ``_typeMismatchCollector`` (printed
+    later via ``printTypeMismatchSummary``).
 
   Args:
       state: The ProblemType state dict (parameter name -> value).
-      srcFile: The YAML source file path, included in warning messages.
+      srcFile: The YAML source file path, included in messages.
+      raiseOnMismatch: see above. Default True.
+      keyPathPrefix: prefix for the error keypath (default "ProblemType").
   """
-  # _skipTypeCheck lives in Common/ValidParameters (Common -> Solution import
-  # direction), but the type-mismatch collector still lives in Solution.
-  # Import the collector inside the function to avoid the historical
-  # Naming -> Problem -> Solution -> Naming circular dependency.
+  # _skipTypeCheck lives in Common/ValidParameters (Common -> Solution
+  # import direction), but the type-mismatch collector still lives in
+  # Solution. Import the collector inside the function to avoid the
+  # historical Naming -> Problem -> Solution -> Naming circular dep.
   from Tensile.SolutionStructs.Solution import _typeMismatchCollector
   from Tensile.Common.ValidParameters import _skipTypeCheck
+  from Tensile.Common.TypeValidationErrors import (
+      ConfigTypeError, formatMismatch, getStrictMode,
+  )
 
+  strictMode = getStrictMode() if raiseOnMismatch else None
+  if raiseOnMismatch and strictMode == "off":
+    return
+
+  errors = []  # only used in raiseOnMismatch mode
   for key, value in state.items():
     if key not in _expectedProblemTypeParamTypes or key in _skipTypeCheck:
       continue
     expectedTypes = _expectedProblemTypeParamTypes[key]
     actualType = type(value)
-    # Use type() not isinstance() so that bool and int are distinguished
+    # Use type() not isinstance() so bool/int are distinguished.
     if actualType not in expectedTypes:
       expectedStr = " or ".join(sorted(t.__name__ for t in expectedTypes))
       collectorKey = (key, actualType.__name__, expectedStr)
@@ -799,6 +818,22 @@ def validateProblemTypeParameterTypes(state, srcFile=""):
       entry["values"].add(repr(value))
       if srcFile:
         entry["files"].add(srcFile)
+      if raiseOnMismatch:
+        errors.append(formatMismatch(srcFile, f"{keyPathPrefix}.{key}", value, expectedTypes))
+
+  if not raiseOnMismatch or not errors:
+    return
+
+  full = (
+    "Type validation failed in ProblemType:\n  "
+    + "\n  ".join(errors)
+    + "\n(Run utilities/fix_yaml_types.py to bulk-fix the tree.)"
+  )
+  if strictMode == "warn":
+    from Tensile.Common import printWarning
+    printWarning(full)
+    return
+  raise ConfigTypeError(full)
 
 
 class ProblemType(Mapping):

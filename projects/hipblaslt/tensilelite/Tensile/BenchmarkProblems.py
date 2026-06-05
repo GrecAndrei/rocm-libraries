@@ -42,6 +42,7 @@ from Tensile.KernelHelperNaming import KernelHelperEnum, initHelperKernelObjects
 from Tensile.Toolchain.Component import Assembler
 from Tensile.SolutionStructs.Problem import ProblemType, ProblemSizes
 from Tensile.SolutionStructs.Solution import Solution, printTypeMismatchSummary
+from Tensile.Common.TypeValidationErrors import ConfigTypeError
 from Tensile.SolutionStructs.Validators.MatrixInstruction import matrixInstructionToMIParameters, \
                                                                  validateMIParameters
 from Tensile.SolutionStructs.Naming import getKeyNoInternalArgs, getSolutionNameMin, getKernelNameMin
@@ -190,6 +191,16 @@ def _generate_single_solution(perm, problemType, constantParams, assembler, debu
                 print1("rejecting solution " + str(solution))
         elif debugConfig.printSolutionRejectionReason:
             print1("rejecting solution " + str(solution))
+    except ConfigTypeError:
+        # Step 4 (B1): type-validation errors from ProblemType/Solution
+        # construction MUST propagate past the worker's broad except so
+        # the user sees a structured fail-fast error rather than a
+        # silent solution-count drop. Per the plan, the outer
+        # ProblemType in BenchmarkProcess already validated the
+        # equivalent state, so re-validation here is normally a no-op;
+        # this re-raise is a backstop for programmatic / future
+        # callers that bypass the outer revalidation.
+        raise
     except Exception as e:
         print(f"Error processing permutation {perm}: {e}")
     return None

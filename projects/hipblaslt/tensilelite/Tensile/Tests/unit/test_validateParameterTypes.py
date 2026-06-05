@@ -371,7 +371,13 @@ class TestPrintTypeMismatchSummary:
 
 
 class TestValidateProblemTypeParameterTypes:
-    """Tests for the validateProblemTypeParameterTypes function."""
+    """Tests for the validateProblemTypeParameterTypes function.
+
+    Step 4 promoted the default behaviour to raise on mismatch. These
+    tests exercise the library-logic / collector mode by passing
+    ``raiseOnMismatch=False``. See TestValidateProblemTypeRaiseMode for
+    the strict-mode coverage.
+    """
 
     def setup_method(self):
         """Reset the collector before each test."""
@@ -382,50 +388,50 @@ class TestValidateProblemTypeParameterTypes:
     def test_bool_param_with_bool_value_passes(self):
         """TransposeA: False (bool) should not collect a mismatch."""
         state = {"TransposeA": False}
-        validateProblemTypeParameterTypes(state)
+        validateProblemTypeParameterTypes(state, raiseOnMismatch=False)
         assert len(_typeMismatchCollector) == 0
 
     def test_bool_param_with_true_passes(self):
         """TransposeA: True (bool) should not collect a mismatch."""
         state = {"TransposeA": True}
-        validateProblemTypeParameterTypes(state)
+        validateProblemTypeParameterTypes(state, raiseOnMismatch=False)
         assert len(_typeMismatchCollector) == 0
 
     def test_usebeta_bool_param_with_bool_passes(self):
         """UseBeta: True (bool) should not collect a mismatch."""
         state = {"UseBeta": True}
-        validateProblemTypeParameterTypes(state)
+        validateProblemTypeParameterTypes(state, raiseOnMismatch=False)
         assert len(_typeMismatchCollector) == 0
 
     def test_int_param_with_int_value_passes(self):
         """UseBias: 1 (int) should not collect a mismatch."""
         state = {"UseBias": 1}
-        validateProblemTypeParameterTypes(state)
+        validateProblemTypeParameterTypes(state, raiseOnMismatch=False)
         assert len(_typeMismatchCollector) == 0
 
     def test_mxblock_int_param_passes(self):
         """MXBlockA: 16 (int) should not collect a mismatch."""
         state = {"MXBlockA": 16}
-        validateProblemTypeParameterTypes(state)
+        validateProblemTypeParameterTypes(state, raiseOnMismatch=False)
         assert len(_typeMismatchCollector) == 0
 
     def test_unknown_param_ignored(self):
         """Parameters not in _defaultProblemType should be silently skipped."""
         state = {"UnknownProblemTypeParam": "anything"}
-        validateProblemTypeParameterTypes(state)
+        validateProblemTypeParameterTypes(state, raiseOnMismatch=False)
         assert len(_typeMismatchCollector) == 0
 
     def test_empty_state_passes(self):
         """Empty state should not collect any mismatches."""
-        validateProblemTypeParameterTypes({})
+        validateProblemTypeParameterTypes({}, raiseOnMismatch=False)
         assert len(_typeMismatchCollector) == 0
 
-    # --- Failing cases (mismatches collected) ---
+    # --- Failing cases (mismatches collected; raise disabled) ---
 
     def test_bool_param_with_int_value_collects_mismatch(self):
         """TransposeA: 0 (int) should collect a bool-vs-int mismatch."""
         state = {"TransposeA": 0}
-        validateProblemTypeParameterTypes(state)
+        validateProblemTypeParameterTypes(state, raiseOnMismatch=False)
         assert len(_typeMismatchCollector) == 1
         key = ("TransposeA", "int", "bool")
         assert key in _typeMismatchCollector
@@ -433,7 +439,7 @@ class TestValidateProblemTypeParameterTypes:
     def test_bool_param_with_int_one_collects_mismatch(self):
         """UseBeta: 1 (int) should collect a bool-vs-int mismatch."""
         state = {"UseBeta": 1}
-        validateProblemTypeParameterTypes(state)
+        validateProblemTypeParameterTypes(state, raiseOnMismatch=False)
         assert len(_typeMismatchCollector) == 1
         key = ("UseBeta", "int", "bool")
         assert key in _typeMismatchCollector
@@ -441,7 +447,7 @@ class TestValidateProblemTypeParameterTypes:
     def test_int_param_with_bool_collects_mismatch(self):
         """UseBias: True (bool) should collect an int-vs-bool mismatch."""
         state = {"UseBias": True}
-        validateProblemTypeParameterTypes(state)
+        validateProblemTypeParameterTypes(state, raiseOnMismatch=False)
         assert len(_typeMismatchCollector) == 1
         key = ("UseBias", "bool", "int")
         assert key in _typeMismatchCollector
@@ -449,7 +455,7 @@ class TestValidateProblemTypeParameterTypes:
     def test_mxblock_with_bool_collects_mismatch(self):
         """MXBlockA: False (bool) should collect an int-vs-bool mismatch."""
         state = {"MXBlockA": False}
-        validateProblemTypeParameterTypes(state)
+        validateProblemTypeParameterTypes(state, raiseOnMismatch=False)
         assert len(_typeMismatchCollector) == 1
         key = ("MXBlockA", "bool", "int")
         assert key in _typeMismatchCollector
@@ -457,14 +463,15 @@ class TestValidateProblemTypeParameterTypes:
     def test_collector_tracks_srcfile(self):
         """srcFile should be recorded in the collector entry."""
         state = {"TransposeA": 0}
-        validateProblemTypeParameterTypes(state, srcFile="problem_config.yaml")
+        validateProblemTypeParameterTypes(state, srcFile="problem_config.yaml",
+                                          raiseOnMismatch=False)
         key = ("TransposeA", "int", "bool")
         assert "problem_config.yaml" in _typeMismatchCollector[key]["files"]
 
     def test_collector_tracks_values(self):
         """Different values should be collected in the values set."""
-        validateProblemTypeParameterTypes({"TransposeA": 0})
-        validateProblemTypeParameterTypes({"TransposeA": 1})
+        validateProblemTypeParameterTypes({"TransposeA": 0}, raiseOnMismatch=False)
+        validateProblemTypeParameterTypes({"TransposeA": 1}, raiseOnMismatch=False)
         key = ("TransposeA", "int", "bool")
         assert "0" in _typeMismatchCollector[key]["values"]
         assert "1" in _typeMismatchCollector[key]["values"]
@@ -472,13 +479,13 @@ class TestValidateProblemTypeParameterTypes:
     def test_multiple_params_collect_separately(self):
         """Different parameters should create separate collector entries."""
         state = {"TransposeA": 0, "UseBeta": 1, "UseBias": True}
-        validateProblemTypeParameterTypes(state)
+        validateProblemTypeParameterTypes(state, raiseOnMismatch=False)
         assert len(_typeMismatchCollector) == 3
 
     def test_accumulates_with_solution_params(self):
         """ProblemType and Solution mismatches should accumulate together."""
         validateParameterTypes({"UseCustomMainLoopSchedule": False})
-        validateProblemTypeParameterTypes({"TransposeA": 0})
+        validateProblemTypeParameterTypes({"TransposeA": 0}, raiseOnMismatch=False)
         assert len(_typeMismatchCollector) == 2
 
     def test_precomputed_problemtype_types(self):
@@ -491,3 +498,157 @@ class TestValidateProblemTypeParameterTypes:
         assert _expectedProblemTypeParamTypes["UseBias"] == {int}
         assert "MXBlockA" in _expectedProblemTypeParamTypes
         assert _expectedProblemTypeParamTypes["MXBlockA"] == {int}
+
+
+class TestValidateProblemTypeRaiseMode:
+    """Step 4: default raiseOnMismatch=True path."""
+
+    def setup_method(self):
+        import os
+        self._saved = os.environ.pop("TENSILE_STRICT_TYPE_CHECK", None)
+        resetTypeMismatchCollector()
+
+    def teardown_method(self):
+        import os
+        os.environ.pop("TENSILE_STRICT_TYPE_CHECK", None)
+        if self._saved is not None:
+            os.environ["TENSILE_STRICT_TYPE_CHECK"] = self._saved
+
+    def test_usebeta_int_raises(self):
+        """UseBeta: 1 (int where bool expected) raises ConfigTypeError."""
+        from Tensile.Common.TypeValidationErrors import ConfigTypeError
+        with pytest.raises(ConfigTypeError) as exc:
+            validateProblemTypeParameterTypes({"UseBeta": 1})
+        assert "UseBeta" in str(exc.value)
+        assert "expected bool" in str(exc.value)
+
+    def test_usebeta_bool_passes(self):
+        """UseBeta: True passes."""
+        validateProblemTypeParameterTypes({"UseBeta": True})
+
+    def test_multiple_bad_keys_aggregated_into_one_raise(self):
+        """All mismatches in one ProblemType yield one exception listing all."""
+        from Tensile.Common.TypeValidationErrors import ConfigTypeError
+        state = {"TransposeA": 0, "UseBeta": 1, "UseBias": True}
+        with pytest.raises(ConfigTypeError) as exc:
+            validateProblemTypeParameterTypes(state)
+        msg = str(exc.value)
+        assert "TransposeA" in msg
+        assert "UseBeta" in msg
+        assert "UseBias" in msg
+
+    def test_datatype_skip_set_not_touched(self):
+        """DataType* string values are skipped (post-processed to DataType objects)."""
+        # Passing a string for a DataType* key would be rejected if not in
+        # the skip set, but DataType* aren't in _expectedProblemTypeParamTypes
+        # because they aren't in _defaultProblemType either; in either case
+        # this must not raise.
+        validateProblemTypeParameterTypes({"DataType": "single"})
+
+    def test_warn_mode_does_not_raise(self, capsys):
+        import os
+        os.environ["TENSILE_STRICT_TYPE_CHECK"] = "warn"
+        validateProblemTypeParameterTypes({"UseBeta": 1})
+        captured = capsys.readouterr()
+        assert "UseBeta" in captured.out + captured.err
+
+    def test_off_mode_skips(self):
+        import os
+        os.environ["TENSILE_STRICT_TYPE_CHECK"] = "off"
+        # Would raise in strict mode.
+        validateProblemTypeParameterTypes({"UseBeta": 1})
+
+    def test_keypath_prefix_in_message(self):
+        from Tensile.Common.TypeValidationErrors import ConfigTypeError
+        with pytest.raises(ConfigTypeError) as exc:
+            validateProblemTypeParameterTypes(
+                {"UseBeta": 1}, keyPathPrefix="BenchmarkProblems[0][0].ProblemType",
+            )
+        assert "BenchmarkProblems[0][0].ProblemType.UseBeta" in str(exc.value)
+
+
+class TestWorkerPassthroughBackstop:
+    """Step 4 (B1): worker re-raises ConfigTypeError past the broad except."""
+
+    def _make_minimal_fixtures(self):
+        """Build the minimal arguments needed to enter _generate_single_solution.
+
+        The worker accesses MatrixInstruction/WorkGroup/WavefrontSize on
+        the merged dict and calls validateMIParameters before Solution.
+        Patching validateMIParameters to return True is enough to drive
+        execution to the Solution() call site.
+        """
+        class _Arch:
+            archCaps = {"HasWave32": True}
+        class _Cfg:
+            splitGSU = False
+            printSolutionRejectionReason = False
+            printIndexAssignmentInfo = False
+        class _Type:
+            state = {"DataType": "single"}
+        perm = {
+            "MatrixInstruction": [],
+            "WorkGroup": [16, 16, 1],
+            "WavefrontSize": 32,
+        }
+        isaInfoMap = {(9, 0, 10): _Arch()}
+        return perm, _Type(), _Cfg(), isaInfoMap
+
+    def test_worker_re_raises_config_type_error(self):
+        """A ConfigTypeError raised inside the worker propagates to the caller.
+
+        Patches validateMIParameters and Solution so we don't need to
+        stand up a full Solution-construction stack. The point is the
+        typed-except in _generate_single_solution.
+        """
+        from Tensile.Common.TypeValidationErrors import ConfigTypeError
+        from Tensile import BenchmarkProblems
+
+        perm, ptype, cfg, isaInfoMap = self._make_minimal_fixtures()
+
+        orig_solution = BenchmarkProblems.Solution
+        orig_vmi = BenchmarkProblems.validateMIParameters
+        BenchmarkProblems.validateMIParameters = lambda *a, **kw: True
+        BenchmarkProblems.Solution = lambda *a, **kw: (_ for _ in ()).throw(
+            ConfigTypeError("typed boom"))
+        try:
+            with pytest.raises(ConfigTypeError) as exc:
+                BenchmarkProblems._generate_single_solution(
+                    perm=perm,
+                    problemType=ptype,
+                    constantParams={},
+                    assembler=None,
+                    debugConfig=cfg,
+                    isaInfoMap=isaInfoMap,
+                )
+            assert "typed boom" in str(exc.value)
+        finally:
+            BenchmarkProblems.Solution = orig_solution
+            BenchmarkProblems.validateMIParameters = orig_vmi
+
+    def test_worker_swallows_generic_exception(self, capsys):
+        """A non-ConfigTypeError still gets swallowed (legacy behaviour)."""
+        from Tensile import BenchmarkProblems
+
+        perm, ptype, cfg, isaInfoMap = self._make_minimal_fixtures()
+
+        orig_solution = BenchmarkProblems.Solution
+        orig_vmi = BenchmarkProblems.validateMIParameters
+        BenchmarkProblems.validateMIParameters = lambda *a, **kw: True
+        BenchmarkProblems.Solution = lambda *a, **kw: (_ for _ in ()).throw(
+            ValueError("generic boom"))
+        try:
+            result = BenchmarkProblems._generate_single_solution(
+                perm=perm,
+                problemType=ptype,
+                constantParams={},
+                assembler=None,
+                debugConfig=cfg,
+                isaInfoMap=isaInfoMap,
+            )
+            assert result is None
+            captured = capsys.readouterr()
+            assert "Error processing permutation" in captured.out
+        finally:
+            BenchmarkProblems.Solution = orig_solution
+            BenchmarkProblems.validateMIParameters = orig_vmi
