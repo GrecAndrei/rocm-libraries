@@ -794,7 +794,6 @@ std::vector<unsigned int> compute_final_grid(const std::vector<unsigned int>& mp
     return final_grid;
 }
 
-int  n_hip_failures     = 0;
 bool skip_runtime_fails = false;
 
 // params_t is a type of container of parameter structs derviced from
