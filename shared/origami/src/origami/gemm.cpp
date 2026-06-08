@@ -1610,21 +1610,18 @@ double compute_memory_latency(const problem_t& problem,
   const double cus_d  = static_cast<double>(num_active_cus);
   const double n_cu_d = static_cast<double>(hardware.N_CU);
 
-  const bool a_nontemporal = nt_a;
-  const bool b_nontemporal = nt_b;
-
-  double Ld_A_to_l2   = a_nontemporal ? Ld_A_total : (1.0 - H_mem_l1_A) * Ld_A_total;
-  double Ld_B_to_l2   = b_nontemporal ? Ld_B_total : (1.0 - H_mem_l1_B) * Ld_B_total;
-  double Ld_A_mall    = a_nontemporal         ? Ld_A_total
+  double Ld_A_to_l2   = nt_a ? Ld_A_total : (1.0 - H_mem_l1_A) * Ld_A_total;
+  double Ld_B_to_l2   = nt_b ? Ld_B_total : (1.0 - H_mem_l1_B) * Ld_B_total;
+  double Ld_A_mall    = nt_a                  ? Ld_A_total
                         : hardware.has_MALL() ? (1.0 - H_mem_l2_A) * Ld_A_to_l2
                                               : 0.0;
-  double Ld_B_mall    = b_nontemporal         ? Ld_B_total
+  double Ld_B_mall    = nt_b                  ? Ld_B_total
                         : hardware.has_MALL() ? (1.0 - H_mem_l2_B) * Ld_B_to_l2
                                               : 0.0;
   double Ld_A_dram_in = hardware.has_MALL() ? Ld_A_mall : Ld_A_to_l2;
   double Ld_B_dram_in = hardware.has_MALL() ? Ld_B_mall : Ld_B_to_l2;
-  double Ld_A_dram    = a_nontemporal ? Ld_A_total : (1.0 - H_mem_mall_A) * Ld_A_dram_in;
-  double Ld_B_dram    = b_nontemporal ? Ld_B_total : (1.0 - H_mem_mall_B) * Ld_B_dram_in;
+  double Ld_A_dram    = nt_a ? Ld_A_total : (1.0 - H_mem_mall_A) * Ld_A_dram_in;
+  double Ld_B_dram    = nt_b ? Ld_B_total : (1.0 - H_mem_mall_B) * Ld_B_dram_in;
 
   double L_mem_l2 = 0.0, L_mem_mall = 0.0, L_mem_dram = 0.0;
 
@@ -1632,36 +1629,25 @@ double compute_memory_latency(const problem_t& problem,
     auto safe_lat = [](double bytes, double bw) -> double {
       return (bw > 1e-6) ? (bytes / bw) : 0.0;
     };
-    auto vw_eff = [&](mem_vector_width_t vw) -> double {
-      switch (vw) {
-        case mem_vector_width_t::Bytes2:  return heuristic.vw_efficiency_bytes2;
-        case mem_vector_width_t::Bytes4:  return heuristic.vw_efficiency_bytes4;
-        case mem_vector_width_t::Bytes8:  return heuristic.vw_efficiency_bytes8;
-        case mem_vector_width_t::Bytes16: return heuristic.vw_efficiency_bytes16;
-        case mem_vector_width_t::Count:   break;
-      }
-      return 1.0;
+    // Bandwidth for an operand's vector width at the given number of active CUs.
+    auto bw = [](const hardware_t::bw_coef_array_t& arr, mem_vector_width_t vw, double cus) {
+      return hardware_t::eval_bw(arr[static_cast<size_t>(vw)], cus);
     };
-    const double eff_a = vw_eff(vw_a);
-    const double eff_b = vw_eff(vw_b);
+    // L2 is XCD-local: its bandwidth is driven by the CUs sharing one L2 (per-XCD active
+    // CUs), not the device-wide total that drives the global MALL/HBM levels.
+    const double l2_cus = cus_d / static_cast<double>(hardware.NUM_XCD);
 
-    double l2_bw_a =
-        hardware_t::eval_bw(hardware.l2_bw_read[static_cast<size_t>(vw_a)], cus_d) * eff_a;
-    double l2_bw_b =
-        hardware_t::eval_bw(hardware.l2_bw_read[static_cast<size_t>(vw_b)], cus_d) * eff_b;
-    L_mem_l2 = safe_lat(Ld_A_to_l2, l2_bw_a) + safe_lat(Ld_B_to_l2, l2_bw_b);
+    double l2_bw_a = bw(hardware.l2_bw_read, vw_a, l2_cus);
+    double l2_bw_b = bw(hardware.l2_bw_read, vw_b, l2_cus);
+    L_mem_l2       = safe_lat(Ld_A_to_l2, l2_bw_a) + safe_lat(Ld_B_to_l2, l2_bw_b);
 
-    double mall_bw_a =
-        hardware_t::eval_bw(hardware.mall_bw_read[static_cast<size_t>(vw_a)], cus_d) * eff_a;
-    double mall_bw_b =
-        hardware_t::eval_bw(hardware.mall_bw_read[static_cast<size_t>(vw_b)], cus_d) * eff_b;
-    L_mem_mall = safe_lat(Ld_A_mall, mall_bw_a) + safe_lat(Ld_B_mall, mall_bw_b);
+    double mall_bw_a = bw(hardware.mall_bw_read, vw_a, cus_d);
+    double mall_bw_b = bw(hardware.mall_bw_read, vw_b, cus_d);
+    L_mem_mall       = safe_lat(Ld_A_mall, mall_bw_a) + safe_lat(Ld_B_mall, mall_bw_b);
 
-    double hbm_bw_a =
-        hardware_t::eval_bw(hardware.hbm_bw_read[static_cast<size_t>(vw_a)], cus_d) * eff_a;
-    double hbm_bw_b =
-        hardware_t::eval_bw(hardware.hbm_bw_read[static_cast<size_t>(vw_b)], cus_d) * eff_b;
-    L_mem_dram = safe_lat(Ld_A_dram, hbm_bw_a) + safe_lat(Ld_B_dram, hbm_bw_b);
+    double hbm_bw_a = bw(hardware.hbm_bw_read, vw_a, cus_d);
+    double hbm_bw_b = bw(hardware.hbm_bw_read, vw_b, cus_d);
+    L_mem_dram      = safe_lat(Ld_A_dram, hbm_bw_a) + safe_lat(Ld_B_dram, hbm_bw_b);
     L_mem_dram += heuristic.main_memory_load_latency;
   } else {
     constexpr auto vw_f4 = static_cast<size_t>(mem_vector_width_t::Bytes16);
@@ -1716,8 +1702,8 @@ double compute_memory_latency(const problem_t& problem,
                                             H_mem_mall_B,
                                             Ld_A_total,
                                             Ld_B_total,
-                                            !a_nontemporal,
-                                            !b_nontemporal);
+                                            !nt_a,
+                                            !nt_b);
     OLOG_DEBUG("H_mem_l1: " << H_mem_l1 << " H_mem_l2: " << H_mem_l2
                             << " H_mem_mall: " << H_mem_mall);
     OLOG_DEBUG("H_mem_l1_A: " << H_mem_l1_A << " H_mem_l1_B: " << H_mem_l1_B);
@@ -1800,14 +1786,16 @@ double compute_epilogue_latency(const problem_t& problem,
   const size_t total_mfmas =
       math::safe_ceil_div(MT_M, config.mi.m) * math::safe_ceil_div(MT_N, config.mi.n);
   constexpr size_t BYTES_PER_VECTORIZED_STORE = 16;
-  constexpr size_t THREADS_PER_WAVE           = 64;
+  const size_t THREADS_PER_WAVE               = hardware.wavefront_size;
   constexpr size_t WORKSPACE_BYTES_PER_ELEM   = 4;
   const size_t elements_per_vectorized_store  = BYTES_PER_VECTORIZED_STORE / d_bytes;
   const size_t epilogue_cl_bytes              = hardware.cache_lines.epilogue;
   const size_t d_bytes_int_for_cl = std::max(static_cast<size_t>(std::ceil(d_bytes)), size_t{1});
   const size_t elements_per_cache_line = math::safe_ceil_div(epilogue_cl_bytes, d_bytes_int_for_cl);
-  const bool tile_aligned              = (MT_M % elements_per_cache_line == 0);
-  const bool m_edge_aligned            = (M % elements_per_cache_line == 0);
+  // Alignment penalty for cache-unaligned stores: when the output leading dimension
+  // (M elements) is not a multiple of the cache line, row stores straddle cache-line
+  // boundaries. This is a property of the write address, independent of which tile.
+  const double alignment_penalty = (M % elements_per_cache_line != 0) ? 1.1 : 1.0;
 
   // Per-CU write bandwidth: total write BW shared among all writers
   // During epilogue store, ALL active WGs write simultaneously:
@@ -1847,15 +1835,10 @@ double compute_epilogue_latency(const problem_t& problem,
     // Split-K WGs write partials as f32 (4 bytes) to workspace, not d_dtype.
     size_t store_elem_bytes =
         (splitting_factor > 1 && !is_parallel_reduction) ? WORKSPACE_BYTES_PER_ELEM : d_bytes;
-    double store_bytes             = static_cast<double>(tile_m) * tile_n * store_elem_bytes;
-    double store_scale             = is_scalar_path ? heuristic.epilogue_scalar_store_penalty : 1.0;
-    const bool this_tile_aligned   = (tile_m == MT_M) ? tile_aligned : m_edge_aligned;
-    const double alignment_penalty = this_tile_aligned ? 1.0 : 1.1;
+    double store_bytes = static_cast<double>(tile_m) * tile_n * store_elem_bytes;
+    double store_scale = is_scalar_path ? heuristic.epilogue_scalar_store_penalty : 1.0;
 
     double L_store = (store_bytes * store_scale * alignment_penalty) / per_cu_store_bw;
-    if (hardware.uses_absolute_bw) {
-      L_store *= heuristic.epilogue_store_drain_cycles;
-    }
 
     // 4) Per-tile K-split reduction (in-kernel: spinlock/tree/atomic)
     // After all WGs write partials, only the finishing WGs (one per output tile) are active.
@@ -2077,26 +2060,26 @@ double compute_parallel_reduction_latency(const problem_t& problem,
   const size_t splitting_factor = context.splitting_factor;
   const double d_bytes          = context.d_bytes;
 
-  // Each thread processes VW output elements.
-  const size_t d_bytes_int = std::max(static_cast<size_t>(std::ceil(d_bytes)), size_t{1});
-  const size_t VW          = std::max(static_cast<size_t>(1), 4 / d_bytes_int);
-  constexpr size_t POSTGSU_THREADS_PER_WG = 256;
-  constexpr size_t POSTGSU_WAVEFRONT_SIZE = 64;
-  constexpr size_t POSTGSU_COMPUTE_BYTES  = 4;
-  const size_t total_wgs  = math::safe_ceil_div(output_elements, POSTGSU_THREADS_PER_WG * VW);
+  // Each thread processes VW output elements. PostGSU launches with the same write
+  // vector width as the GEMM kernel, so use the kernel's gwvw_d rather than a guess.
+  const size_t d_bytes_int    = std::max(static_cast<size_t>(std::ceil(d_bytes)), size_t{1});
+  const size_t VW             = std::max(static_cast<size_t>(1), static_cast<size_t>(config.gwvw_d));
+  constexpr size_t POSTGSU_COMPUTE_BYTES = 4;  // partials are stored as f32 in workspace
+  const size_t threads_per_wg = hardware.postgsu_threads_per_wg;
+  const size_t total_wgs  = math::safe_ceil_div(output_elements, threads_per_wg * VW);
   const size_t active_wgs = std::min(total_wgs, hardware.N_CU);
   const size_t timesteps  = math::safe_ceil_div(total_wgs, hardware.N_CU);
 
-  // Bandwidth based on occupancy of the reduction kernel
-  // Assuming data resides in MALL.
+  // Bandwidth based on occupancy of the reduction kernel; data assumed to reside in MALL.
+  // Read pulls f32 partials (VW x 4B); write stores d_dtype output (VW x d_bytes).
   double read_bw, write_bw;
   if (hardware.uses_absolute_bw) {
-    read_bw =
-        hardware_t::eval_bw(hardware.mall_bw_read[static_cast<size_t>(mem_vector_width_t::Bytes4)],
-                            static_cast<double>(active_wgs));
-    write_bw =
-        hardware_t::eval_bw(hardware.hbm_bw_write[static_cast<size_t>(mem_vector_width_t::Bytes4)],
-                            static_cast<double>(active_wgs));
+    const auto read_vw  = bytes_to_vw(VW * POSTGSU_COMPUTE_BYTES);
+    const auto write_vw = bytes_to_vw(VW * d_bytes_int);
+    read_bw  = hardware_t::eval_bw(hardware.mall_bw_read[static_cast<size_t>(read_vw)],
+                                   static_cast<double>(active_wgs));
+    write_bw = hardware_t::eval_bw(hardware.hbm_bw_write[static_cast<size_t>(write_vw)],
+                                   static_cast<double>(active_wgs));
   } else {
     read_bw  = hardware.mem2_perf_ratio * compute_mem_bw_from_occupancy(hardware, active_wgs);
     write_bw = hardware.mem3_perf_ratio * compute_mem_bw_from_occupancy(hardware, active_wgs);
@@ -2107,7 +2090,7 @@ double compute_parallel_reduction_latency(const problem_t& problem,
   // Total data movement per timestep:
   //   Read:  active_wgs × threads_per_wg × VW × splitting_factor × compute_bytes
   //   Write: active_wgs × threads_per_wg × VW × d_bytes
-  double elements_per_ts    = static_cast<double>(active_wgs) * POSTGSU_THREADS_PER_WG * VW;
+  double elements_per_ts    = static_cast<double>(active_wgs) * threads_per_wg * VW;
   double read_bytes_per_ts  = elements_per_ts * splitting_factor * POSTGSU_COMPUTE_BYTES;
   double write_bytes_per_ts = elements_per_ts * d_bytes;
 
@@ -2118,7 +2101,7 @@ double compute_parallel_reduction_latency(const problem_t& problem,
   // All 64 lanes in a wavefront execute in parallel, but each WG processes
   // its own slice serially.
   double L_acc = static_cast<double>(splitting_factor - 1) * elements_per_ts /
-                 (active_wgs * POSTGSU_WAVEFRONT_SIZE);
+                 (active_wgs * hardware.wavefront_size);
 
   double L_total =
       heuristic.postgsu_kernel_launch_overhead + (L_read + L_acc + L_write) * timesteps;
@@ -2208,26 +2191,6 @@ double compute_total_latency(const problem_t& problem,
 
   // 3) Compute latency for all timesteps with linear scaling
   double total_latency = L_timestep * context.num_timesteps;
-
-  // 3a) Edge-padding penalty: when the chosen MT_M / MT_N wastes a large
-  // fraction of the edge tile (problem dim isn't a near-multiple of the tile),
-  // penalize the total latency. The bench shows kernels with high edge-waste
-  // run materially slower than the model expects (excess wave inefficiency,
-  // bounds-check cost on partial tiles).
-  if (context.heuristic.edge_padding_penalty != 0.0) {
-    auto waste = [](size_t dim, size_t tile) -> double {
-      if (dim == 0 || tile == 0) return 0.0;
-      const size_t rem = dim % tile;
-      if (rem == 0) return 0.0;
-      return 1.0 - static_cast<double>(rem) / static_cast<double>(tile);
-    };
-    const double w_m = waste(problem.size.m, config.mt.m);
-    const double w_n = waste(problem.size.n, config.mt.n);
-    const double w   = std::max(w_m, w_n);
-    if (w > 0.5) {
-      total_latency *= (1.0 + context.heuristic.edge_padding_penalty * w);
-    }
-  }
 
   //  4) Add parallel reduction kernel cost (separate kernel launch, 0 if not parallel)
   double L_parallel_reduce = compute_parallel_reduction_latency(problem, hardware, config, context);
