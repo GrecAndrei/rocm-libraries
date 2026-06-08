@@ -79,12 +79,4 @@ __all__ = [
     "hip_stream_synchronize",
     "hip_device_synchronize",
     "hip_get_device_count",
-    "hipEventCreate",
-    "hipEventDestroy",
-    "hipEventRecord",
-    "hipEventSynchronize",
-    "hipEventElapsedTime",
-    "hipStreamSynchronize",
-    "hipDeviceSynchronize",
-    "hipGetDeviceCount",
 ]
