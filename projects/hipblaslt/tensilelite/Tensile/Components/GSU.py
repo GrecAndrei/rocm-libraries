@@ -993,7 +993,10 @@ class GSUOn(GSU):
             module.addComment1("edge=%d, allocate %u sgpr. perBatchTmpS=%u perBatchMaskS=%u perElementMaskS=%u elementsPerBatch=%u" %
                     (edgeI, numSgprs, ss.cfg.numTempSgprPerBatch, ss.cfg.numMaskSgprPerBatch, ss.cfg.numMaskSgprPerElement, numElementsPerBatch))
 
-            with writer.allocTmpSgpr(numSgprs, 2) as tmpSgpr:
+            # GSU code below needs both tmpSgpr.idx (storeOffsetSgpr) and
+            # tmpSgpr.idx+1 (loadOffsetSgpr), so reserve at least 2 sgprs.
+            allocNumSgprs = max(numSgprs, 2)
+            with writer.allocTmpSgpr(allocNumSgprs, 2) as tmpSgpr:
                 elementSgprs = tmpSgpr.idx + ss.cfg.numTempSgprPerBatch
                 codeAccVgprRead = deepcopy(writer.codes.accVgprRead) if writer.states.serializedStore else None
                 codeAccVgprWrite = deepcopy(writer.codes.accVgprWrite) if writer.states.serializedStore else None
