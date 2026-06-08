@@ -2621,7 +2621,7 @@ class KernelWriter(metaclass=abc.ABCMeta):
     # tile assignments
     if not kernel["UseSubtileImpl"]:
       #TODO: TDM wave separated
-      if tdmA and tdmB and prod(kernel["MIWaveGroup"]) > 1:
+      if tdmA and tdmB and kernel["NumWaves"] > 1:
         module.add(self.initTDMDescriptorWaveSeparated(kernel, tensorParametersA, tensorParametersB))
         if kernel["ProblemType"]["MXBlockA"] and kernel["ProblemType"]["MXBlockB"]:
           module.add(self.initTDMDescriptorWaveSeparated(kernel, tensorParametersA["MX"], tensorParametersB["MX"]))
@@ -2754,7 +2754,7 @@ class KernelWriter(metaclass=abc.ABCMeta):
       if kernel["Multicast"] and kernel["TDMInst"] != 0:
         tdmA: bool = kernel["enableTDMA"]
         tdmB: bool = kernel["enableTDMB"]
-        if tdmA and tdmB and prod(kernel["MIWaveGroup"]) > 1:
+        if tdmA and tdmB and kernel["NumWaves"] > 1:
           module.add(self.undefineSgpr("MulticastMask"))
         else:
           module.add(self.undefineSgpr("MulticastMaskA"))
@@ -2836,7 +2836,7 @@ class KernelWriter(metaclass=abc.ABCMeta):
           module.add(self.graAddresses(kernel, tensorParametersB))
 
       # workgroup SGPRs no longer needed
-      if not tdmA or prod(kernel["MIWaveGroup"]) < 2:
+      if not tdmA or kernel["NumWaves"] < 2:
         module.add(self.removeGROffsetsVariableSgprsFromPool(kernel))
 
       # Final offsets A(MXSA)
@@ -2870,7 +2870,7 @@ class KernelWriter(metaclass=abc.ABCMeta):
       module.add(gsuComponent.setupNewTile(self, kernel, tensorParametersA, tensorParametersB, tPM))
 
       #TODO: TDM wave separated
-      if tdmA and tdmB and prod(kernel["MIWaveGroup"]) > 1:
+      if tdmA and tdmB and kernel["NumWaves"] > 1:
         module.add(self.tdmSetupIncrementWaveSeparated(kernel, tensorParametersA, tensorParametersB))
 
         if kernel["ProblemType"]["MXBlockA"] and kernel["ProblemType"]["MXBlockB"]:
@@ -3407,13 +3407,13 @@ class KernelWriter(metaclass=abc.ABCMeta):
             if "MX" in tensorParametersB:
               pointerLWCode.addComment1("local write swap offsets mxsb")
               #TODO: TDM refactor
-              if kernel["enableTDMA"] and kernel["enableTDMB"] and prod(kernel["MIWaveGroup"]) == 1:
+              if kernel["enableTDMA"] and kernel["enableTDMB"] and kernel["NumWaves"] == 1:
                 pointerLWCode.add(self.tdmSwapLdsOffset(kernel, tensorParametersB["MX"]))
               elif not kernel["enableTDMB"] and not kernel["NoLdsWriteCode"]:
                 pointerLWCode.add(self.localWriteSwapOffsets(kernel, expand, tensorParametersB["MX"]))
             if kernel["enableTDMB"]:
               #TODO: TDM refactor
-              if prod(kernel["MIWaveGroup"]) == 1:
+              if kernel["NumWaves"] == 1:
                 pointerLWCode.addComment1("tdm swap offsets b")
                 pointerLWCode.add(self.tdmSwapLdsOffset(kernel, tensorParametersB))
             elif not kernel["NoLdsWriteCode"]:
@@ -4299,13 +4299,13 @@ class KernelWriter(metaclass=abc.ABCMeta):
               pointerLWCode.add(self.localWriteSwapOffsets(kernel, expand, tensorParametersA["MX"]))
           # Swap offsets B(MXSB)
           if kernel["ProblemType"]["MXBlockB"]:
-            if kernel["enableTDMA"] and kernel["enableTDMB"] and prod(kernel["MIWaveGroup"]) == 1:
+            if kernel["enableTDMA"] and kernel["enableTDMB"] and kernel["NumWaves"] == 1:
               pointerLWCode.addComment1("local write swap offsets mxsb")
             elif not kernel["enableTDMB"]:
               pointerLWCode.add(self.localWriteSwapOffsets(kernel, expand, tensorParametersB["MX"]))
           if kernel["enableTDMB"]:
             #TODO: TDM refactor
-            if prod(kernel["MIWaveGroup"]) == 1:
+            if kernel["NumWaves"] == 1:
               pointerLWCode.addComment1("tdm swap offsets b")
               pointerLWCode.add(self.tdmSwapLdsOffset(kernel, tensorParametersB))
           else:
@@ -4934,14 +4934,14 @@ class KernelWriter(metaclass=abc.ABCMeta):
       # Swap local ptrs B(MXSB)
       if "MX" in tensorParametersB:
         module.addComment1("local write swap mxsb")
-        if kernel["enableTDMA"] and kernel["enableTDMB"] and prod(kernel["MIWaveGroup"]) == 1:
+        if kernel["enableTDMA"] and kernel["enableTDMB"] and kernel["NumWaves"] == 1:
           module.add(self.tdmSwapLdsOffset(kernel, tensorParametersB["MX"]))
         elif not kernel["enableTDMB"]:
           module.add(self.localWriteSwapOffsets(kernel, expand, tensorParametersB["MX"]))
 
       if kernel["enableTDMB"]:
         #TODO: TDM refactor
-        if prod(kernel["MIWaveGroup"]) == 1:
+        if kernel["NumWaves"] == 1:
           module.addComment1("TDM swap lds b")
           module.add(self.tdmSwapLdsOffset(kernel, tensorParametersB))
       else:
@@ -5621,7 +5621,7 @@ class KernelWriter(metaclass=abc.ABCMeta):
         module.add(self._syncThreads(kernel, "Barrier before tail TDM loads (WAR hazard with NLL LDS reads)"))
 
       if kernel["enableTDMA"] and kernel["enableTDMB"]:
-        if prod(kernel["MIWaveGroup"]) > 1:
+        if kernel["NumWaves"] > 1:
           module.add(self.resetTDMDescriptorForTailWaveSeparated(kernel, tensorParametersA, tensorParametersB))
           if kernel["ProblemType"]["MXBlockA"] and kernel["ProblemType"]["MXBlockB"]:
             module.add(self.resetTDMDescriptorForTailWaveSeparated(kernel, tensorParametersA["MX"], \
@@ -8519,7 +8519,7 @@ class KernelWriter(metaclass=abc.ABCMeta):
     if kernel["Multicast"]:
       tdmA: bool = kernel["enableTDMA"]
       tdmB: bool = kernel["enableTDMB"]
-      if tdmA and tdmB and prod(kernel["MIWaveGroup"]) > 1:
+      if tdmA and tdmB and kernel["NumWaves"] > 1:
         self.defineSgpr("MulticastMask", 1)
       else:
         self.defineSgpr("MulticastMaskA", 1)
