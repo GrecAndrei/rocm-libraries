@@ -717,6 +717,12 @@ hipsparseStatus_t
                                          HIPMatmulAlgToCuSparseLtMatmulAlg(alg)));
 }
 
+hipsparseStatus_t hipsparseLtMatmulAlgSelectionDestroy(const hipsparseLtMatmulAlgSelection_t* algSelection)
+{
+    return hipCUSPARSEStatusToHIPStatus(
+        cusparseLtMatmulAlgSelectionDestroy((const cusparseLtMatmulAlgSelection_t*)algSelection));
+}
+
 hipsparseStatus_t hipsparseLtMatmulAlgSetAttribute(const hipsparseLtHandle_t*       handle,
                                                    hipsparseLtMatmulAlgSelection_t* algSelection,
                                                    hipsparseLtMatmulAlgAttribute_t  attribute,
