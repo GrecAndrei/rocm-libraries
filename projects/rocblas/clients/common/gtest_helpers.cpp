@@ -30,6 +30,7 @@
 #include <windows.h>
 #define strcasecmp(A, B) _stricmp(A, B)
 #else
+#include <execinfo.h>
 #include <pthread.h>
 #include <unistd.h>
 #endif
@@ -88,6 +89,20 @@ static thread_local struct
     volatile sig_atomic_t signal;
 } t_handler;
 
+static const bool abort_on_fatal_signal = [] {
+    const char* env = getenv("ROCBLAS_TEST_ABORT_ON_FATAL_SIGNAL");
+    return env ? !(env[0] == '0' && env[1] == '\0') : true;
+}();
+
+#ifndef WIN32
+static void rocblas_test_dump_backtrace()
+{
+    void*     frames[64];
+    const int n = backtrace(frames, sizeof(frames) / sizeof(frames[0]));
+    backtrace_symbols_fd(frames, n, STDERR_FILENO);
+}
+#endif
+
 // Signal handler (must have external "C" linkage)
 extern "C" void rocblas_test_signal_handler(int sig)
 {
@@ -108,6 +123,9 @@ extern "C" void rocblas_test_signal_handler(int sig)
                  << ::testing::UnitTest::GetInstance()->current_test_info()->name() << std::endl;
 
 #ifndef WIN32
+    if(abort_on_fatal_signal)
+        rocblas_test_dump_backtrace();
+
     // If this is an alarm timeout, we abort
     if(sig == SIGALRM)
     {
@@ -145,6 +163,9 @@ void rocblas_test_sigaction()
     // Catch SIGALRM and synchronous signals
     for(int sig : {SIGALRM, SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGSEGV})
         sigaction(sig, &act, nullptr);
+
+    void* frames[1];
+    (void)backtrace(frames, 1);
 #else
     for(int sig : {SIGABRT, SIGFPE, SIGILL, SIGINT, SIGSEGV, SIGTERM})
         signal(sig, rocblas_test_signal_handler);
@@ -182,10 +203,21 @@ void catch_signals_and_exceptions_as_failures(std::function<void()> test, bool s
     if(sigsetjmp(t_handler.sigjmp_buf, true))
     {
 #if(__GLIBC__ < 2) || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 32)
-        FAIL() << "Received " << sys_siglist[t_handler.signal] << " signal";
+        const char* signal_name = sys_siglist[t_handler.signal];
 #else
-        FAIL() << "Received " << sigdescr_np(t_handler.signal) << " signal";
+        const char* signal_name = sigdescr_np(t_handler.signal);
 #endif
+        if(abort_on_fatal_signal)
+        {
+            ADD_FAILURE() << "Received " << signal_name
+                          << " signal -- aborting test process (state is unrecoverable)";
+            t_handler.enabled = false;
+            rocblas_abort();
+        }
+        else
+        {
+            FAIL() << "Received " << signal_name << " signal";
+        }
     }
 #else
     if(setjmp(t_handler.sigjmp_buf))
