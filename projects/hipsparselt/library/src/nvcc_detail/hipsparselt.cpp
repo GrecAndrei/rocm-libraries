@@ -2,7 +2,7 @@
  *
  * MIT License
  *
- * Copyright (c) 2022-2025 Advanced Micro Devices, Inc.
+ * Copyright (c) 2022-2026 Advanced Micro Devices, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -460,10 +460,20 @@ cusparseLtSplitKMode_t HIPSplitKModeToCuSparseLtSplitKMode(hipsparseLtSplitKMode
 {
     switch(mode)
     {
+    case HIPSPARSELT_INVALID_MODE:
+        return CUSPARSELT_INVALID_MODE;
     case HIPSPARSELT_SPLIT_K_MODE_ONE_KERNEL:
         return CUSPARSELT_SPLIT_K_MODE_ONE_KERNEL;
     case HIPSPARSELT_SPLIT_K_MODE_TWO_KERNELS:
         return CUSPARSELT_SPLIT_K_MODE_TWO_KERNELS;
+    case HIPSPARSELT_HEURISTIC:
+        return CUSPARSELT_HEURISTIC;
+    case HIPSPARSELT_DATAPARALLEL:
+        return CUSPARSELT_DATAPARALLEL;
+    case HIPSPARSELT_SPLITK:
+        return CUSPARSELT_SPLITK;
+    case HIPSPARSELT_STREAMK:
+        return CUSPARSELT_STREAMK;
     default:
         throw HIPSPARSE_STATUS_NOT_SUPPORTED;
     }
@@ -473,10 +483,20 @@ hipsparseLtSplitKMode_t CuSparseLtSplitKModeToHIPSplitKMode(cusparseLtSplitKMode
 {
     switch(mode)
     {
+    case CUSPARSELT_INVALID_MODE:
+        return HIPSPARSELT_INVALID_MODE;        
     case CUSPARSELT_SPLIT_K_MODE_ONE_KERNEL:
         return HIPSPARSELT_SPLIT_K_MODE_ONE_KERNEL;
     case CUSPARSELT_SPLIT_K_MODE_TWO_KERNELS:
         return HIPSPARSELT_SPLIT_K_MODE_TWO_KERNELS;
+    case CUSPARSELT_HEURISTIC:
+        return HIPSPARSELT_HEURISTIC;
+    case CUSPARSELT_DATAPARALLEL:
+        return HIPSPARSELT_DATAPARALLEL;
+    case CUSPARSELT_SPLITK:
+        return HIPSPARSELT_SPLITK;
+    case CUSPARSELT_STREAMK:
+        return HIPSPARSELT_STREAMK;        
     default:
         throw HIPSPARSE_STATUS_NOT_SUPPORTED;
     }

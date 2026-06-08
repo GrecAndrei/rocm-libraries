@@ -261,6 +261,8 @@ rocsparselt_split_k_mode HIPSplitKModeToRocSparseLtSplitKMode(hipsparseLtSplitKM
 {
     switch(mode)
     {
+    case HIPSPARSELT_INVALID_MODE:
+        return rocsparselt_invalid_mode;
     case HIPSPARSELT_SPLIT_K_MODE_ONE_KERNEL:
         return rocsparselt_splik_k_mode_one_kernel;
     case HIPSPARSELT_SPLIT_K_MODE_TWO_KERNELS:
