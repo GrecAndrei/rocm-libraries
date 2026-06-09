@@ -34,8 +34,8 @@ What it does (real):
       ``export_values()`` (e.g. ``rocisa.enum.DWORD`` is accessible).
     - Coverage: ``RegisterType``, ``DataTypeEnum``,
       ``SignatureValueKind``, ``InstType``, ``SelectBit``, ``UnusedBit``,
-      ``CacheScope``, ``CvtType``, ``ArgType``, ``HighBitSel``,
-      ``RoundType``, ``SaturateCastType``.
+      ``CacheScope``, ``TemporalHint``, ``NonVolatile``, ``CvtType``,
+      ``ArgType``, ``HighBitSel``, ``RoundType``, ``SaturateCastType``.
 
 Not yet done:
     - None. Every enum is real.
@@ -89,7 +89,7 @@ _InstType_values = [
     "INST_F6_F8", "INST_F8_B6", "INST_B6_F8", "INST_B8_F4",
     "INST_F4_B8", "INST_B6_F4", "INST_F4_B6", "INST_B8_F6",
     "INST_F6_B8", "INST_B8_B6", "INST_B6_B8", "INST_CVT",
-    "INST_MACRO", "INST_NOTYPE",
+    "INST_MACRO", "INST_B192", "INST_NOTYPE",
 ]
 InstType = make_dummy_enum(f"{_P}.InstType", _InstType_values)
 export_enum_values(globals(), InstType, _InstType_values)
@@ -111,6 +111,19 @@ export_enum_values(globals(), UnusedBit, _UnusedBit_values)
 _CacheScope_values = ["SCOPE_NONE", "SCOPE_CU", "SCOPE_SE", "SCOPE_DEV", "SCOPE_SYS"]
 CacheScope = make_dummy_enum(f"{_P}.CacheScope", _CacheScope_values)
 export_enum_values(globals(), CacheScope, _CacheScope_values)
+
+
+_TemporalHint_values = [
+    "TH_NONE", "TH_RT", "TH_NT", "TH_HT", "TH_LU",
+    "TH_NT_RT", "TH_RT_NT", "TH_NT_HT", "TH_RESERVED", "TH_WB", "TH_NT_WB",
+]
+TemporalHint = make_dummy_enum(f"{_P}.TemporalHint", _TemporalHint_values)
+export_enum_values(globals(), TemporalHint, _TemporalHint_values)
+
+
+_NonVolatile_values = ["NV_NONE", "NV"]
+NonVolatile = make_dummy_enum(f"{_P}.NonVolatile", _NonVolatile_values)
+export_enum_values(globals(), NonVolatile, _NonVolatile_values)
 
 
 _CvtType_values = [
