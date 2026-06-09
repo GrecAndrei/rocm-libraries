@@ -98,6 +98,69 @@ inline MUBUFScope parseMUBUFScope(std::string_view scope) {
     return MUBUFScope::SCOPE_NONE;
 }
 
+// gfx1250 Temporal Hint (th:) -- mirrors rocisa::TemporalHint encoding. LOAD and
+// STORE share the TH[2:0] field but assemble TH3/TH7 under different names.
+enum class TemporalHint : int {
+    TH_NONE     = -1,
+    TH_RT       = 0,
+    TH_NT       = 1,
+    TH_HT       = 2,
+    TH_LU       = 3,
+    TH_NT_RT    = 4,
+    TH_RT_NT    = 5,
+    TH_NT_HT    = 6,
+    TH_RESERVED = 7
+};
+
+inline bool hasTemporalHint(TemporalHint th) {
+    return th != TemporalHint::TH_NONE;
+}
+
+inline std::string toString(TemporalHint th, bool isStore) {
+    const std::string prefix = isStore ? "TH_STORE_" : "TH_LOAD_";
+    switch (th) {
+        case TemporalHint::TH_RT:       return prefix + "RT";
+        case TemporalHint::TH_NT:       return prefix + "NT";
+        case TemporalHint::TH_HT:       return prefix + "HT";
+        case TemporalHint::TH_LU:       return isStore ? prefix + "WB" : prefix + "LU";
+        case TemporalHint::TH_NT_RT:    return prefix + "NT_RT";
+        case TemporalHint::TH_RT_NT:    return prefix + "RT_NT";
+        case TemporalHint::TH_NT_HT:    return prefix + "NT_HT";
+        case TemporalHint::TH_RESERVED: return isStore ? prefix + "NT_WB" : prefix + "RESERVED";
+        default:                        return "";
+    }
+}
+
+// Parse a th: token (LOAD or STORE prefix) back to the shared TH encoding.
+// Compound suffixes are checked first so "NT_RT" is not shadowed by "RT".
+inline TemporalHint parseTemporalHint(std::string_view s) {
+    auto endsWith = [&](std::string_view suf) {
+        return s.size() >= suf.size() && s.substr(s.size() - suf.size()) == suf;
+    };
+    if (s.empty()) return TemporalHint::TH_NONE;
+    if (endsWith("NT_RT")) return TemporalHint::TH_NT_RT;
+    if (endsWith("RT_NT")) return TemporalHint::TH_RT_NT;
+    if (endsWith("NT_HT")) return TemporalHint::TH_NT_HT;
+    if (endsWith("NT_WB")) return TemporalHint::TH_RESERVED;
+    if (endsWith("RESERVED")) return TemporalHint::TH_RESERVED;
+    if (endsWith("RT")) return TemporalHint::TH_RT;
+    if (endsWith("NT")) return TemporalHint::TH_NT;
+    if (endsWith("HT")) return TemporalHint::TH_HT;
+    if (endsWith("LU")) return TemporalHint::TH_LU;
+    if (endsWith("WB")) return TemporalHint::TH_LU;
+    return TemporalHint::TH_NONE;
+}
+
+// gfx1250 Non-Volatile (nv) modifier -- mirrors rocisa::NonVolatile.
+enum class NonVolatile : uint8_t {
+    NV_NONE = 0,
+    NV      = 1
+};
+
+inline std::string_view nonVolatileToString(NonVolatile nv) {
+    return nv == NonVolatile::NV ? "nv" : "";
+}
+
 // 9-bit DPP permutation control selector (matches the hardware dpp_ctrl field).
 // Three encoding shapes:
 //   singleton     — the named value IS the encoding   (e.g. ROW_MIRROR = 0x140)
@@ -308,7 +371,9 @@ struct MUBUFModifiers : public TypedModifier<MUBUFModifiers> {
     MUBUFModifiers(bool offen = false, int offset12 = 0, bool glc = false, bool slc = false,
                    bool nt = false, bool lds = false, bool isStore = false,
                    bool hasMUBUFConst = false, bool hasGLCModifier = false,
-                   bool hasSC0Modifier = false, MUBUFScope scope = MUBUFScope::SCOPE_NONE)
+                   bool hasSC0Modifier = false, MUBUFScope scope = MUBUFScope::SCOPE_NONE,
+                   TemporalHint th = TemporalHint::TH_NONE, NonVolatile nv = NonVolatile::NV_NONE,
+                   bool hasTHModifier = false, bool hasNVModifier = false)
         : TypedModifier<MUBUFModifiers>(),
           offset12(offset12),
           offen(offen),
@@ -320,7 +385,11 @@ struct MUBUFModifiers : public TypedModifier<MUBUFModifiers> {
           hasMUBUFConst(hasMUBUFConst),
           hasGLCModifier(hasGLCModifier),
           hasSC0Modifier(hasSC0Modifier),
-          scope(scope) {}
+          scope(scope),
+          th(th),
+          nv(nv),
+          hasTHModifier(hasTHModifier),
+          hasNVModifier(hasNVModifier) {}
 
     int offset12;
     uint32_t offen : 1;
@@ -333,6 +402,10 @@ struct MUBUFModifiers : public TypedModifier<MUBUFModifiers> {
     uint32_t hasGLCModifier : 1;
     uint32_t hasSC0Modifier : 1;
     MUBUFScope scope;
+    TemporalHint th;
+    NonVolatile nv;
+    uint32_t hasTHModifier : 1;
+    uint32_t hasNVModifier : 1;
 };
 
 // Carries just the cache scope token for SOPP-format memory fences such as

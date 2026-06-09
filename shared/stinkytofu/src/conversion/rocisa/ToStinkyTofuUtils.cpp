@@ -97,15 +97,29 @@ stinkytofu::MUBUFScope convertMUBUFScope(rocisa::CacheScope scope) {
     }
 }
 
+// rocisa and StinkyTofu TemporalHint / NonVolatile share identical integer
+// encodings, so a value-preserving cast is sufficient.
+static stinkytofu::TemporalHint convertTemporalHint(rocisa::TemporalHint th) {
+    return static_cast<stinkytofu::TemporalHint>(static_cast<int>(th));
+}
+
+static stinkytofu::NonVolatile convertNonVolatile(rocisa::NonVolatile nv) {
+    return static_cast<stinkytofu::NonVolatile>(static_cast<int>(nv));
+}
+
 stinkytofu::MUBUFModifiers convertMUBUFModifiers(const rocisa::MUBUFModifiers& rocMod,
                                                  const std::map<std::string, int>& asmCaps) {
     bool hasMUBUFConst = asmCaps.count("HasMUBUFConst") && asmCaps.at("HasMUBUFConst");
     bool hasGLCModifier = asmCaps.count("HasGLCModifier") && asmCaps.at("HasGLCModifier");
     bool hasSC0Modifier = asmCaps.count("HasSC0Modifier") && asmCaps.at("HasSC0Modifier");
+    bool hasTHModifier = asmCaps.count("HasTHModifier") && asmCaps.at("HasTHModifier");
+    bool hasNVModifier = asmCaps.count("HasNVModifier") && asmCaps.at("HasNVModifier");
     stinkytofu::MUBUFScope scope = convertMUBUFScope(rocMod.scope);
     return stinkytofu::MUBUFModifiers(rocMod.offen, rocMod.offset12, rocMod.glc, rocMod.slc,
                                       rocMod.nt, rocMod.lds, rocMod.isStore, hasMUBUFConst,
-                                      hasGLCModifier, hasSC0Modifier, scope);
+                                      hasGLCModifier, hasSC0Modifier, scope,
+                                      convertTemporalHint(rocMod.th), convertNonVolatile(rocMod.nv),
+                                      hasTHModifier, hasNVModifier);
 }
 
 /// Returns true when vaddr is the MUBUF "off" keyword.

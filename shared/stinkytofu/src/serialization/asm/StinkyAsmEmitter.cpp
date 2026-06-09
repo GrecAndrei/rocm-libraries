@@ -206,8 +206,16 @@ inline std::ostream& operator<<(std::ostream& os, const MUBUFModifiers& mubufMod
     if (mubufMod.scope != MUBUFScope::SCOPE_NONE) {
         os << " scope:" << toString(mubufMod.scope);
     }
-    if (mubufMod.nt) {
+    // gfx1250 Temporal Hint takes the place of the legacy nt bit. Gate on
+    // hasTHModifier so non-gfx1250 targets keep emitting nt (matches rocisa
+    // container.hpp MUBUFModifiers::toString ordering: scope, then th-else-nt).
+    if (mubufMod.hasTHModifier && hasTemporalHint(mubufMod.th)) {
+        os << " th:" << toString(mubufMod.th, mubufMod.isStore);
+    } else if (mubufMod.nt) {
         os << " nt";
+    }
+    if (mubufMod.hasNVModifier && mubufMod.nv != NonVolatile::NV_NONE) {
+        os << " " << nonVolatileToString(mubufMod.nv);
     }
     if (mubufMod.lds) {
         os << " lds";
