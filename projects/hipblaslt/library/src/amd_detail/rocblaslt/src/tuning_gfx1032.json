@@ -1,0 +1,33 @@
+{
+  "version": "1.0",
+  "architecture": "gfx1032",
+  "description": "Quick tuning for common LLM shapes on RDNA2 (RX 6700 XT / RX 6650 XT)",
+  "tolerance_pct": 15,
+  "entries": [
+    {
+      "match": { "m": 1, "n": 4096, "k": 4096, "transA": "N", "transB": "N", "a_type": "fp16", "b_type": "fp16", "c_type": "fp16", "compute_type": "fp16" },
+      "params": { "gsu": 1, "wgm": 1 },
+      "description": "Single token decode (prefill=1)"
+    },
+    {
+      "match": { "m": 128, "n": 4096, "k": 4096, "transA": "N", "transB": "N", "a_type": "fp16", "b_type": "fp16", "c_type": "fp16", "compute_type": "fp16" },
+      "params": { "gsu": 2, "wgm": 1 },
+      "description": "Small batch prefill"
+    },
+    {
+      "match": { "m": 4096, "n": 4096, "k": 4096, "transA": "N", "transB": "N", "a_type": "fp16", "b_type": "fp16", "c_type": "fp16", "compute_type": "fp16" },
+      "params": { "gsu": 4, "wgm": 2 },
+      "description": "Large square GEMM (training-like)"
+    },
+    {
+      "match": { "m": 4096, "n": 14336, "k": 4096, "transA": "N", "transB": "N", "a_type": "fp16", "b_type": "fp16", "c_type": "fp16", "compute_type": "fp16" },
+      "params": { "gsu": 4, "wgm": 2 },
+      "description": "LLM FFN up-proj (Llama-style)"
+    },
+    {
+      "match": { "m": 4096, "n": 4096, "k": 14336, "transA": "N", "transB": "N", "a_type": "fp16", "b_type": "fp16", "c_type": "fp16", "compute_type": "fp16" },
+      "params": { "gsu": 4, "wgm": 2 },
+      "description": "LLM FFN down-proj (Llama-style)"
+    }
+  ]
+}

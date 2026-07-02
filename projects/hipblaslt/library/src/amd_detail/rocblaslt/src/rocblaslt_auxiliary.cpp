@@ -41,6 +41,7 @@
 #include <cstring>
 #endif
 
+#include "QuickTuning.hpp"
 #include "UserDrivenTuningParser.hpp"
 #include "definitions.h"
 #include "handle.h"
@@ -58,6 +59,17 @@
 
 #define TO_STR2(x) #x
 #define TO_STR(x) TO_STR2(x)
+
+namespace
+{
+    struct QuickTuningAutoInit
+    {
+        QuickTuningAutoInit()
+        {
+            TensileLite::initQuickTuningFromEnv();
+        }
+    } g_quickTuningAutoInit;
+}
 
 template<typename T>
 void _set_value(void* ptr, T value)

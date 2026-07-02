@@ -75,66 +75,102 @@ namespace TensileLite
         {
 
             std::ifstream file_read(path);
-            std::string   header_line, header;
-            std::string   value_line, value;
+            std::string   line;
             const auto    delim = ',';
 
-            while(std::getline(file_read, header_line))
+            if(!std::getline(file_read, line))
+                return;
+
+            line.erase(0, line.find_first_not_of(" \t\n\r\f\v"));
+
+            // Detect if the first line is a header (contains "transA")
+            bool is_header = (line.find(HeaderFieldToString(HeaderFields::transA)) != std::string::npos);
+
+            std::vector<std::string> header_tokens;
+            if(is_header)
             {
-                // Ignore lines without delimiter
-                header_line.erase(0, header_line.find_first_not_of(" \t\n\r\f\v"));
-                HeaderFields current_field = HeaderFields::transA;
-
-                if(header_line.find(HeaderFieldToString(current_field)) != std::string::npos)
+                std::stringstream ss(line);
+                std::string       token;
+                while(std::getline(ss, token, delim))
                 {
+                    token.erase(0, token.find_first_not_of(" \t\n\r\f\v"));
+                    header_tokens.push_back(token);
+                }
+            }
 
-                    if(std::getline(file_read, value_line))
+            auto process_line = [&](const std::string& data_line) {
+                std::string trimmed = data_line;
+                trimmed.erase(0, trimmed.find_first_not_of(" \t\n\r\f\v"));
+                if(trimmed.empty() || trimmed[0] == '#')
+                    return;
+
+                std::vector<std::string> entries;
+                entries.resize(static_cast<size_t>(HeaderFields::count));
+
+                std::stringstream ss(trimmed);
+                std::string       token;
+                size_t            col = 0;
+                while(std::getline(ss, token, delim))
+                {
+                    token.erase(0, token.find_first_not_of(" \t\n\r\f\v"));
+
+                    if(is_header)
                     {
-                        value_line.erase(0, value_line.find_first_not_of(" \t\n\r\f\v"));
-                        std::vector<std::string> entries{};
-                        entries.reserve(
-                            static_cast<size_t>(static_cast<size_t>(HeaderFields::count)));
-                        std::stringstream header_split(header_line);
-                        std::stringstream value_split(value_line);
-
-                        while(std::getline(header_split, header, delim)
-                              && std::getline(value_split, value, delim))
+                        if(col < header_tokens.size())
                         {
-                            if(header == HeaderFieldToString(current_field))
+                            for(size_t i = 0; i < static_cast<size_t>(HeaderFields::count); i++)
                             {
-                                entries.push_back(value);
-                                current_field = static_cast<HeaderFields>(
-                                    static_cast<int>(current_field) + 1);
-                            }
-
-                            if(current_field == HeaderFields::count)
-                                break;
-                        }
-
-                        auto problemSolution = problemFromEntries(entries);
-
-                        if(problemSolution.second > 0)
-                        {
-                            auto sol_iter       = m_override.find(problemSolution.first);
-                            bool duplicate_find = false;
-
-                            for(auto sol_idx = sol_iter.first; sol_idx != sol_iter.second;
-                                sol_idx++)
-                            {
-                                if(sol_idx->second == problemSolution.second)
+                                if(header_tokens[col] == HeaderFieldToString(static_cast<HeaderFields>(i)))
                                 {
-                                    duplicate_find = true;
+                                    entries[i] = token;
                                     break;
                                 }
                             }
-
-                            if(!duplicate_find)
-                            {
-                                m_override.add(problemSolution);
-                            }
                         }
                     }
+                    else
+                    {
+                        if(col < static_cast<size_t>(HeaderFields::count))
+                        {
+                            entries[col] = token;
+                        }
+                    }
+                    col++;
                 }
+
+                auto problemSolution = problemFromEntries(entries);
+
+                if(problemSolution.second > 0)
+                {
+                    auto sol_iter       = m_override.find(problemSolution.first);
+                    bool duplicate_find = false;
+
+                    for(auto sol_idx = sol_iter.first; sol_idx != sol_iter.second; sol_idx++)
+                    {
+                        if(sol_idx->second == problemSolution.second)
+                        {
+                            duplicate_find = true;
+                            break;
+                        }
+                    }
+
+                    if(!duplicate_find)
+                    {
+                        m_override.add(problemSolution);
+                    }
+                }
+            };
+
+            // If the first line is data (not a header), process it too
+            if(!is_header)
+            {
+                process_line(line);
+            }
+
+            // Process all remaining lines as data
+            while(std::getline(file_read, line))
+            {
+                process_line(line);
             }
         }
     }

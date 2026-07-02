@@ -34,6 +34,7 @@
  *****************************************************************************/
 
 #include "Debug.hpp"
+#include "QuickTuning.hpp"
 #include "include/check_numerics_matrix.hpp"
 #include "rocblaslt-types.h"
 #include "rocblaslt_mat_utils.hpp"
@@ -76,6 +77,45 @@
 #endif
 
 #define INTERNAL_HIPHOSTMEM_SIZE 32768
+
+namespace
+{
+    template <typename T>
+    void applyQuickTuning(T&                                                       problem,
+                          const TensileLite::QuickTuningMap&                        qt,
+                          std::vector<TensileLite::KernelInvocation>&              kernels,
+                          int&                                                      appliedGsu,
+                          int&                                                      appliedWgm)
+    {
+        auto entry = qt.findBestMatch(
+            TensileLite::ProblemOverride(problem.transA(),
+                                          problem.transB(),
+                                          problem.a().dataType(),
+                                          problem.b().dataType(),
+                                          problem.computeInputTypeA(),
+                                          problem.c().dataType(),
+                                          problem.freeSizeA(0),
+                                          problem.freeSizeB(0),
+                                          problem.boundSize(0),
+                                          problem.batchSize(0)));
+        if(entry)
+        {
+            if(entry->gsu && entry->gsu.value() > 0)
+            {
+                appliedGsu = entry->gsu.value();
+            }
+            if(entry->wgm && entry->wgm.value() > 0)
+            {
+                appliedWgm = entry->wgm.value();
+            }
+            std::stringstream ss;
+            ss << "QuickTuning: " << (entry->description.empty() ? "unnamed" : entry->description)
+               << " gsu=" << appliedGsu << " wgm=" << appliedWgm
+               << (entry->exactMatch ? " (exact)" : " (approx)");
+            log_info("applyQuickTuning", ss.str());
+        }
+    }
+}
 
 RocblasltContractionProblem::RocblasltContractionProblem(hipblasOperation_t     trans_a,
                                                          hipblasOperation_t     trans_b,
@@ -3025,6 +3065,8 @@ struct TensileDataGemm
     TensileLite::ContractionInputs             inputs;
     std::vector<TensileLite::KernelInvocation> kernels;
     int                                        algoIndex = std::numeric_limits<int>::max();
+    int                                        quickTuneGsu = 0;
+    int                                        quickTuneWgm = 0;
 };
 
 struct TensileDataGroupedGemm
@@ -3616,6 +3658,16 @@ rocblaslt_status makeArgument(rocblaslt_handle             handle,
                 data->problem.setParams().resetInternalArgs();
             }
 
+            applyQuickTuning(data->problem,
+                             TensileLite::QuickTuningMap::getMap(),
+                             data->kernels,
+                             data->quickTuneGsu,
+                             data->quickTuneWgm);
+            if(data->quickTuneGsu > 0)
+                data->problem.setParams().setGSU(data->quickTuneGsu);
+            if(data->quickTuneWgm > 0)
+                data->problem.setParams().setWgm(data->quickTuneWgm);
+
             // cu-fallback detection
             bool isCUFallback = solution->isFallbackForHW(*hardware);
             if(isCUFallback)
@@ -3670,6 +3722,25 @@ rocblaslt_status makeArgument(rocblaslt_handle             handle,
                 for(size_t i = 0; i < data->problem.gemms.size(); i++)
                 {
                     data->problem.gemms[i].setParams().resetInternalArgs();
+                }
+            }
+
+            {
+                int qgsu = 0, qwgm = 0;
+                applyQuickTuning(data->problem.gemms[0],
+                                 TensileLite::QuickTuningMap::getMap(),
+                                 data->kernels,
+                                 qgsu,
+                                 qwgm);
+                if(qgsu > 0)
+                {
+                    for(size_t i = 0; i < data->problem.gemms.size(); i++)
+                        data->problem.gemms[i].setParams().setGSU(qgsu);
+                }
+                if(qwgm > 0)
+                {
+                    for(size_t i = 0; i < data->problem.gemms.size(); i++)
+                        data->problem.gemms[i].setParams().setWgm(qwgm);
                 }
             }
 

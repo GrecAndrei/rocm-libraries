@@ -36,10 +36,16 @@
 #include <string>
 #include <vector>
 
+namespace TensileLite
+{
+    class QuickTuningMap;
+}
+
 class OverrideSingleton
 {
 public:
     std::string file_path;
+    std::string quickTuneFilePath;
     bool        env_mode = false;
 
     static OverrideSingleton& getInstance()
@@ -267,3 +273,5 @@ namespace std
         }
     };
 } // namespace std
+
+#include "QuickTuning.hpp"
