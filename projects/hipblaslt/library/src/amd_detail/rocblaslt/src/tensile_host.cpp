@@ -34,7 +34,9 @@
  *****************************************************************************/
 
 #include "Debug.hpp"
+#ifdef HIPBLASLT_ENABLE_QUICKTUNING
 #include "QuickTuning.hpp"
+#endif
 #include "include/check_numerics_matrix.hpp"
 #include "rocblaslt-types.h"
 #include "rocblaslt_mat_utils.hpp"
@@ -78,6 +80,7 @@
 
 #define INTERNAL_HIPHOSTMEM_SIZE 32768
 
+#ifdef HIPBLASLT_ENABLE_QUICKTUNING
 namespace
 {
     template <typename T>
@@ -115,7 +118,8 @@ namespace
             log_info("applyQuickTuning", ss.str());
         }
     }
-}
+} // namespace
+#endif // HIPBLASLT_ENABLE_QUICKTUNING
 
 RocblasltContractionProblem::RocblasltContractionProblem(hipblasOperation_t     trans_a,
                                                          hipblasOperation_t     trans_b,
@@ -3065,8 +3069,10 @@ struct TensileDataGemm
     TensileLite::ContractionInputs             inputs;
     std::vector<TensileLite::KernelInvocation> kernels;
     int                                        algoIndex = std::numeric_limits<int>::max();
+#ifdef HIPBLASLT_ENABLE_QUICKTUNING
     int                                        quickTuneGsu = 0;
     int                                        quickTuneWgm = 0;
+#endif
 };
 
 struct TensileDataGroupedGemm
@@ -3658,6 +3664,7 @@ rocblaslt_status makeArgument(rocblaslt_handle             handle,
                 data->problem.setParams().resetInternalArgs();
             }
 
+#ifdef HIPBLASLT_ENABLE_QUICKTUNING
             applyQuickTuning(data->problem,
                              TensileLite::QuickTuningMap::getMap(),
                              data->kernels,
@@ -3667,6 +3674,7 @@ rocblaslt_status makeArgument(rocblaslt_handle             handle,
                 data->problem.setParams().setGSU(data->quickTuneGsu);
             if(data->quickTuneWgm > 0)
                 data->problem.setParams().setWgm(data->quickTuneWgm);
+#endif
 
             // cu-fallback detection
             bool isCUFallback = solution->isFallbackForHW(*hardware);
@@ -3725,6 +3733,7 @@ rocblaslt_status makeArgument(rocblaslt_handle             handle,
                 }
             }
 
+#ifdef HIPBLASLT_ENABLE_QUICKTUNING
             {
                 int qgsu = 0, qwgm = 0;
                 applyQuickTuning(data->problem.gemms[0],
@@ -3743,6 +3752,7 @@ rocblaslt_status makeArgument(rocblaslt_handle             handle,
                         data->problem.gemms[i].setParams().setWgm(qwgm);
                 }
             }
+#endif
 
             // cu-fallback detection
             bool isCUFallback = solution->isFallbackForHW(*hardware);

@@ -90,6 +90,11 @@ if(HIPBLASLT_ENABLE_HOST)
     option(HIPBLASLT_ENABLE_ROCROLLER "Use RocRoller library." ON)
     cmake_dependent_option(HIPBLASLT_ENABLE_MARKER "Use the marker library." ON "NOT WIN32" OFF)
     option(HIPBLASLT_ENABLE_HIPBLAS_DIRECT "Use the hipblas header directly." OFF)
+    # Experimental: QuickTuning lets the runtime override Tensile solution
+    # parameters (GSU/WGM) from a JSON tuning table loaded via
+    # HIPBLASLT_QUICKTUNE_FILE env var. OFF by default — only enable for
+    # experimentation. Not part of the stable public API.
+    option(HIPBLASLT_ENABLE_QUICKTUNING "Enable experimental QuickTuning runtime overrides." OFF)
 endif()
 
 # mxDataGenerator is used by hipblaslt clients and tensilelite client; default OFF on Windows

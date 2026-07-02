@@ -41,7 +41,6 @@
 #include <cstring>
 #endif
 
-#include "QuickTuning.hpp"
 #include "UserDrivenTuningParser.hpp"
 #include "definitions.h"
 #include "handle.h"
@@ -60,6 +59,8 @@
 #define TO_STR2(x) #x
 #define TO_STR(x) TO_STR2(x)
 
+#ifdef HIPBLASLT_ENABLE_QUICKTUNING
+#include "QuickTuning.hpp"
 namespace
 {
     struct QuickTuningAutoInit
@@ -70,6 +71,7 @@ namespace
         }
     } g_quickTuningAutoInit;
 }
+#endif
 
 template<typename T>
 void _set_value(void* ptr, T value)
