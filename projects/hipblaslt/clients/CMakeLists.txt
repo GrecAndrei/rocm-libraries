@@ -18,6 +18,16 @@ add_library(hipblaslt::hipblaslt-clients-common ALIAS hipblaslt-clients-common)
 
 if(HIPBLASLT_ENABLE_BLIS)
     target_link_libraries(hipblaslt-clients-common PUBLIC BLIS::BLIS)
+else()
+    # Fallback: use system cblas for CPU reference when BLIS is unavailable
+    find_library(SYS_CBLAS_LIB NAMES cblas PATHS /usr/lib /usr/lib64)
+    find_path(SYS_CBLAS_INCLUDE NAMES cblas.h PATHS /usr/include)
+    if(SYS_CBLAS_LIB)
+        target_link_libraries(hipblaslt-clients-common PUBLIC ${SYS_CBLAS_LIB})
+        if(SYS_CBLAS_INCLUDE)
+            target_include_directories(hipblaslt-clients-common PUBLIC ${SYS_CBLAS_INCLUDE})
+        endif()
+    endif()
 endif()
 target_link_libraries(hipblaslt-clients-common
     PUBLIC
